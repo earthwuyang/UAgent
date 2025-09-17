@@ -6,6 +6,7 @@ RepoMaster analysis, and multi-modal search into a cohesive workflow system
 
 import asyncio
 import uuid
+import logging
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,7 +17,10 @@ from .meta_agent import MetaAgent, Task, TaskType, TaskStatus, Agent, AgentRole
 from .agent_laboratory import AgentLaboratory, CollaborationPattern, CollaborationSession
 from .ai_scientist import AIScientist, ResearchProject, ResearchPhase
 from .repo_master import RepoMaster, Repository, AnalysisDepth
+from .hierarchical_agents import HierarchicalAgentCoordinator, AgentRole as HierarchicalAgentRole
 from ..utils.multi_modal_search import MultiModalSearchEngine
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowType(Enum):
@@ -76,6 +80,7 @@ class UnifiedOrchestrator:
         self.ai_scientist = AIScientist()
         self.repo_master = RepoMaster()
         self.search_engine = MultiModalSearchEngine()
+        self.hierarchical_coordinator = HierarchicalAgentCoordinator()
 
         # Workflow management
         self.active_workflows: Dict[str, WorkflowResult] = {}
@@ -500,16 +505,16 @@ class UnifiedOrchestrator:
         results = {}
 
         for phase in sequential_phases:
-            print(f"🔬 Executing {phase.value} phase...")
+            logger.info(f"Executing {phase.value} phase")
             phase_result = await self.ai_scientist.execute_research_phase(project_id, phase)
             results[phase.value] = phase_result
 
             # Stop if phase failed
             if phase_result.get("error"):
-                print(f"❌ Phase {phase.value} failed: {phase_result['error']}")
+                logger.error(f"Phase {phase.value} failed: {phase_result['error']}")
                 break
             else:
-                print(f"✅ Phase {phase.value} completed successfully")
+                logger.info(f"Phase {phase.value} completed successfully")
 
         return {
             "method": "sequential",
@@ -715,4 +720,108 @@ class UnifiedOrchestrator:
                 "failed": len([w for w in self.active_workflows.values() if w.status == "failed"])
             },
             "templates_available": list(self.workflow_templates.keys())
+        }
+
+    async def execute_hierarchical_research(
+        self,
+        research_query: str,
+        domain: str = "",
+        research_context: Dict[str, Any] = None
+    ) -> str:
+        """Execute hierarchical multi-agent research pipeline"""
+
+        session_id = await self.hierarchical_coordinator.start_hierarchical_research(
+            research_query=research_query,
+            domain=domain,
+            research_context=research_context or {}
+        )
+
+        # Create a workflow result to track in the unified system
+        workflow_result = WorkflowResult(
+            workflow_id=session_id,
+            workflow_type=WorkflowType.AUTOMATED_RESEARCH,
+            status="running",
+            components_used=["hierarchical_coordinator"],
+            results={"hierarchical_session_id": session_id}
+        )
+
+        self.active_workflows[session_id] = workflow_result
+
+        return session_id
+
+    async def get_hierarchical_research_status(self, session_id: str) -> Dict[str, Any]:
+        """Get status of hierarchical research session"""
+        return await self.hierarchical_coordinator.get_session_status(session_id)
+
+    async def get_hierarchical_research_results(self, session_id: str) -> Dict[str, Any]:
+        """Get final results of hierarchical research session"""
+        results = await self.hierarchical_coordinator.get_session_results(session_id)
+
+        # Update workflow status if completed
+        if session_id in self.active_workflows:
+            workflow = self.active_workflows[session_id]
+            session_status = await self.hierarchical_coordinator.get_session_status(session_id)
+
+            if session_status.get("status") == "completed":
+                workflow.status = "completed"
+                workflow.completed_at = datetime.now()
+                workflow.results.update(results)
+            elif session_status.get("status") == "failed":
+                workflow.status = "failed"
+                workflow.completed_at = datetime.now()
+                workflow.results.update({"error": results.get("error", "Unknown error")})
+
+        return results
+
+    async def _execute_hierarchical_research_with_tree_integration(
+        self,
+        project_id: str,
+        research_goal: str = None
+    ) -> Dict[str, Any]:
+        """Execute hierarchical research integrated with the tree system"""
+
+        # If no research goal provided, try to extract from project
+        if not research_goal:
+            # Here we would normally fetch from the database, but for now use a default
+            research_goal = f"Research project {project_id}"
+
+        # Start hierarchical research session
+        session_id = await self.execute_hierarchical_research(
+            research_query=research_goal,
+            domain="AI/ML Research",
+            research_context={"project_id": project_id}
+        )
+
+        # Wait for completion (in a real system, this would be done asynchronously)
+        max_wait_time = 300  # 5 minutes timeout
+        wait_interval = 5    # Check every 5 seconds
+        total_waited = 0
+
+        while total_waited < max_wait_time:
+            status = await self.get_hierarchical_research_status(session_id)
+
+            if status.get("status") == "completed":
+                results = await self.get_hierarchical_research_results(session_id)
+                return {
+                    "method": "hierarchical_agents",
+                    "session_id": session_id,
+                    "results": results,
+                    "status": "completed"
+                }
+            elif status.get("status") == "failed":
+                return {
+                    "method": "hierarchical_agents",
+                    "session_id": session_id,
+                    "error": "Hierarchical research failed",
+                    "status": "failed"
+                }
+
+            await asyncio.sleep(wait_interval)
+            total_waited += wait_interval
+
+        return {
+            "method": "hierarchical_agents",
+            "session_id": session_id,
+            "error": "Research timeout - still in progress",
+            "status": "timeout"
         }

@@ -8,6 +8,7 @@ import asyncio
 import uuid
 import numpy as np
 import time
+import logging
 from typing import Dict, List, Optional, Any, Set, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +22,8 @@ from ..utils.multi_modal_search import MultiModalSearchEngine
 from .repo_master import RepoMaster, AnalysisDepth
 from .llm_client import llm_client
 
+logger = logging.getLogger(__name__)
+
 
 class ResearchNodeType(Enum):
     """Types of nodes in the research tree"""
@@ -31,6 +34,7 @@ class ResearchNodeType(Enum):
     LITERATURE = "literature"       # Literature review branch
     SYNTHESIS = "synthesis"          # Result synthesis node
     VALIDATION = "validation"        # Validation experiment
+    HIERARCHICAL_RESEARCH = "hierarchical_research"  # Multi-agent hierarchical research
 
 
 class ExperimentType(Enum):
@@ -43,6 +47,8 @@ class ExperimentType(Enum):
     LITERATURE_ANALYSIS = "literature_analysis"
     COMPARATIVE = "comparative"
     ABLATION = "ablation"
+    HIERARCHICAL_MULTI_AGENT = "hierarchical_multi_agent"
+    SYNTHESIS = "synthesis"
 
 
 class NodeStatus(Enum):
@@ -141,11 +147,13 @@ class ResearchGoal:
     title: str
     description: str
     success_criteria: List[str]
+    domain: str = "AI/ML Research"
     constraints: Dict[str, Any] = field(default_factory=dict)
     max_depth: int = 5
     max_experiments: int = 100
     time_budget: int = 7200  # 2 hours in seconds
     quality_threshold: float = 0.8
+    priority: float = 1.0
 
 
 class HierarchicalResearchSystem:
@@ -168,6 +176,9 @@ class HierarchicalResearchSystem:
         # Tree search parameters
         self.exploration_constant = 1.4  # UCB exploration parameter
         self.parallel_limit = 8  # Max parallel experiments
+
+        # Orchestrator reference (injected later to avoid circular imports)
+        self.orchestrator = None
 
         # Integration engines
         self.experiment_types = self._initialize_experiment_types()
@@ -281,7 +292,7 @@ class HierarchicalResearchSystem:
                     tree[node_id].visits = 1  # Give them initial visit to enable UCB
 
         except Exception as e:
-            print(f"❌ Error initializing research tree: {e}")
+            logger.error(f"Error initializing research tree: {e}")
 
     async def _execute_research_tree(self, goal_id: str):
         """Execute the research tree using tree search algorithms"""
@@ -312,10 +323,10 @@ class HierarchicalResearchSystem:
                 if (node.status == NodeStatus.PROMISING and
                     len(node.results) == 0 and
                     node_id not in nodes_to_experiment):
-                    print(f"🔬 Adding PROMISING node {node_id} to experiments queue (results: {len(node.results)})")
+                    logger.info(f"Adding PROMISING node {node_id} to experiments queue (results: {len(node.results)})")
                     nodes_to_experiment.append(node_id)
 
-            print(f"🧪 Total nodes queued for experiments: {len(nodes_to_experiment)}")
+            logger.info(f"Total nodes queued for experiments: {len(nodes_to_experiment)}")
 
             # Run experiments on nodes in parallel
             tasks = []
@@ -339,6 +350,9 @@ class HierarchicalResearchSystem:
             # Prune unpromising branches
             await self._prune_tree(goal_id)
 
+            # Check and complete ROOT nodes based on child success
+            await self._check_root_completion(goal_id)
+
             # Brief pause to prevent overwhelming the system
             await asyncio.sleep(1)
 
@@ -354,7 +368,8 @@ class HierarchicalResearchSystem:
         expandable_nodes = []
         for node in tree.values():
             if (
-                node.status in [NodeStatus.PENDING, NodeStatus.PROMISING] and
+                (node.status in [NodeStatus.PENDING, NodeStatus.PROMISING] or
+                 (node.status == NodeStatus.COMPLETED and node.node_type == ResearchNodeType.ROOT)) and
                 node.depth < goal.max_depth and
                 len(node.children) < self._get_max_children(node)
             ):
@@ -425,17 +440,30 @@ class HierarchicalResearchSystem:
 
         return new_node_ids
 
-    async def _generate_research_directions(self, goal_id: str) -> List[Dict[str, Any]]:
+    async def _generate_research_directions(self, goal_id: str, allow_regeneration: bool = False) -> List[Dict[str, Any]]:
         """Generate initial research directions from the root goal"""
         goal = self.active_goals[goal_id]
         tree = self.research_trees[goal_id]
 
-        # Check what child types already exist to avoid duplicates
+        # Check what child types already exist, but allow re-expansion if existing ones failed or have low confidence
         existing_types = set()
         root_node = tree[f"{goal_id}_root"]
         for child_id in root_node.children:
             if child_id in tree:
-                existing_types.add(tree[child_id].node_type)
+                child = tree[child_id]
+                # Only block if child exists AND is successful (confidence > 0.6)
+                # If allow_regeneration is True, ignore failed nodes and allow new attempts
+                if allow_regeneration:
+                    # Only block running nodes and high-confidence completed nodes
+                    if child.status == NodeStatus.RUNNING or (child.status == NodeStatus.COMPLETED and child.confidence > 0.6):
+                        existing_types.add(child.node_type)
+                else:
+                    # Original logic: block all non-failed attempts
+                    if child.status == NodeStatus.COMPLETED and child.confidence > 0.6:
+                        existing_types.add(child.node_type)
+                    elif child.status == NodeStatus.RUNNING:
+                        # Don't create duplicates of running nodes
+                        existing_types.add(child.node_type)
 
         directions = []
 
@@ -483,6 +511,86 @@ class HierarchicalResearchSystem:
                     "evidence_threshold": 0.7
                 },
                 "priority": 0.85
+            })
+
+        # Add experimental design direction if not exists (basic research only at ROOT level)
+        if ResearchNodeType.EXPERIMENT not in existing_types:
+            directions.append({
+                "node_type": ResearchNodeType.EXPERIMENT,
+                "title": f"Experimental Design: {goal.title}",
+                "description": f"Design and execute empirical experiments for {goal.description}",
+                "experiment_type": ExperimentType.COMPUTATIONAL,
+                "experiment_config": {
+                    "experimental_design": "factorial",
+                    "variables": ["performance", "accuracy", "efficiency"],
+                    "sample_size": 100
+                },
+                "priority": 0.8
+            })
+
+        # Add data analysis direction if not exists (basic research only)
+        if len(existing_types) < 4:  # Limit basic research directions to 4
+            directions.append({
+                "node_type": ResearchNodeType.LITERATURE,
+                "title": f"Extended Analysis: {goal.title}",
+                "description": f"Extended research analysis with different methodologies for {goal.description}",
+                "experiment_type": ExperimentType.LITERATURE_ANALYSIS,
+                "experiment_config": {
+                    "search_strategy": "expanded",
+                    "methodology": "systematic_review",
+                    "cross_domain": True
+                },
+                "priority": 0.7
+            })
+
+        # NOTE: Hierarchical and Synthesis nodes are now created as children of successful research nodes
+        # This is handled in _generate_followup_experiments() method
+
+        # When allow_regeneration is True, add alternative approaches and deeper hierarchical exploration
+        if allow_regeneration:
+            logger.info("Regenerating research directions due to failures. Adding alternative approaches...")
+
+            # Add alternative computational approaches
+            directions.append({
+                "node_type": ResearchNodeType.EXPERIMENT,
+                "title": f"Alternative Computational Analysis: {goal.title}",
+                "description": f"Alternative computational approach with different parameters for {goal.description}",
+                "experiment_type": ExperimentType.COMPUTATIONAL,
+                "experiment_config": {
+                    "experimental_design": "randomized_controlled",
+                    "variables": ["throughput", "latency", "scalability"],
+                    "sample_size": 150,
+                    "alternative_approach": True
+                },
+                "priority": 0.85
+            })
+
+            # Add simulation-based experiments
+            directions.append({
+                "node_type": ResearchNodeType.EXPERIMENT,
+                "title": f"Simulation Study: {goal.title}",
+                "description": f"Simulation-based validation for {goal.description}",
+                "experiment_type": ExperimentType.SIMULATION,
+                "experiment_config": {
+                    "simulation_type": "monte_carlo",
+                    "iterations": 10000,
+                    "scenarios": ["best_case", "worst_case", "average_case"]
+                },
+                "priority": 0.8
+            })
+
+            # Add empirical validation experiments
+            directions.append({
+                "node_type": ResearchNodeType.EXPERIMENT,
+                "title": f"Empirical Validation: {goal.title}",
+                "description": f"Real-world empirical validation for {goal.description}",
+                "experiment_type": ExperimentType.EMPIRICAL,
+                "experiment_config": {
+                    "validation_method": "field_study",
+                    "data_sources": ["production", "benchmarks", "user_studies"],
+                    "metrics": ["performance", "usability", "reliability"]
+                },
+                "priority": 0.9
             })
 
         return directions
@@ -578,6 +686,57 @@ class HierarchicalResearchSystem:
                 "priority": 0.8
             })
 
+        # Add hierarchical multi-agent analysis as a child of successful literature/code analysis
+        if (best_result.success and best_result.confidence > 0.6 and
+            node.node_type in [ResearchNodeType.LITERATURE, ResearchNodeType.CODE_ANALYSIS]):
+
+            experiments.append({
+                "node_type": ResearchNodeType.HIERARCHICAL_RESEARCH,
+                "title": f"Hierarchical AI Analysis: {node.title}",
+                "description": f"Deep hierarchical multi-agent analysis building on {node.title}",
+                "experiment_type": ExperimentType.HIERARCHICAL_MULTI_AGENT,
+                "experiment_config": {
+                    "parent_findings": best_result.insights,
+                    "research_query": node.title,
+                    "domain": "AI/ML Research",
+                    "comprehensive": True,
+                    "agent_coordination": "hierarchical",
+                    "build_on_parent": True
+                },
+                "priority": 0.95
+            })
+
+        # Check if we have multiple successful siblings for synthesis
+        if node.parent_id:
+            goal = self.active_goals[goal_id]
+            parent_node = tree[node.parent_id]
+
+            # Count successful sibling nodes
+            successful_siblings = []
+            for sibling_id in parent_node.children:
+                if sibling_id in tree and sibling_id != node_id:
+                    sibling = tree[sibling_id]
+                    if (sibling.status == NodeStatus.COMPLETED and
+                        sibling.results and
+                        any(r.success and r.confidence > 0.5 for r in sibling.results)):
+                        successful_siblings.append(sibling)
+
+            # Add synthesis if we have 2+ successful siblings to synthesize with this node
+            if len(successful_siblings) >= 1 and best_result.success and best_result.confidence > 0.5:
+                experiments.append({
+                    "node_type": ResearchNodeType.SYNTHESIS,
+                    "title": f"Research Synthesis: {goal.title}",
+                    "description": f"Synthesize findings from {node.title} and {len(successful_siblings)} other successful research nodes",
+                    "experiment_type": ExperimentType.SYNTHESIS,
+                    "experiment_config": {
+                        "synthesis_method": "meta_analysis",
+                        "integration_level": "comprehensive",
+                        "parent_nodes": [node_id] + [s.id for s in successful_siblings],
+                        "minimum_confidence": 0.5
+                    },
+                    "priority": 0.9
+                })
+
         return experiments
 
     async def _run_experiment(self, goal_id: str, node_id: str) -> ExperimentResult:
@@ -617,6 +776,12 @@ class HierarchicalResearchSystem:
             elif node.experiment_type == ExperimentType.EMPIRICAL:
                 self._log_execution(node, "DEBUG", "Executing empirical experiment")
                 result = await self._run_empirical_experiment(node)
+            elif node.experiment_type == ExperimentType.HIERARCHICAL_MULTI_AGENT:
+                self._log_execution(node, "DEBUG", "Executing hierarchical multi-agent experiment")
+                result = await self._run_hierarchical_multi_agent_experiment(node)
+            elif node.experiment_type == ExperimentType.SYNTHESIS:
+                self._log_execution(node, "DEBUG", "Executing synthesis experiment")
+                result = await self._run_synthesis_experiment(node)
             else:
                 self._log_execution(node, "WARNING", f"Unknown experiment type: {node.experiment_type}, using default")
                 result = await self._run_default_experiment(node)
@@ -633,7 +798,11 @@ class HierarchicalResearchSystem:
             })
 
             node.results.append(result)
-            node.status = NodeStatus.COMPLETED
+            # Set node status based on experiment success
+            if result.success:
+                node.status = NodeStatus.COMPLETED
+            else:
+                node.status = NodeStatus.FAILED
             node.completed_at = datetime.now()
 
             # Update aggregated score
@@ -1009,6 +1178,179 @@ class HierarchicalResearchSystem:
             execution_time=0.0
         )
 
+    async def _run_hierarchical_multi_agent_experiment(self, node: ResearchNode) -> ExperimentResult:
+        """Run hierarchical multi-agent research experiment"""
+        start_time = datetime.now()
+
+        # Check if orchestrator is available
+        if not self.orchestrator:
+            self._log_execution(node, "ERROR", "Orchestrator not available for hierarchical research")
+            return ExperimentResult(
+                experiment_id=node.id,
+                success=False,
+                confidence=0.0,
+                metrics={"error": "orchestrator_unavailable"},
+                data={},
+                insights=["Hierarchical agents not available - orchestrator not injected"],
+                execution_time=0.0
+            )
+
+        try:
+            # Extract research query from node
+            research_query = node.title
+            if hasattr(node, 'experiment_config') and node.experiment_config:
+                research_query = node.experiment_config.get('research_query', node.title)
+
+            self._log_execution(node, "INFO", f"Starting hierarchical research for: {research_query}")
+
+            # Execute hierarchical research
+            session_id = await self.orchestrator.execute_hierarchical_research(
+                research_query=research_query,
+                domain=node.experiment_config.get('domain', 'AI/ML Research') if hasattr(node, 'experiment_config') and node.experiment_config else 'AI/ML Research',
+                research_context={
+                    'node_id': node.id,
+                    'tree_context': node.description,
+                    'experiment_config': getattr(node, 'experiment_config', {})
+                }
+            )
+
+            self._log_execution(node, "INFO", f"Hierarchical research session started: {session_id}")
+
+            # Wait for completion with timeout
+            max_wait_time = 300  # 5 minutes
+            wait_interval = 10   # Check every 10 seconds
+            total_waited = 0
+
+            while total_waited < max_wait_time:
+                status = await self.orchestrator.get_hierarchical_research_status(session_id)
+
+                if status.get("status") == "completed":
+                    results = await self.orchestrator.get_hierarchical_research_results(session_id)
+
+                    execution_time = (datetime.now() - start_time).total_seconds()
+
+                    # Extract insights from hierarchical research results
+                    insights = self._extract_hierarchical_insights(results)
+
+                    # Calculate confidence based on research readiness score
+                    readiness_score = results.get("final_synthesis", {}).get("research_readiness_score", 0.5)
+                    confidence = min(readiness_score + 0.2, 1.0)  # Boost confidence slightly
+
+                    # Extract metrics
+                    execution_summary = results.get("execution_summary", {})
+                    metrics = {
+                        "agents_used": execution_summary.get("total_agents_used", 0),
+                        "literature_papers": execution_summary.get("information_sources", {}).get("literature_papers", 0),
+                        "web_resources": execution_summary.get("information_sources", {}).get("web_resources", 0),
+                        "research_directions": execution_summary.get("research_directions_identified", 0),
+                        "experiments_designed": execution_summary.get("experiments_designed", 0),
+                        "research_readiness_score": readiness_score,
+                        "hierarchical_session_id": session_id
+                    }
+
+                    self._log_execution(node, "INFO", f"Hierarchical research completed successfully", metrics)
+
+                    return ExperimentResult(
+                        experiment_id=node.id,
+                        success=True,
+                        confidence=confidence,
+                        metrics=metrics,
+                        data={
+                            "hierarchical_results": results,
+                            "session_id": session_id
+                        },
+                        insights=insights,
+                        execution_time=execution_time
+                    )
+
+                elif status.get("status") == "failed":
+                    error_msg = status.get("error", "Unknown error in hierarchical research")
+                    self._log_execution(node, "ERROR", f"Hierarchical research failed: {error_msg}")
+
+                    return ExperimentResult(
+                        experiment_id=node.id,
+                        success=False,
+                        confidence=0.1,
+                        metrics={"error": error_msg, "session_id": session_id},
+                        data={"session_id": session_id},
+                        insights=[f"Hierarchical research failed: {error_msg}"],
+                        execution_time=(datetime.now() - start_time).total_seconds()
+                    )
+
+                # Wait and continue checking
+                await asyncio.sleep(wait_interval)
+                total_waited += wait_interval
+
+            # Timeout case
+            self._log_execution(node, "WARNING", f"Hierarchical research timeout after {max_wait_time}s")
+
+            return ExperimentResult(
+                experiment_id=node.id,
+                success=False,
+                confidence=0.3,
+                metrics={"timeout": True, "session_id": session_id, "wait_time": total_waited},
+                data={"session_id": session_id},
+                insights=[f"Hierarchical research timeout after {max_wait_time} seconds - still in progress"],
+                execution_time=(datetime.now() - start_time).total_seconds()
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            self._log_execution(node, "ERROR", f"Exception in hierarchical research: {error_msg}")
+
+            return ExperimentResult(
+                experiment_id=node.id,
+                success=False,
+                confidence=0.0,
+                metrics={"exception": error_msg},
+                data={},
+                insights=[f"Hierarchical research exception: {error_msg}"],
+                execution_time=(datetime.now() - start_time).total_seconds()
+            )
+
+    def _extract_hierarchical_insights(self, results: Dict[str, Any]) -> List[str]:
+        """Extract key insights from hierarchical research results"""
+        insights = []
+
+        # Extract from execution summary
+        execution_summary = results.get("execution_summary", {})
+        if execution_summary:
+            insights.append(f"Comprehensive research using {execution_summary.get('total_agents_used', 0)} specialized agents")
+
+            info_sources = execution_summary.get("information_sources", {})
+            if info_sources.get("literature_papers", 0) > 0:
+                insights.append(f"Analyzed {info_sources['literature_papers']} academic papers")
+            if info_sources.get("web_resources", 0) > 0:
+                insights.append(f"Searched {info_sources['web_resources']} web resources")
+
+        # Extract from final synthesis
+        final_synthesis = results.get("final_synthesis", {})
+        if final_synthesis:
+            aggregated_findings = final_synthesis.get("aggregated_findings", {})
+
+            # Literature insights
+            lit_insights = aggregated_findings.get("literature_review", {}).get("key_insights", [])
+            insights.extend(lit_insights[:2])  # Top 2 literature insights
+
+            # Cross-agent insights
+            cross_insights = aggregated_findings.get("cross_agent_insights", [])
+            insights.extend(cross_insights[:2])  # Top 2 cross-agent insights
+
+            # Research directions
+            research_directions = aggregated_findings.get("planning", {}).get("research_directions", [])
+            if research_directions:
+                insights.append(f"Identified {len(research_directions)} viable research directions")
+                # Add top research direction
+                top_direction = research_directions[0] if research_directions else None
+                if top_direction:
+                    insights.append(f"Top research direction: {top_direction.get('title', 'Unknown')}")
+
+        # Ensure we have at least some insights
+        if not insights:
+            insights = ["Hierarchical multi-agent research completed with comprehensive analysis"]
+
+        return insights[:8]  # Limit to top 8 insights
+
     async def _analyze_literature_patterns(self, papers: List[Dict]) -> List[str]:
         """Analyze patterns in literature using qwen3-max-review"""
         if not papers:
@@ -1062,6 +1404,161 @@ class HierarchicalResearchSystem:
 
         return insights
 
+    async def _run_synthesis_experiment(self, node: ResearchNode) -> ExperimentResult:
+        """Run a synthesis experiment that combines and analyzes multiple research findings"""
+        start_time = datetime.now()
+
+        try:
+            # Get the research goal context
+            goal_id = node.id.split('_')[0] if '_' in node.id else node.id
+            if goal_id in self.active_goals:
+                goal = self.active_goals[goal_id]
+                tree = self.research_trees[goal_id]
+            else:
+                goal = None
+                tree = {}
+
+            result = ExperimentResult(
+                experiment_id=node.id,
+                success=False,  # Will be updated later
+                confidence=0.0,  # Will be updated later
+                metrics={},  # Will be updated later
+                data={},  # Will be updated later
+                insights=[],  # Will be updated later
+                execution_time=0.0  # Will be updated later
+            )
+            result.processing_steps = []
+            result.api_calls = []
+
+            # Collect completed research findings from specified parent nodes or siblings
+            completed_nodes = []
+            if tree:
+                # Check if specific parent nodes are specified in config
+                parent_node_ids = node.experiment_config.get("parent_nodes", [])
+                if parent_node_ids:
+                    # Use specified parent nodes for synthesis
+                    for node_id in parent_node_ids:
+                        if node_id in tree:
+                            target_node = tree[node_id]
+                            if (target_node.status == NodeStatus.COMPLETED and
+                                len(target_node.results) > 0 and
+                                any(r.success for r in target_node.results)):
+                                completed_nodes.append(target_node)
+                else:
+                    # Fallback: search for any completed nodes (original behavior)
+                    for other_node in tree.values():
+                        if (other_node.status == NodeStatus.COMPLETED and
+                            other_node.id != node.id and
+                            len(other_node.results) > 0):
+                            completed_nodes.append(other_node)
+
+            result.processing_steps.append({
+                "step": "data_collection",
+                "completed_nodes_found": len(completed_nodes),
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Extract insights from completed nodes
+            all_insights = []
+            all_metrics = {}
+            total_confidence = 0.0
+            node_count = 0
+
+            for completed_node in completed_nodes:
+                if completed_node.results:
+                    latest_result = completed_node.results[-1]
+                    if latest_result.insights:
+                        all_insights.extend(latest_result.insights)
+                    if latest_result.metrics:
+                        for key, value in latest_result.metrics.items():
+                            if isinstance(value, (int, float)):
+                                if key not in all_metrics:
+                                    all_metrics[key] = []
+                                all_metrics[key].append(value)
+
+                    total_confidence += latest_result.confidence
+                    node_count += 1
+
+            # Calculate synthesis metrics
+            avg_confidence = total_confidence / node_count if node_count > 0 else 0.0
+            aggregated_metrics = {}
+            for key, values in all_metrics.items():
+                if values:
+                    aggregated_metrics[f"avg_{key}"] = np.mean(values)
+                    aggregated_metrics[f"total_{key}"] = sum(values)
+
+            result.processing_steps.append({
+                "step": "synthesis_analysis",
+                "insights_collected": len(all_insights),
+                "metrics_aggregated": len(aggregated_metrics),
+                "avg_confidence": avg_confidence,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Generate synthesis insights
+            synthesis_insights = [
+                f"Synthesized findings from {node_count} completed research nodes",
+                f"Average research confidence: {avg_confidence:.2f}",
+                f"Total insights collected: {len(all_insights)}"
+            ]
+
+            if aggregated_metrics:
+                synthesis_insights.append(f"Aggregated {len(aggregated_metrics)} quantitative metrics")
+
+            # Add domain-specific synthesis based on goal
+            if goal:
+                synthesis_insights.append(f"Research synthesis for: {goal.title}")
+                if "optimization" in goal.title.lower():
+                    synthesis_insights.append("Focus area: Performance and efficiency optimization")
+                elif "analysis" in goal.title.lower():
+                    synthesis_insights.append("Focus area: Analytical framework development")
+
+            # Calculate final confidence based on input quality and synthesis completeness
+            confidence = min(avg_confidence * 1.1 + 0.1, 1.0) if node_count >= 2 else 0.5
+            success = node_count >= 2 and avg_confidence > 0.3
+
+            # Final metrics
+            final_metrics = {
+                "nodes_synthesized": node_count,
+                "insights_generated": len(synthesis_insights),
+                "average_input_confidence": avg_confidence,
+                "synthesis_completeness": min(node_count / 4.0, 1.0),  # Complete with 4+ nodes
+                **aggregated_metrics
+            }
+
+            result.success = success
+            result.confidence = confidence
+            result.insights = synthesis_insights
+            result.metrics = final_metrics
+            result.execution_time = (datetime.now() - start_time).total_seconds()
+            result.data = {
+                "synthesized_insights": all_insights[:20],  # Top 20 insights
+                "input_nodes": len(completed_nodes),
+                "synthesis_method": "meta_analysis"
+            }
+
+            self._log_execution(node, "INFO", f"Synthesis experiment completed", {
+                "success": success,
+                "confidence": confidence,
+                "nodes_synthesized": node_count
+            })
+
+            return result
+
+        except Exception as e:
+            error_msg = str(e)
+            self._log_execution(node, "ERROR", f"Synthesis experiment failed: {error_msg}")
+
+            return ExperimentResult(
+                experiment_id=node.id,
+                success=False,
+                confidence=0.1,
+                metrics={"error": error_msg},
+                data={},
+                insights=[f"Synthesis experiment failed: {error_msg}"],
+                execution_time=(datetime.now() - start_time).total_seconds()
+            )
+
     async def _backpropagate_result(self, goal_id: str, node_id: str, result: ExperimentResult):
         """Backpropagate experiment result up the tree"""
         tree = self.research_trees[goal_id]
@@ -1093,6 +1590,37 @@ class HierarchicalResearchSystem:
 
         for node_id in nodes_to_prune:
             tree[node_id].status = NodeStatus.PRUNED
+
+    async def _check_root_completion(self, goal_id: str):
+        """Check if ROOT nodes should be marked as completed based on child success"""
+        tree = self.research_trees[goal_id]
+        root_node = tree[f"{goal_id}_root"]
+
+        if root_node.status == NodeStatus.PENDING and root_node.children:
+            # Get successful child nodes
+            successful_children = []
+            failed_children = []
+            for child_id in root_node.children:
+                if child_id in tree:
+                    child = tree[child_id]
+                    if child.status == NodeStatus.COMPLETED and child.confidence > 0.5:
+                        successful_children.append(child)
+                    elif child.status == NodeStatus.FAILED:
+                        failed_children.append(child)
+
+            # Complete root if we have at least 2 successful children
+            if len(successful_children) >= 2:
+                root_node.status = NodeStatus.COMPLETED
+                root_node.confidence = np.mean([child.confidence for child in successful_children])
+                root_node.completed_at = datetime.now()
+                logger.info(f"ROOT node {goal_id}_root completed with {len(successful_children)} successful children (confidence: {root_node.confidence:.2f})")
+            # If most children failed and we have insufficient successes, generate new research directions
+            elif len(failed_children) >= 2 and len(successful_children) < 2:
+                logger.warning(f"ROOT node has {len(failed_children)} failed children, generating new research directions...")
+                await self._generate_research_directions(goal_id, allow_regeneration=True)
+
+                # Update total reward for tree search
+                root_node.total_reward = root_node.confidence * root_node.visits
 
     async def _is_goal_satisfied(self, goal_id: str) -> bool:
         """Check if research goal is satisfied"""
@@ -1195,6 +1723,35 @@ class HierarchicalResearchSystem:
                 for node in best_nodes
             ],
             "tree_structure": await self._get_tree_visualization(goal_id)
+        }
+
+    async def get_goal_status(self, goal_id: str) -> Dict[str, Any]:
+        """Get simplified goal status - thin wrapper for compatibility"""
+        if goal_id not in self.research_trees:
+            return {"error": "Research goal not found"}
+
+        tree = self.research_trees[goal_id]
+        total_nodes = len(tree)
+        completed_nodes = len([n for n in tree.values() if n.status == NodeStatus.COMPLETED])
+        running_nodes = len([n for n in tree.values() if n.status == NodeStatus.RUNNING])
+
+        # Determine overall status
+        if running_nodes > 0:
+            status = "running"
+        elif completed_nodes > 0:
+            status = "completed"
+        else:
+            status = "pending"
+
+        # Calculate progress as percentage
+        progress = (completed_nodes / max(total_nodes, 1)) * 100
+
+        return {
+            "status": status,
+            "progress": progress,
+            "total_nodes": total_nodes,
+            "completed_nodes": completed_nodes,
+            "running_nodes": running_nodes
         }
 
     async def _get_tree_visualization(self, goal_id: str) -> Dict[str, Any]:

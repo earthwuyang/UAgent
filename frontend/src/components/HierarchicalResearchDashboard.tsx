@@ -15,6 +15,16 @@ const researchAPI = {
     return response.json()
   },
 
+  generateResearchContent: async (description: string, domain: string = 'AI/ML Research') => {
+    const response = await fetch('/api/ai-generation/generate-research-content', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description, domain })
+    })
+    if (!response.ok) throw new Error('Failed to generate research content')
+    return response.json()
+  },
+
   getTreeStatus: async (goalId: string) => {
     const response = await fetch(`${API_BASE}/goals/${goalId}/status`)
     if (!response.ok) throw new Error('Failed to get tree status')
@@ -93,9 +103,31 @@ const researchAPI = {
   },
 
   getNodeReport: async (goalId: string, nodeId: string) => {
-    const response = await fetch(`${API_BASE}/goals/${goalId}/nodes/${nodeId}/report`)
-    if (!response.ok) throw new Error('Failed to get node report')
-    return response.json()
+    console.log('🔍 getNodeReport called with:', { goalId, nodeId })
+    const url = `${API_BASE}/goals/${goalId}/nodes/${nodeId}/report`
+    console.log('🌐 Fetching URL:', url)
+
+    try {
+      const response = await fetch(url)
+      console.log('📊 Response status:', response.status, response.statusText)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('❌ Response not ok:', { status: response.status, statusText: response.statusText, body: errorText })
+        throw new Error(`Failed to get node report: ${response.status} ${response.statusText}`)
+      }
+
+      const responseText = await response.text()
+      console.log('📄 Raw response text length:', responseText.length)
+      console.log('📄 First 200 chars:', responseText.substring(0, 200))
+
+      const result = JSON.parse(responseText)
+      console.log('✅ Successfully parsed JSON. Keys:', Object.keys(result))
+      return result
+    } catch (error) {
+      console.error('💥 Error in getNodeReport:', error)
+      throw error
+    }
   }
 }
 
@@ -133,15 +165,19 @@ export default function HierarchicalResearchDashboard() {
 
   // Form state for new research goals
   const [newGoal, setNewGoal] = useState({
-    title: 'Hierarchical AI Agent Architecture Optimization',
-    description: 'Research optimal architectures for hierarchical AI agents that can perform complex reasoning and planning tasks',
-    success_criteria: [
-      'Identify key architectural components for hierarchical agents',
-      'Develop performance benchmarks for agent architectures',
-      'Validate architecture effectiveness through empirical testing'
-    ],
+    title: '',
+    description: '',
+    success_criteria: [] as string[],
     max_depth: 6,
     max_experiments: 150
+  })
+
+  // AI generation state
+  const [aiGeneration, setAiGeneration] = useState({
+    loading: false,
+    generated: false,
+    error: null as string | null,
+    generatedContent: null as any
   })
 
   // UI state
@@ -165,6 +201,19 @@ export default function HierarchicalResearchDashboard() {
       return () => clearInterval(interval)
     }
   }, [selectedGoal, autoRefresh])
+
+  // Auto-generate content when description changes (with debounce)
+  useEffect(() => {
+    if (!newGoal.description.trim() || aiGeneration.loading) return
+
+    const timeoutId = setTimeout(() => {
+      if (newGoal.description.trim().length > 50 && !aiGeneration.generated) {
+        handleGenerateContent(newGoal.description)
+      }
+    }, 2000) // Wait 2 seconds after user stops typing
+
+    return () => clearTimeout(timeoutId)
+  }, [newGoal.description])
 
   const loadInitialData = async () => {
     await Promise.all([
@@ -211,6 +260,37 @@ export default function HierarchicalResearchDashboard() {
       setInsights(insightsData)
     } catch (error) {
       console.error('Failed to refresh goal data:', error)
+    }
+  }
+
+  const handleGenerateContent = async (description: string) => {
+    if (!description.trim()) return
+
+    setAiGeneration({ ...aiGeneration, loading: true, error: null })
+
+    try {
+      const response = await researchAPI.generateResearchContent(description)
+
+      setAiGeneration({
+        loading: false,
+        generated: true,
+        error: null,
+        generatedContent: response
+      })
+
+      // Auto-populate the form with generated content
+      setNewGoal({
+        ...newGoal,
+        title: response.title,
+        success_criteria: response.success_criteria
+      })
+    } catch (error) {
+      setAiGeneration({
+        loading: false,
+        generated: false,
+        error: `Failed to generate content: ${error}`,
+        generatedContent: null
+      })
     }
   }
 
@@ -301,17 +381,30 @@ export default function HierarchicalResearchDashboard() {
   }
 
   const handleViewFullReport = async (nodeId: string) => {
-    if (!selectedGoal) return
+    console.log('🚀 handleViewFullReport called with nodeId:', nodeId)
+    console.log('🎯 selectedGoal:', selectedGoal)
 
+    if (!selectedGoal) {
+      console.warn('⚠️ No selected goal, returning early')
+      return
+    }
+
+    console.log('⏳ Setting loading state to loading-report')
     setLoading('loading-report')
+
     try {
+      console.log('📞 Calling researchAPI.getNodeReport...')
       const report = await researchAPI.getNodeReport(selectedGoal, nodeId)
+      console.log('📊 Got report successfully:', report)
+
       setNodeReport(report)
       setShowNodeReport(true)
+      console.log('✅ Report state updated successfully')
     } catch (error) {
-      console.error('Failed to load node report:', error)
+      console.error('❌ Failed to load node report:', error)
       alert(`Failed to load node report: ${error}`)
     } finally {
+      console.log('🏁 Clearing loading state')
       setLoading('')
     }
   }
@@ -819,70 +912,169 @@ export default function HierarchicalResearchDashboard() {
       case 'start-goal':
         return (
           <div className="bg-white p-6 rounded-lg shadow">
-            <h3 className="text-lg font-semibold mb-4">Start New Research Goal</h3>
-            <div className="space-y-4">
+            <h3 className="text-lg font-semibold mb-4">🚀 Start New Research Goal</h3>
+            <div className="space-y-6">
+              {/* Step 1: Research Description */}
               <div>
-                <label className="block text-sm font-medium mb-2">Research Title</label>
+                <label className="block text-sm font-medium mb-2">
+                  📝 Research Description
+                  <span className="text-gray-500 ml-2">(Describe your research idea)</span>
+                </label>
+                <textarea
+                  value={newGoal.description}
+                  onChange={(e) => {
+                    setNewGoal({...newGoal, description: e.target.value})
+                    setAiGeneration({...aiGeneration, generated: false})
+                  }}
+                  rows={4}
+                  className="w-full p-3 border rounded-lg"
+                  placeholder="Describe your research idea, objectives, and scope. The AI will generate a title and success criteria for you..."
+                />
+
+                {/* Generate Button */}
+                <div className="mt-3">
+                  <button
+                    onClick={() => handleGenerateContent(newGoal.description)}
+                    disabled={!newGoal.description.trim() || aiGeneration.loading}
+                    className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {aiGeneration.loading ? (
+                      <>
+                        <span className="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+                        Generating with AI...
+                      </>
+                    ) : (
+                      '🤖 Generate Title & Success Criteria'
+                    )}
+                  </button>
+
+                  {aiGeneration.error && (
+                    <div className="mt-2 text-sm text-red-600 bg-red-50 p-2 rounded">
+                      ⚠️ {aiGeneration.error}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Generated Content Display */}
+              {aiGeneration.generated && aiGeneration.generatedContent && (
+                <div className="bg-gradient-to-r from-purple-50 to-blue-50 p-4 rounded-lg border-2 border-purple-200">
+                  <div className="flex items-center mb-3">
+                    <span className="text-purple-600 font-semibold">🤖 AI Generated Content</span>
+                    <span className="ml-2 text-sm bg-purple-100 text-purple-700 px-2 py-1 rounded">
+                      Confidence: {(aiGeneration.generatedContent.confidence_score * 100).toFixed(0)}%
+                    </span>
+                  </div>
+
+                  {/* Suggested Improvements */}
+                  {aiGeneration.generatedContent.suggested_improvements?.length > 0 && (
+                    <div className="mb-3 text-sm">
+                      <div className="font-medium text-blue-700 mb-1">💡 Suggestions:</div>
+                      <ul className="text-blue-600 space-y-1">
+                        {aiGeneration.generatedContent.suggested_improvements.map((suggestion: string, index: number) => (
+                          <li key={index} className="flex items-start">
+                            <span className="mr-2">•</span>
+                            <span>{suggestion}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Step 2: Editable Generated Content */}
+              <div>
+                <label className="block text-sm font-medium mb-2">
+                  🎯 Research Title
+                  {aiGeneration.generated && (
+                    <span className="text-green-600 ml-2 text-xs">(AI Generated - you can edit)</span>
+                  )}
+                </label>
                 <input
                   type="text"
                   value={newGoal.title}
                   onChange={(e) => setNewGoal({...newGoal, title: e.target.value})}
-                  className="w-full p-2 border rounded"
+                  className={`w-full p-3 border rounded-lg ${
+                    aiGeneration.generated ? 'border-purple-300 bg-purple-50' : ''
+                  }`}
+                  placeholder="Research title will be generated automatically..."
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-2">Description</label>
-                <textarea
-                  value={newGoal.description}
-                  onChange={(e) => setNewGoal({...newGoal, description: e.target.value})}
-                  rows={3}
-                  className="w-full p-2 border rounded"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-2">Success Criteria (one per line)</label>
+                <label className="block text-sm font-medium mb-2">
+                  ✅ Success Criteria
+                  {aiGeneration.generated && (
+                    <span className="text-green-600 ml-2 text-xs">(AI Generated - you can edit)</span>
+                  )}
+                </label>
                 <textarea
                   value={newGoal.success_criteria.join('\n')}
                   onChange={(e) => setNewGoal({...newGoal, success_criteria: e.target.value.split('\n').filter(c => c.trim())})}
-                  rows={4}
-                  className="w-full p-2 border rounded"
+                  rows={6}
+                  className={`w-full p-3 border rounded-lg ${
+                    aiGeneration.generated ? 'border-purple-300 bg-purple-50' : ''
+                  }`}
+                  placeholder="Success criteria will be generated automatically..."
                 />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium mb-2">Max Tree Depth</label>
-                  <input
-                    type="number"
-                    value={newGoal.max_depth}
-                    onChange={(e) => setNewGoal({...newGoal, max_depth: parseInt(e.target.value)})}
-                    min={3}
-                    max={10}
-                    className="w-full p-2 border rounded"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-2">Max Experiments</label>
-                  <input
-                    type="number"
-                    value={newGoal.max_experiments}
-                    onChange={(e) => setNewGoal({...newGoal, max_experiments: parseInt(e.target.value)})}
-                    min={50}
-                    max={1000}
-                    className="w-full p-2 border rounded"
-                  />
+                <div className="text-xs text-gray-500 mt-1">
+                  One criterion per line. AI typically generates 3-5 specific, measurable criteria.
                 </div>
               </div>
 
-              <button
-                onClick={handleStartNewGoal}
-                disabled={loading === 'starting'}
-                className="px-6 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-              >
-                {loading === 'starting' ? 'Starting Research Tree...' : 'Start Hierarchical Research'}
-              </button>
+              {/* Advanced Settings */}
+              <div className="border-t pt-4">
+                <h4 className="font-medium mb-3">⚙️ Advanced Settings</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Max Tree Depth</label>
+                    <input
+                      type="number"
+                      value={newGoal.max_depth}
+                      onChange={(e) => setNewGoal({...newGoal, max_depth: parseInt(e.target.value)})}
+                      min={3}
+                      max={10}
+                      className="w-full p-2 border rounded"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Max Experiments</label>
+                    <input
+                      type="number"
+                      value={newGoal.max_experiments}
+                      onChange={(e) => setNewGoal({...newGoal, max_experiments: parseInt(e.target.value)})}
+                      min={50}
+                      max={1000}
+                      className="w-full p-2 border rounded"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Start Button */}
+              <div className="border-t pt-4">
+                <button
+                  onClick={handleStartNewGoal}
+                  disabled={loading === 'starting' || !newGoal.title.trim() || newGoal.success_criteria.length === 0}
+                  className="w-full px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg font-medium hover:from-blue-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {loading === 'starting' ? (
+                    <>
+                      <span className="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+                      Starting Hierarchical Research...
+                    </>
+                  ) : (
+                    '🚀 Start Hierarchical Research'
+                  )}
+                </button>
+
+                {(!newGoal.title.trim() || newGoal.success_criteria.length === 0) && (
+                  <div className="mt-2 text-sm text-orange-600 text-center">
+                    💡 Generate title and success criteria first, then you can start the research
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )

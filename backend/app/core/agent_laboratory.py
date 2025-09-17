@@ -529,3 +529,68 @@ class AgentLaboratory:
         message_bonus = min(message_count * 0.02, 0.2)
 
         return base_score + role_bonus + message_bonus
+
+    async def _coordinator_decompose_task(self, coordinator_id: str, task: Task) -> Dict[str, Dict[str, Any]]:
+        """Decompose a task into subtasks for hierarchical workflow"""
+        # Get available agents for task distribution
+        available_agents = list(self.specialized_agents.keys())
+        if coordinator_id in available_agents:
+            available_agents.remove(coordinator_id)
+
+        # Create subtasks based on task type and available agents
+        subtasks = {}
+
+        if "research" in task.task_type.value.lower():
+            # Research-oriented task decomposition
+            if len(available_agents) >= 2:
+                subtasks["literature_review"] = {
+                    "assigned_agent": available_agents[0],
+                    "description": f"Conduct literature review for: {task.description}",
+                    "context": {"task_type": "literature", "priority": "high"}
+                }
+                subtasks["data_analysis"] = {
+                    "assigned_agent": available_agents[1],
+                    "description": f"Analyze data related to: {task.description}",
+                    "context": {"task_type": "analysis", "priority": "medium"}
+                }
+            else:
+                # Fallback for fewer agents
+                subtasks["general_research"] = {
+                    "assigned_agent": available_agents[0] if available_agents else coordinator_id,
+                    "description": f"Research task: {task.description}",
+                    "context": {"task_type": "general", "priority": "high"}
+                }
+        else:
+            # General task decomposition
+            for i, agent_id in enumerate(available_agents[:3]):  # Limit to 3 subtasks
+                subtasks[f"subtask_{i+1}"] = {
+                    "assigned_agent": agent_id,
+                    "description": f"Work on part {i+1} of: {task.description}",
+                    "context": {"task_type": "general", "part": i+1}
+                }
+
+        return subtasks
+
+    async def _coordinator_synthesize(self, coordinator_id: str, subtask_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Synthesize results from subtasks into final result"""
+        # Collect all results and insights
+        all_results = []
+        all_insights = []
+
+        for subtask_id, result in subtask_results.items():
+            all_results.append(result)
+            if "result" in result:
+                all_insights.append(result["result"])
+
+        # Synthesize final result
+        synthesis = {
+            "coordinator_id": coordinator_id,
+            "subtask_count": len(subtask_results),
+            "synthesis_summary": f"Integrated results from {len(subtask_results)} subtasks",
+            "individual_results": all_results,
+            "combined_insights": all_insights,
+            "overall_success": len(all_results) > 0,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        return synthesis

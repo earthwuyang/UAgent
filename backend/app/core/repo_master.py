@@ -328,6 +328,46 @@ class SemanticAnalyzer:
 
         return distribution
 
+    async def _calculate_maintainability(self, repository: Repository) -> Dict[str, Any]:
+        """Calculate maintainability metrics for the repository"""
+        elements = repository.elements
+        if not elements:
+            return {'score': 0.5, 'factors': {}}
+
+        # Calculate various maintainability factors
+        avg_complexity = sum(elem.complexity for elem in elements) / len(elements)
+
+        # Count different element types
+        functions = [e for e in elements if e.element_type == CodeElementType.FUNCTION]
+        classes = [e for e in elements if e.element_type == CodeElementType.CLASS]
+
+        # Calculate maintainability factors
+        complexity_factor = max(0, 1 - (avg_complexity / 20))  # Normalize complexity
+        structure_factor = min(len(classes) / max(len(functions), 1), 1.0)  # Class to function ratio
+
+        # Documentation factor (based on docstrings)
+        documented_elements = sum(1 for elem in elements if elem.docstring and len(elem.docstring.strip()) > 0)
+        documentation_factor = documented_elements / max(len(functions), 1)
+
+        # Overall maintainability score (weighted average)
+        score = (
+            complexity_factor * 0.4 +
+            structure_factor * 0.3 +
+            documentation_factor * 0.3
+        )
+
+        return {
+            'score': min(max(score, 0), 1),  # Clamp between 0 and 1
+            'factors': {
+                'complexity': complexity_factor,
+                'structure': structure_factor,
+                'documentation': documentation_factor,
+                'avg_complexity': avg_complexity,
+                'function_count': len(functions),
+                'class_count': len(classes)
+            }
+        }
+
 
 class PythonParser:
     """Python-specific code parser with AST analysis"""

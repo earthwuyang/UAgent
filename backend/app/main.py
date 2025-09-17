@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import search, experiments, github, jobs, ai_scientist, agent_lab, unified_workflow, research_tree
+from .routers import search, experiments, github, jobs, ai_scientist, agent_lab, unified_workflow, research_tree, ai_generation
 
 
 def create_app() -> FastAPI:
@@ -23,6 +23,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_lab.router, prefix="/api")
     app.include_router(unified_workflow.router, prefix="/api")
     app.include_router(research_tree.router, prefix="/api")
+    app.include_router(ai_generation.router, prefix="/api")
     return app
 
 

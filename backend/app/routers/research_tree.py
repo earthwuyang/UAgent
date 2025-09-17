@@ -9,11 +9,16 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 from ..core.research_tree import HierarchicalResearchSystem
+from ..core.unified_orchestrator import UnifiedOrchestrator
 
 router = APIRouter(prefix="/research-tree", tags=["research-tree"])
 
 # Initialize the hierarchical research system
 research_system = HierarchicalResearchSystem()
+
+# Initialize and inject the orchestrator
+orchestrator = UnifiedOrchestrator()
+research_system.orchestrator = orchestrator
 
 
 class ResearchGoalRequest(BaseModel):
