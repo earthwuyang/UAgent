@@ -4,7 +4,7 @@ REST API for the hierarchical tree search-based research system
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -12,17 +12,24 @@ import os
 import json
 import asyncio
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 from ..core.research_tree import HierarchicalResearchSystem
 from ..core.unified_orchestrator import UnifiedOrchestrator
 from ..core.report_generator import MarkdownReportGenerator
 from ..core.persistence import PersistentResearchSystem
 from ..core.enhanced_research_system import DatabaseIntegratedResearchSystem
+from ..core.aira_integration import AIRAEnhancedResearchSystem, AIRAConfig, create_aira_enhanced_system
+from ..core.unified_task_router import task_router, TaskType
+from ..core.node_llm_tracker import node_llm_tracker
 
 router = APIRouter(prefix="/research-tree", tags=["research-tree"])
 
 # Initialize the hierarchical research system with database integration
 research_system = DatabaseIntegratedResearchSystem()
+aira_system = None  # Will be initialized on demand
 
 # Initialize and inject the orchestrator
 orchestrator = UnifiedOrchestrator()
@@ -134,6 +141,22 @@ class ResearchGoalRequest(BaseModel):
     max_depth: Optional[int] = 5
     max_experiments: Optional[int] = 100
     time_budget: Optional[int] = 7200  # 2 hours
+    use_aira: Optional[bool] = False  # Enable AIRA enhancement
+
+
+class AIRAConfigRequest(BaseModel):
+    """Request model for AIRA configuration"""
+    policy: Optional[str] = "mcts"  # mcts, greedy, evolutionary
+    max_wallclock_h: Optional[float] = 24.0
+    max_artifacts: Optional[int] = 400
+    uct_c: Optional[float] = 0.25
+    num_children: Optional[int] = 5
+    draft_complexity: Optional[str] = "normal"
+    improve_complexity: Optional[str] = "normal"
+    debug_max_nodes: Optional[int] = 10
+    cv_folds: Optional[int] = 5
+    final_selection_top_k: Optional[int] = 5
+    per_exec_timeout_h: Optional[float] = 4.0
 
 
 class ResearchGoalResponse(BaseModel):
@@ -317,15 +340,278 @@ async def get_database_statistics():
         raise HTTPException(status_code=500, detail=f"Failed to get database stats: {str(e)}")
 
 
+# AIRA Configuration Endpoints
+
+@router.get("/aira/config")
+async def get_aira_config():
+    """Get current AIRA configuration"""
+    try:
+        global aira_system
+        if aira_system is None:
+            # Return default configuration
+            default_config = AIRAConfig()
+            return {
+                "active": False,
+                "config": {
+                    "policy": default_config.policy,
+                    "max_wallclock_h": default_config.max_wallclock_h,
+                    "max_artifacts": default_config.max_artifacts,
+                    "mcts": {
+                        "uct_c": default_config.uct_c,
+                        "num_children": default_config.num_children
+                    },
+                    "operators": {
+                        "draft_complexity": default_config.draft_complexity,
+                        "improve_complexity": default_config.improve_complexity,
+                        "debug_max_nodes": default_config.debug_max_nodes
+                    },
+                    "evaluation": {
+                        "cv_folds": default_config.cv_folds,
+                        "final_selection_top_k": default_config.final_selection_top_k
+                    }
+                }
+            }
+
+        return {
+            "active": True,
+            "config": aira_system.get_aira_config()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get AIRA config: {str(e)}")
+
+
+@router.post("/aira/config")
+async def update_aira_config(config_request: AIRAConfigRequest):
+    """Update AIRA configuration"""
+    try:
+        global aira_system
+
+        # Create configuration dictionary from request
+        config_dict = {}
+        if config_request.policy is not None:
+            config_dict["policy"] = config_request.policy
+        if config_request.max_wallclock_h is not None:
+            config_dict["max_wallclock_h"] = config_request.max_wallclock_h
+        if config_request.max_artifacts is not None:
+            config_dict["max_artifacts"] = config_request.max_artifacts
+
+        # MCTS specific settings
+        mcts_config = {}
+        if config_request.uct_c is not None:
+            mcts_config["uct_c"] = config_request.uct_c
+        if config_request.num_children is not None:
+            mcts_config["num_children"] = config_request.num_children
+        if mcts_config:
+            config_dict["mcts"] = mcts_config
+
+        # Evaluation settings
+        eval_config = {}
+        if config_request.cv_folds is not None:
+            eval_config["cv_folds"] = config_request.cv_folds
+        if config_request.final_selection_top_k is not None:
+            eval_config["final_selection_top_k"] = config_request.final_selection_top_k
+        if eval_config:
+            config_dict["evaluation"] = eval_config
+
+        # Initialize or update AIRA system
+        if aira_system is None:
+            aira_system = create_aira_enhanced_system(config_dict)
+            # Copy existing data from research_system to aira_system
+            aira_system.active_goals = research_system.active_goals.copy()
+            aira_system.research_trees = research_system.research_trees.copy()
+            if hasattr(research_system, 'db'):
+                aira_system.db = research_system.db
+        else:
+            await aira_system.update_aira_config(config_dict)
+
+        return {
+            "message": "AIRA configuration updated successfully",
+            "active": True,
+            "config": aira_system.get_aira_config()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update AIRA config: {str(e)}")
+
+
+@router.post("/aira/enable")
+async def enable_aira_mode():
+    """Enable AIRA-enhanced research mode"""
+    try:
+        global aira_system, research_system
+
+        if aira_system is None:
+            aira_system = create_aira_enhanced_system()
+            # Copy existing data
+            aira_system.active_goals = research_system.active_goals.copy()
+            aira_system.research_trees = research_system.research_trees.copy()
+            if hasattr(research_system, 'db'):
+                aira_system.db = research_system.db
+            if hasattr(research_system, 'websocket_manager'):
+                aira_system.websocket_manager = research_system.websocket_manager
+
+        return {
+            "message": "AIRA mode enabled successfully",
+            "active": True,
+            "policy": aira_system.config.policy,
+            "capabilities": [
+                "MCTS-based tree search",
+                "Draft/Improve/Debug operators",
+                "5-fold cross validation enforcement",
+                "Top-k final selection",
+                "Enhanced evaluation metrics"
+            ]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to enable AIRA mode: {str(e)}")
+
+
+@router.post("/aira/disable")
+async def disable_aira_mode():
+    """Disable AIRA mode and return to standard research system"""
+    try:
+        global aira_system, research_system
+
+        if aira_system is not None:
+            # Copy data back to standard system
+            research_system.active_goals = aira_system.active_goals.copy()
+            research_system.research_trees = aira_system.research_trees.copy()
+            aira_system = None
+
+        return {
+            "message": "AIRA mode disabled, returned to standard research system",
+            "active": False
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to disable AIRA mode: {str(e)}")
+
+
+@router.get("/aira/status")
+async def get_aira_status():
+    """Get AIRA system status and statistics"""
+    try:
+        global aira_system
+
+        if aira_system is None:
+            return {
+                "active": False,
+                "message": "AIRA mode is not enabled"
+            }
+
+        # Get AIRA-specific statistics for all active goals
+        aira_stats = []
+        for goal_id in aira_system.active_goals.keys():
+            try:
+                status = await aira_system.get_research_tree_status(goal_id)
+                if "aira" in status:
+                    aira_stats.append({
+                        "goal_id": goal_id,
+                        "title": status["goal"]["title"],
+                        "aira_metrics": status["aira"]
+                    })
+            except Exception as e:
+                logger.error(f"Failed to get AIRA status for goal {goal_id}: {e}")
+
+        return {
+            "active": True,
+            "policy": aira_system.config.policy,
+            "config": aira_system.get_aira_config(),
+            "goals_with_aira": aira_stats,
+            "total_aira_goals": len(aira_stats)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get AIRA status: {str(e)}")
+
+
+def _get_active_system():
+    """Get the currently active research system (AIRA or standard)"""
+    global aira_system, research_system
+    return aira_system if aira_system is not None else research_system
+
+
 @router.post("/goals/start", response_model=ResearchGoalResponse)
 async def start_research_goal(request: ResearchGoalRequest):
     """Start a new hierarchical research goal with tree search"""
     try:
-        goal_id = await research_system.start_research_goal(
+        global aira_system
+
+        # Determine which system to use
+        if request.use_aira or aira_system is not None:
+            # Enable AIRA if requested but not yet enabled
+            if aira_system is None:
+                aira_system = create_aira_enhanced_system()
+                # Copy existing data
+                aira_system.active_goals = research_system.active_goals.copy()
+                aira_system.research_trees = research_system.research_trees.copy()
+                if hasattr(research_system, 'db'):
+                    aira_system.db = research_system.db
+                if hasattr(research_system, 'websocket_manager'):
+                    aira_system.websocket_manager = research_system.websocket_manager
+
+            active_system = aira_system
+            system_name = f"AIRA-enhanced ({aira_system.config.policy})"
+        else:
+            active_system = research_system
+            system_name = "standard hierarchical"
+
+        # Use unified task router to classify and potentially route to different systems
+        print(f"🔍 Starting task routing for: {request.title}")
+        try:
+            classification = await task_router.classify_and_route(
+                title=request.title,
+                description=request.description,
+                success_criteria=request.success_criteria
+            )
+
+            print(f"✅ Task classified as {classification.task_type.value} with confidence {classification.confidence}")
+            logger.info(f"Task classified as {classification.task_type.value} with confidence {classification.confidence}")
+
+            # If it's not a research/implementation task, route to appropriate system
+            if classification.task_type == TaskType.QUESTION_ANSWER:
+                # Handle direct Q&A through router
+                routing_result = await task_router.route_task(
+                    classification,
+                    title=request.title,
+                    description=request.description,
+                    success_criteria=request.success_criteria
+                )
+
+                return ResearchGoalResponse(
+                    goal_id="qa_" + str(hash(request.title + request.description))[:8],
+                    title=request.title,
+                    description=request.description,
+                    status="completed",
+                    message=routing_result.get('response', 'Direct answer provided')
+                )
+
+            elif classification.task_type in [TaskType.SEARCH, TaskType.DATA_ANALYSIS]:
+                # For now, these fall back to research tree but with metadata
+                logger.info(f"Task type {classification.task_type.value} routed to research tree with special configuration")
+
+        except Exception as e:
+            logger.warning(f"Task routing failed, proceeding with standard research tree: {e}")
+            classification = None
+
+        # Add classification metadata to constraints
+        constraints = request.constraints or {}
+        if classification:
+            constraints['routing_info'] = {
+                'classification': classification.task_type.value,
+                'confidence': classification.confidence,
+                'reasoning': classification.reasoning,
+                'suggested_system': classification.suggested_system,
+                'parameters': classification.parameters
+            }
+
+        goal_id = await active_system.start_research_goal(
             title=request.title,
             description=request.description,
             success_criteria=request.success_criteria,
-            constraints=request.constraints or {},
+            constraints=constraints,
             max_depth=request.max_depth,
             max_experiments=request.max_experiments
         )
@@ -335,7 +621,7 @@ async def start_research_goal(request: ResearchGoalRequest):
             title=request.title,
             description=request.description,
             status="started",
-            message=f"Hierarchical research goal '{request.title}' started with tree search optimization"
+            message=f"Research goal '{request.title}' started with {system_name} tree search"
         )
 
     except Exception as e:
@@ -346,13 +632,15 @@ async def start_research_goal(request: ResearchGoalRequest):
 async def get_research_tree_status(goal_id: str):
     """Get comprehensive status of a research tree"""
     try:
+        active_system = _get_active_system()
+
         # Add detailed debugging for missing goals
-        if goal_id not in research_system.active_goals:
-            available_goals = list(research_system.active_goals.keys())
+        if goal_id not in active_system.active_goals:
+            available_goals = list(active_system.active_goals.keys())
             error_detail = f"Goal '{goal_id}' not found. Available goals: {available_goals if available_goals else 'None'}"
             raise HTTPException(status_code=404, detail=error_detail)
 
-        status = await research_system.get_research_tree_status(goal_id)
+        status = await active_system.get_research_tree_status(goal_id)
 
         if "error" in status:
             raise HTTPException(status_code=404, detail=status["error"])
@@ -374,13 +662,15 @@ async def get_research_tree_status(goal_id: str):
 async def get_tree_visualization(goal_id: str):
     """Get tree visualization data for frontend rendering"""
     try:
+        active_system = _get_active_system()
+
         # Check if goal exists first
-        if goal_id not in research_system.active_goals:
-            available_goals = list(research_system.active_goals.keys())
+        if goal_id not in active_system.active_goals:
+            available_goals = list(active_system.active_goals.keys())
             error_detail = f"Goal '{goal_id}' not found. Available goals: {available_goals if available_goals else 'None'}"
             raise HTTPException(status_code=404, detail=error_detail)
 
-        status = await research_system.get_research_tree_status(goal_id)
+        status = await active_system.get_research_tree_status(goal_id)
 
         if "error" in status:
             raise HTTPException(status_code=404, detail=status["error"])
@@ -431,18 +721,20 @@ async def get_tree_visualization(goal_id: str):
 async def get_research_insights(goal_id: str):
     """Get AI-generated insights from research tree results"""
     try:
+        active_system = _get_active_system()
+
         # Check if goal exists in both active goals and research trees
-        if goal_id not in research_system.active_goals:
-            available_goals = list(research_system.active_goals.keys())
+        if goal_id not in active_system.active_goals:
+            available_goals = list(active_system.active_goals.keys())
             error_detail = f"Goal '{goal_id}' not found in active goals. Available goals: {available_goals if available_goals else 'None'}"
             raise HTTPException(status_code=404, detail=error_detail)
 
-        if goal_id not in research_system.research_trees:
+        if goal_id not in active_system.research_trees:
             error_detail = f"Research tree for goal '{goal_id}' not found. Goal exists but no tree created yet."
             raise HTTPException(status_code=404, detail=error_detail)
 
-        tree = research_system.research_trees[goal_id]
-        goal = research_system.active_goals[goal_id]
+        tree = active_system.research_trees[goal_id]
+        goal = active_system.active_goals[goal_id]
 
         # Collect insights from all completed experiments
         all_insights = []
@@ -502,7 +794,8 @@ async def get_research_insights(goal_id: str):
 async def list_active_research_goals():
     """List all active research goals"""
     try:
-        active_goals = await research_system.list_active_research_goals()
+        active_system = _get_active_system()
+        active_goals = await active_system.list_active_research_goals()
 
         return ActiveGoalsResponse(
             active_goals=active_goals,
@@ -714,6 +1007,106 @@ async def get_node_report(goal_id: str, node_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get node report: {str(e)}")
+
+
+@router.get("/goals/{goal_id}/nodes/{node_id}/execution-steps")
+async def get_node_execution_steps(goal_id: str, node_id: str):
+    """Get real-time execution steps for a specific node"""
+    try:
+        if goal_id not in research_system.research_trees:
+            raise HTTPException(status_code=404, detail="Research goal not found")
+
+        tree = research_system.research_trees[goal_id]
+        if node_id not in tree:
+            raise HTTPException(status_code=404, detail="Node not found")
+
+        node = tree[node_id]
+
+        # Get execution steps in chronological order
+        execution_steps = []
+
+        # Add execution logs as steps
+        for log in node.execution_logs:
+            execution_steps.append({
+                "timestamp": log.timestamp.isoformat(),
+                "type": "log",
+                "level": log.level,
+                "message": log.message,
+                "context": log.context,
+                "step_number": len(execution_steps) + 1
+            })
+
+        # Add results processing steps
+        if node.results:
+            for i, result in enumerate(node.results):
+                if hasattr(result, 'processing_steps') and result.processing_steps:
+                    for step in result.processing_steps:
+                        execution_steps.append({
+                            "timestamp": step.get("timestamp", ""),
+                            "type": "processing_step",
+                            "step": step.get("step", ""),
+                            "details": step.get("details", ""),
+                            "result_index": i,
+                            "step_number": len(execution_steps) + 1
+                        })
+
+        # Add error details as steps
+        for error in node.error_history:
+            execution_steps.append({
+                "timestamp": error.get("timestamp", ""),
+                "type": "error",
+                "level": "ERROR",
+                "message": f"Error #{error.get('retry_count', 0)}: {error.get('error_message', '')}",
+                "context": {
+                    "error_type": error.get("error_type", ""),
+                    "retry_count": error.get("retry_count", 0),
+                    "execution_time": error.get("execution_time", 0)
+                },
+                "step_number": len(execution_steps) + 1
+            })
+
+        # Sort by timestamp
+        execution_steps.sort(key=lambda x: x.get("timestamp", ""))
+
+        # Re-number steps after sorting
+        for i, step in enumerate(execution_steps):
+            step["step_number"] = i + 1
+
+        # Current status summary
+        status_summary = {
+            "node_id": node_id,
+            "status": node.status.value,
+            "confidence": sanitize_float(node.confidence),
+            "title": node.title,
+            "experiment_type": node.experiment_type.value if node.experiment_type else None,
+            "last_updated": node.completed_at.isoformat() if node.completed_at else (
+                node.started_at.isoformat() if node.started_at else node.created_at.isoformat()
+            ),
+            "total_steps": len(execution_steps),
+            "has_errors": len(node.error_history) > 0,
+            "retry_count": node.retry_count,
+            "last_error": node.last_error
+        }
+
+        return {
+            "status_summary": status_summary,
+            "execution_steps": execution_steps,
+            "detailed_errors": [
+                {
+                    "timestamp": error.get("timestamp", ""),
+                    "error_type": error.get("error_type", ""),
+                    "error_message": error.get("error_message", ""),
+                    "retry_count": error.get("retry_count", 0),
+                    "execution_time": error.get("execution_time", 0)
+                }
+                for error in node.error_history
+            ] if node.error_history else []
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get execution steps: {str(e)}")
 
 
 @router.delete("/goals/{goal_id}/nodes/{node_id}/prune")
@@ -954,6 +1347,91 @@ async def get_frontend_state():
         return {
             "status": "error",
             "message": f"Failed to get frontend state: {str(e)}"
+        }
+
+
+@router.post("/debug/trigger-root-completion/{goal_id}")
+async def trigger_root_completion_check(goal_id: str):
+    """Debug endpoint to manually trigger root completion check"""
+    try:
+        logger.info(f"🔧 DEBUG: Manually triggering root completion check for goal {goal_id}")
+
+        # Check if goal exists
+        if goal_id not in research_system.active_goals:
+            return {
+                "status": "error",
+                "message": f"Goal {goal_id} not found in active goals",
+                "available_goals": list(research_system.active_goals.keys())
+            }
+
+        # Get the tree
+        if goal_id not in research_system.research_trees:
+            return {
+                "status": "error",
+                "message": f"Research tree not found for goal {goal_id}"
+            }
+
+        tree = research_system.research_trees[goal_id]
+        root_node_id = f"{goal_id}_root"
+
+        if root_node_id not in tree:
+            return {
+                "status": "error",
+                "message": f"Root node {root_node_id} not found in tree"
+            }
+
+        root_node = tree[root_node_id]
+
+        # Get current state before check
+        before_state = {
+            "root_status": root_node.status.name,
+            "root_confidence": root_node.confidence,
+            "children_count": len(root_node.children),
+            "children_statuses": {}
+        }
+
+        for child_id in root_node.children:
+            if child_id in tree:
+                child = tree[child_id]
+                before_state["children_statuses"][child_id] = {
+                    "status": child.status.name,
+                    "confidence": child.confidence
+                }
+
+        # Trigger the root completion check
+        await research_system._check_root_completion(goal_id)
+
+        # Get state after check
+        root_node = tree[root_node_id]  # Refresh reference
+        after_state = {
+            "root_status": root_node.status.name,
+            "root_confidence": root_node.confidence,
+            "children_count": len(root_node.children),
+            "children_statuses": {}
+        }
+
+        for child_id in root_node.children:
+            if child_id in tree:
+                child = tree[child_id]
+                after_state["children_statuses"][child_id] = {
+                    "status": child.status.name,
+                    "confidence": child.confidence
+                }
+
+        return {
+            "status": "success",
+            "message": "Root completion check triggered successfully",
+            "goal_id": goal_id,
+            "before_state": before_state,
+            "after_state": after_state,
+            "changed": before_state != after_state
+        }
+
+    except Exception as e:
+        logger.error(f"🚨 DEBUG: Error triggering root completion check: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to trigger root completion check: {str(e)}"
         }
 
 
@@ -1446,3 +1924,209 @@ async def _generate_research_recommendations(goal_id: str) -> List[str]:
         recommendations.append("Research could benefit from deeper exploration of promising paths")
 
     return recommendations
+
+
+# Node-specific LLM Communication Endpoints
+
+@router.get("/goals/{goal_id}/nodes/{node_id}/llm-messages")
+async def get_node_llm_messages(goal_id: str, node_id: str):
+    """Get all LLM messages for a specific node"""
+    try:
+        raw_messages = await node_llm_tracker.get_node_messages(node_id)
+
+        # Clean and serialize messages to ensure JSON compatibility
+        cleaned_messages = []
+        for msg in raw_messages:
+            try:
+                # Convert to dict and ensure all values are JSON serializable
+                cleaned_msg = {
+                    "event_type": str(msg.get("event_type", "")),
+                    "timestamp": str(msg.get("timestamp", "")),
+                    "data": _clean_data_for_serialization(msg.get("data", {}))
+                }
+                cleaned_messages.append(cleaned_msg)
+            except Exception as msg_error:
+                logger.warning(f"Failed to clean message for node {node_id}: {msg_error}")
+                # Add a fallback error message
+                cleaned_messages.append({
+                    "event_type": "error",
+                    "timestamp": datetime.now().isoformat(),
+                    "data": {"error": f"Failed to serialize message: {str(msg_error)}"}
+                })
+
+        return {
+            "goal_id": goal_id,
+            "node_id": node_id,
+            "messages": cleaned_messages,
+            "count": len(cleaned_messages),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting LLM messages for node {node_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving LLM messages: {str(e)}")
+
+
+def _clean_data_for_serialization(data):
+    """Clean data to ensure JSON serialization compatibility"""
+    if isinstance(data, dict):
+        cleaned = {}
+        for key, value in data.items():
+            try:
+                cleaned[str(key)] = _clean_data_for_serialization(value)
+            except Exception:
+                cleaned[str(key)] = str(value)
+        return cleaned
+    elif isinstance(data, (list, tuple)):
+        return [_clean_data_for_serialization(item) for item in data]
+    elif isinstance(data, (str, int, float, bool)) or data is None:
+        return data
+    else:
+        # Convert complex objects to string representation
+        return str(data)
+
+
+@router.get("/goals/{goal_id}/nodes/{node_id}/llm-summary")
+async def get_node_llm_summary(goal_id: str, node_id: str):
+    """Get LLM communication summary for a specific node"""
+    try:
+        summary = await node_llm_tracker.get_node_summary(node_id)
+        return {
+            "goal_id": goal_id,
+            "node_id": node_id,
+            "summary": summary,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting LLM summary for node {node_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving LLM summary: {str(e)}")
+
+
+@router.delete("/goals/{goal_id}/nodes/{node_id}/llm-messages")
+async def clear_node_llm_messages(goal_id: str, node_id: str):
+    """Clear all LLM messages for a specific node"""
+    try:
+        await node_llm_tracker.clear_node_messages(node_id)
+        return {
+            "goal_id": goal_id,
+            "node_id": node_id,
+            "message": "LLM messages cleared successfully",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error clearing LLM messages for node {node_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error clearing LLM messages: {str(e)}")
+
+
+@router.get("/goals/{goal_id}/nodes/{node_id}/llm-messages/stream")
+async def stream_node_llm_messages(goal_id: str, node_id: str):
+    """Stream real-time LLM messages for a specific node using Server-Sent Events"""
+    async def event_generator():
+        last_count = 0
+        cancelled = False
+
+        while not cancelled:
+            try:
+                # Get current messages
+                raw_messages = await node_llm_tracker.get_node_messages(node_id)
+                current_count = len(raw_messages)
+
+                # Only send new messages
+                if current_count > last_count:
+                    new_messages = raw_messages[last_count:]
+
+                    for message in new_messages:
+                        # Clean the message data for JSON serialization
+                        cleaned_message = _clean_data_for_serialization(message)
+
+                        # Format as SSE event
+                        event_data = {
+                            "goal_id": goal_id,
+                            "node_id": node_id,
+                            "message": cleaned_message,
+                            "timestamp": datetime.now().isoformat(),
+                            "message_index": last_count
+                        }
+
+                        yield f"data: {json.dumps(event_data)}\n\n"
+                        last_count += 1
+
+                # Send heartbeat every 30 seconds if no new messages
+                heartbeat_data = {
+                    "type": "heartbeat",
+                    "goal_id": goal_id,
+                    "node_id": node_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "message_count": current_count
+                }
+                yield f"data: {json.dumps(heartbeat_data)}\n\n"
+
+                # Wait before next check
+                await asyncio.sleep(2)
+
+            except asyncio.CancelledError:
+                logger.info(f"SSE stream cancelled for node {node_id}")
+                cancelled = True
+            except Exception as e:
+                logger.error(f"Error in SSE stream for node {node_id}: {e}")
+                error_data = {
+                    "type": "error",
+                    "goal_id": goal_id,
+                    "node_id": node_id,
+                    "error": str(e),
+                    "timestamp": datetime.now().isoformat()
+                }
+                yield f"data: {json.dumps(error_data)}\n\n"
+                cancelled = True
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
+
+
+@router.get("/llm-tracker/status")
+async def get_llm_tracker_status():
+    """Get overall status of the node LLM tracker"""
+    try:
+        nodes_with_messages = await node_llm_tracker.get_all_nodes_with_messages()
+        return {
+            "active_nodes": len(nodes_with_messages),
+            "node_ids": nodes_with_messages,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting LLM tracker status: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving tracker status: {str(e)}")
+
+
+@router.post("/goals/{goal_id}/check-completion")
+async def manually_check_completion(goal_id: str):
+    """Manually trigger root completion check for a specific goal"""
+    try:
+        active_system = _get_active_system()
+
+        if goal_id not in active_system.active_goals:
+            raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found in active goals")
+
+        # Manually call the root completion check
+        await active_system._check_root_completion(goal_id)
+
+        # Get the updated goal status
+        goal_status = await active_system.get_goal_status(goal_id)
+
+        return {
+            "message": f"Root completion check triggered for goal {goal_id}",
+            "goal_status": goal_status,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error checking completion for goal {goal_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error checking completion: {str(e)}")

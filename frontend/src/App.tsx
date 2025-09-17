@@ -2,14 +2,22 @@ import React, { useState } from 'react'
 import { apiSearch, githubSearch, runExperiment, startAIScientist, startAgentLab, getJob } from './services/api'
 import UnifiedDashboard from './components/UnifiedDashboard'
 import HierarchicalResearchDashboard from './components/HierarchicalResearchDashboard'
+import LLMMonitor from './components/LLMMonitor'
 
 export default function App() {
   const [mode, setMode] = useState<'hierarchical' | 'unified' | 'legacy'>('hierarchical')
+  const [showLLMMonitor, setShowLLMMonitor] = useState(false)
 
   if (mode === 'hierarchical') {
     return (
       <div>
         <div className="fixed top-4 right-4 z-50 space-x-2">
+          <button
+            onClick={() => setShowLLMMonitor(true)}
+            className="px-3 py-1 bg-purple-200 text-purple-700 rounded text-sm hover:bg-purple-300"
+          >
+            🤖 LLM Monitor
+          </button>
           <button
             onClick={() => setMode('unified')}
             className="px-3 py-1 bg-blue-200 text-blue-700 rounded text-sm hover:bg-blue-300"
@@ -24,6 +32,11 @@ export default function App() {
           </button>
         </div>
         <HierarchicalResearchDashboard />
+        {/* LLM Monitor overlay */}
+        <LLMMonitor
+          isVisible={showLLMMonitor}
+          onClose={() => setShowLLMMonitor(false)}
+        />
       </div>
     )
   }
@@ -32,6 +45,12 @@ export default function App() {
     return (
       <div>
         <div className="fixed top-4 right-4 z-50 space-x-2">
+          <button
+            onClick={() => setShowLLMMonitor(true)}
+            className="px-3 py-1 bg-purple-200 text-purple-700 rounded text-sm hover:bg-purple-300"
+          >
+            🤖 LLM Monitor
+          </button>
           <button
             onClick={() => setMode('hierarchical')}
             className="px-3 py-1 bg-green-200 text-green-700 rounded text-sm hover:bg-green-300"
@@ -46,6 +65,11 @@ export default function App() {
           </button>
         </div>
         <UnifiedDashboard />
+        {/* LLM Monitor overlay */}
+        <LLMMonitor
+          isVisible={showLLMMonitor}
+          onClose={() => setShowLLMMonitor(false)}
+        />
       </div>
     )
   }
@@ -156,6 +180,12 @@ export default function App() {
           <pre style={{ background: '#f6f8fa', padding: 12, maxHeight: 300, overflow: 'auto' }}>{JSON.stringify(jobInfo, null, 2)}</pre>
         )}
       </section>
+
+      {/* LLM Monitor overlay */}
+      <LLMMonitor
+        isVisible={showLLMMonitor}
+        onClose={() => setShowLLMMonitor(false)}
+      />
     </div>
   )
 }

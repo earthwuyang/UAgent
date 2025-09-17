@@ -61,6 +61,58 @@ const researchAPI = {
     return response.json()
   },
 
+  generateReport: async (goalId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/generate-report`, {
+      method: 'POST'
+    })
+    if (!response.ok) throw new Error('Failed to generate report')
+    return response.json()
+  },
+
+  viewReport: async (goalId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/report/view`)
+    if (!response.ok) throw new Error('Failed to view report')
+    return response.text()
+  },
+
+  downloadReport: async (goalId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/report/download`)
+    if (!response.ok) throw new Error('Failed to download report')
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `research-report-${goalId}.md`
+    document.body.appendChild(a)
+    a.click()
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(a)
+  },
+
+  getRawReport: async (goalId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/report/raw`)
+    if (!response.ok) throw new Error('Failed to get raw report')
+    return response.json()
+  },
+
+  getNodeReport: async (goalId: string, nodeId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/nodes/${nodeId}/report`)
+    if (!response.ok) throw new Error('Failed to get node report')
+    return response.json()
+  },
+
+  getNodeLLMMessages: async (goalId: string, nodeId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/nodes/${nodeId}/llm-messages`)
+    if (!response.ok) throw new Error('Failed to get node LLM messages')
+    return response.json()
+  },
+
+  getNodeLLMSummary: async (goalId: string, nodeId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/nodes/${nodeId}/llm-summary`)
+    if (!response.ok) throw new Error('Failed to get node LLM summary')
+    return response.json()
+  },
+
   expandNode: async (goalId: string, nodeId: string) => {
     const response = await fetch(`${API_BASE}/goals/${goalId}/manual-experiment`, {
       method: 'POST',
@@ -128,7 +180,8 @@ const researchAPI = {
       console.error('💥 Error in getNodeReport:', error)
       throw error
     }
-  }
+  },
+
 }
 
 interface TreeNode {
@@ -162,6 +215,10 @@ export default function HierarchicalResearchDashboard() {
   const [showNodeDetails, setShowNodeDetails] = useState(false)
   const [nodeReport, setNodeReport] = useState<any>(null)
   const [showNodeReport, setShowNodeReport] = useState(false)
+  const [nodeLLMMessages, setNodeLLMMessages] = useState<any>(null)
+  const [nodeLLMSummary, setNodeLLMSummary] = useState<any>(null)
+  const [realtimeLLMMessages, setRealtimeLLMMessages] = useState<any[]>([])
+  const [sseConnected, setSseConnected] = useState(false)
 
   // Form state for new research goals
   const [newGoal, setNewGoal] = useState({
@@ -171,6 +228,9 @@ export default function HierarchicalResearchDashboard() {
     max_depth: 6,
     max_experiments: 150
   })
+
+  // Simple message state for quick start
+  const [userMessage, setUserMessage] = useState('')
 
   // AI generation state
   const [aiGeneration, setAiGeneration] = useState({
@@ -184,6 +244,7 @@ export default function HierarchicalResearchDashboard() {
   const [activeTab, setActiveTab] = useState('dashboard')
   const [loading, setLoading] = useState<string>('')
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [reportPreview, setReportPreview] = useState<string>('')
 
   // Load data on component mount
   useEffect(() => {
@@ -214,6 +275,57 @@ export default function HierarchicalResearchDashboard() {
 
     return () => clearTimeout(timeoutId)
   }, [newGoal.description])
+
+  // Set up SSE connection for real-time LLM messages when a node is selected
+  useEffect(() => {
+    if (!selectedGoal || !selectedNode) {
+      setSseConnected(false)
+      setRealtimeLLMMessages([])
+      return
+    }
+
+    console.log('🔌 Setting up SSE connection for node:', selectedNode.id)
+
+    const eventSource = new EventSource(
+      `${API_BASE}/goals/${selectedGoal}/nodes/${selectedNode.id}/llm-messages/stream`
+    )
+
+    eventSource.onopen = () => {
+      console.log('✅ SSE connection opened for node:', selectedNode.id)
+      setSseConnected(true)
+    }
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('📨 Received SSE message:', data)
+
+        if (data.type === 'heartbeat') {
+          // Handle heartbeat - could update connection status
+          console.log('💓 SSE heartbeat received')
+        } else if (data.message) {
+          // New LLM message received
+          setRealtimeLLMMessages(prev => [...prev, data.message])
+          console.log('🤖 New LLM message added to realtime feed')
+        }
+      } catch (error) {
+        console.error('❌ Error parsing SSE message:', error)
+      }
+    }
+
+    eventSource.onerror = (error) => {
+      console.error('❌ SSE connection error:', error)
+      setSseConnected(false)
+    }
+
+    // Cleanup function
+    return () => {
+      console.log('🔌 Closing SSE connection for node:', selectedNode.id)
+      eventSource.close()
+      setSseConnected(false)
+      setRealtimeLLMMessages([])
+    }
+  }, [selectedGoal, selectedNode])
 
   const loadInitialData = async () => {
     await Promise.all([
@@ -310,6 +422,40 @@ export default function HierarchicalResearchDashboard() {
     }
   }
 
+  const handleQuickStart = async () => {
+    if (!userMessage.trim()) return
+
+    setLoading('starting')
+    try {
+      // Generate title and success criteria from message
+      const generatedContent = await researchAPI.generateResearchContent(userMessage)
+
+      // Start the goal with generated content
+      const goalData = {
+        title: generatedContent.title || userMessage.slice(0, 50) + '...',
+        description: userMessage,
+        success_criteria: generatedContent.success_criteria || ['Complete the research objective'],
+        max_depth: 6,
+        max_experiments: 150
+      }
+
+      const response = await researchAPI.startGoal(goalData)
+
+      // Clear the message and select the new goal
+      setUserMessage('')
+      setSelectedGoal(response.goal_id)
+      await loadActiveGoals()
+      await refreshGoalData(response.goal_id)
+
+      // Switch to tree view to show the running research
+      setActiveTab('tree-view')
+    } catch (error) {
+      alert(`Failed to start research: ${error}`)
+    } finally {
+      setLoading('')
+    }
+  }
+
   const handleGoalSelection = async (goalId: string) => {
     setSelectedGoal(goalId)
     setLoading('loading')
@@ -397,7 +543,25 @@ export default function HierarchicalResearchDashboard() {
       const report = await researchAPI.getNodeReport(selectedGoal, nodeId)
       console.log('📊 Got report successfully:', report)
 
+      // Load LLM messages and summary for this node
+      console.log('🤖 Loading LLM messages for node...')
+      const [llmMessages, llmSummary] = await Promise.all([
+        researchAPI.getNodeLLMMessages(selectedGoal, nodeId).catch(e => {
+          console.warn('⚠️ Failed to load LLM messages:', e)
+          return { messages: [], count: 0 }
+        }),
+        researchAPI.getNodeLLMSummary(selectedGoal, nodeId).catch(e => {
+          console.warn('⚠️ Failed to load LLM summary:', e)
+          return { summary: { total_messages: 0, requests: 0, responses: 0 } }
+        })
+      ])
+
+      console.log('🤖 LLM Messages loaded:', llmMessages)
+      console.log('📈 LLM Summary loaded:', llmSummary)
+
       setNodeReport(report)
+      setNodeLLMMessages(llmMessages)
+      setNodeLLMSummary(llmSummary)
       setShowNodeReport(true)
       console.log('✅ Report state updated successfully')
     } catch (error) {
@@ -439,6 +603,7 @@ export default function HierarchicalResearchDashboard() {
     setShowNodeDetails(true)
   }
 
+
   const renderTreeVisualization = (node: TreeNode, depth = 0) => {
     const getStatusColor = (status: string) => {
       switch (status) {
@@ -474,6 +639,7 @@ export default function HierarchicalResearchDashboard() {
               : getStatusColor(node.status)
           }`}
           onClick={() => handleNodeClick(node)}
+          title="Click to select node"
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -782,9 +948,49 @@ export default function HierarchicalResearchDashboard() {
       case 'dashboard':
         return (
           <div className="space-y-6">
+            {/* Quick Start Interface */}
+            <div className="bg-gradient-to-r from-blue-50 to-purple-50 p-6 rounded-lg shadow border-2 border-blue-200">
+              <h2 className="text-2xl font-bold text-gray-900 mb-4">🚀 Start New Research</h2>
+              <div className="flex gap-4">
+                <div className="flex-1">
+                  <textarea
+                    value={userMessage}
+                    onChange={(e) => setUserMessage(e.target.value)}
+                    placeholder="Describe what you want to research or build... (e.g., 'Setup MongoDB for analytics', 'Build a Python web scraper', 'Create a machine learning model for sentiment analysis')"
+                    className="w-full p-4 border rounded-lg resize-none text-lg"
+                    rows={3}
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        handleQuickStart()
+                      }
+                    }}
+                  />
+                  <p className="text-sm text-gray-600 mt-2">
+                    💡 Press Ctrl+Enter to start, or click the button below
+                  </p>
+                </div>
+                <div className="flex flex-col justify-center">
+                  <button
+                    onClick={handleQuickStart}
+                    disabled={!userMessage.trim() || loading === 'starting'}
+                    className="px-8 py-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed font-semibold text-lg transition-colors"
+                  >
+                    {loading === 'starting' ? (
+                      <>
+                        <span className="animate-spin inline-block w-5 h-5 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+                        Starting...
+                      </>
+                    ) : (
+                      '▶️ Start'
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {/* System Overview */}
             <div className="bg-white p-6 rounded-lg shadow">
-              <h3 className="text-lg font-semibold mb-4">Hierarchical Research System</h3>
+              <h3 className="text-lg font-semibold mb-4">📊 System Overview</h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="text-center">
                   <div className="text-2xl font-bold text-blue-500">
@@ -909,10 +1115,10 @@ export default function HierarchicalResearchDashboard() {
           </div>
         )
 
-      case 'start-goal':
+      case 'advanced':
         return (
           <div className="bg-white p-6 rounded-lg shadow">
-            <h3 className="text-lg font-semibold mb-4">🚀 Start New Research Goal</h3>
+            <h3 className="text-lg font-semibold mb-4">⚙️ Advanced Research Configuration</h3>
             <div className="space-y-6">
               {/* Step 1: Research Description */}
               <div>
@@ -1110,6 +1316,7 @@ export default function HierarchicalResearchDashboard() {
                 <RomaTreeVisualization
                   data={treeVisualization}
                   selectedNodeId={selectedNode?.id}
+                  goalId={selectedGoal}
                   onNodeSelect={(nodeId) => {
                     const node = treeVisualization?.all_nodes?.[nodeId]
                     if (node) {
@@ -1213,6 +1420,118 @@ export default function HierarchicalResearchDashboard() {
           </div>
         )
 
+      case 'reports':
+        return (
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h3 className="text-lg font-semibold mb-4">📋 Research Reports</h3>
+
+              {selectedGoal ? (
+                <div className="space-y-4">
+                  <div className="border-l-4 border-blue-500 bg-blue-50 p-4">
+                    <h4 className="font-medium text-blue-900">Selected Goal: {activeGoals.find(g => g.id === selectedGoal)?.title}</h4>
+                    <p className="text-blue-700 text-sm mt-1">Generate and view comprehensive research reports</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* Generate Report */}
+                    <div className="border rounded-lg p-4">
+                      <h5 className="font-medium text-gray-900 mb-2">📄 Generate Report</h5>
+                      <p className="text-sm text-gray-600 mb-4">Create a comprehensive markdown report of research findings</p>
+                      <button
+                        onClick={async () => {
+                          setLoading('generating-report')
+                          try {
+                            const result = await researchAPI.generateReport(selectedGoal)
+                            alert(`Report generated successfully! ${result.message}`)
+                          } catch (error) {
+                            alert(`Failed to generate report: ${error}`)
+                          } finally {
+                            setLoading('')
+                          }
+                        }}
+                        disabled={loading === 'generating-report'}
+                        className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {loading === 'generating-report' ? 'Generating...' : 'Generate Report'}
+                      </button>
+                    </div>
+
+                    {/* View Report */}
+                    <div className="border rounded-lg p-4">
+                      <h5 className="font-medium text-gray-900 mb-2">👁️ View Report</h5>
+                      <p className="text-sm text-gray-600 mb-4">View the report in a web interface</p>
+                      <button
+                        onClick={() => {
+                          const reportUrl = `${API_BASE}/goals/${selectedGoal}/report/view`
+                          window.open(reportUrl, '_blank')
+                        }}
+                        className="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700"
+                      >
+                        View Report
+                      </button>
+                    </div>
+
+                    {/* Download Report */}
+                    <div className="border rounded-lg p-4">
+                      <h5 className="font-medium text-gray-900 mb-2">📥 Download Report</h5>
+                      <p className="text-sm text-gray-600 mb-4">Download the markdown file to your computer</p>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await researchAPI.downloadReport(selectedGoal)
+                          } catch (error) {
+                            alert(`Failed to download report: ${error}`)
+                          }
+                        }}
+                        className="w-full bg-purple-600 text-white px-4 py-2 rounded-md hover:bg-purple-700"
+                      >
+                        Download MD
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Report Preview */}
+                  <div className="border rounded-lg p-4">
+                    <h5 className="font-medium text-gray-900 mb-2">📖 Report Preview</h5>
+                    <button
+                      onClick={async () => {
+                        setLoading('loading-preview')
+                        try {
+                          const reportData = await researchAPI.getRawReport(selectedGoal)
+                          setReportPreview(reportData.markdown_content)
+                        } catch (error) {
+                          console.error('No report available yet:', error)
+                          setReportPreview('No report generated yet. Click "Generate Report" first.')
+                        } finally {
+                          setLoading('')
+                        }
+                      }}
+                      disabled={loading === 'loading-preview'}
+                      className="mb-4 bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700 disabled:opacity-50"
+                    >
+                      {loading === 'loading-preview' ? 'Loading...' : 'Load Preview'}
+                    </button>
+
+                    {reportPreview && (
+                      <div className="bg-gray-50 border rounded p-4 max-h-96 overflow-y-auto">
+                        <pre className="whitespace-pre-wrap text-sm font-mono text-gray-800">
+                          {reportPreview}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <p className="text-gray-500 mb-4">Select a research goal to generate and view reports</p>
+                  <p className="text-sm text-gray-400">Reports provide comprehensive summaries of research findings and insights</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )
+
       default:
         return null
     }
@@ -1238,10 +1557,11 @@ export default function HierarchicalResearchDashboard() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex space-x-8">
             {[
-              { id: 'dashboard', label: '📊 Dashboard', icon: '📊' },
-              { id: 'start-goal', label: '🎯 Start Research', icon: '🎯' },
+              { id: 'dashboard', label: '🏠 Dashboard', icon: '🏠' },
               { id: 'tree-view', label: '🌳 Tree View', icon: '🌳' },
-              { id: 'insights', label: '💡 AI Insights', icon: '💡' }
+              { id: 'insights', label: '💡 AI Insights', icon: '💡' },
+              { id: 'reports', label: '📋 Reports', icon: '📋' },
+              { id: 'advanced', label: '⚙️ Advanced', icon: '⚙️' }
             ].map(tab => (
               <button
                 key={tab.id}
@@ -1271,6 +1591,7 @@ export default function HierarchicalResearchDashboard() {
           )}
         </div>
       </main>
+
 
       {/* Node Report Modal */}
       {showNodeReport && nodeReport && (
@@ -1537,6 +1858,169 @@ export default function HierarchicalResearchDashboard() {
                   </div>
                 </div>
               )}
+
+              {/* LLM Communications - Always show when node is selected */}
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <h3 className="font-semibold">🤖 LLM Communications</h3>
+                  {sseConnected && (
+                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full">
+                      <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+                      Live
+                    </span>
+                  )}
+                  {!sseConnected && (
+                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-600 text-xs rounded-full">
+                      <span className="w-2 h-2 bg-gray-400 rounded-full"></span>
+                      Offline
+                    </span>
+                  )}
+                </div>
+
+                  {/* LLM Summary */}
+                  {nodeLLMSummary && (
+                    <div className="bg-blue-50 p-4 rounded-lg mb-4 space-y-2 text-sm">
+                      <div>
+                        <span className="font-medium">Total Messages:</span> {nodeLLMSummary.total_messages || 0}
+                      </div>
+                      <div>
+                        <span className="font-medium">Requests:</span> {nodeLLMSummary.request_count || 0}
+                      </div>
+                      <div>
+                        <span className="font-medium">Responses:</span> {nodeLLMSummary.response_count || 0}
+                      </div>
+                      <div>
+                        <span className="font-medium">Errors:</span> {nodeLLMSummary.error_count || 0}
+                      </div>
+                      {nodeLLMSummary.latest_timestamp && (
+                        <div>
+                          <span className="font-medium">Latest Activity:</span> {new Date(nodeLLMSummary.latest_timestamp).toLocaleString()}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* LLM Messages */}
+                  {nodeLLMMessages && nodeLLMMessages.length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer font-medium text-blue-600 hover:text-blue-800">
+                        View All LLM Messages ({nodeLLMMessages.length})
+                      </summary>
+                    <div className="mt-3 space-y-3 max-h-96 overflow-y-auto">
+                      {nodeLLMMessages.map((message, index) => (
+                        <div key={index} className="border border-gray-200 rounded-lg p-3">
+                          <div className="flex justify-between items-start mb-2">
+                            <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                              message.event_type === 'request' ? 'bg-green-100 text-green-800' :
+                              message.event_type === 'response' ? 'bg-blue-100 text-blue-800' :
+                              'bg-red-100 text-red-800'
+                            }`}>
+                              {message.event_type.toUpperCase()}
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              {new Date(message.timestamp).toLocaleString()}
+                            </span>
+                          </div>
+
+                          {/* Message Content */}
+                          {message.event_type === 'request' && message.data.messages && (
+                            <div className="space-y-2">
+                              {message.data.messages.map((msg, msgIndex) => (
+                                <div key={msgIndex} className="bg-gray-50 p-2 rounded text-sm">
+                                  <div className="font-medium text-xs text-gray-600 mb-1">
+                                    {msg.role?.toUpperCase() || 'MESSAGE'}:
+                                  </div>
+                                  <div className="whitespace-pre-wrap text-xs max-h-32 overflow-y-auto">
+                                    {msg.content || 'No content'}
+                                  </div>
+                                </div>
+                              ))}
+                              {message.data.context && (
+                                <div className="text-xs text-gray-600">
+                                  <span className="font-medium">Context:</span> {JSON.stringify(message.data.context)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {message.event_type === 'response' && (
+                            <div className="space-y-2">
+                              {message.data.content && (
+                                <div className="bg-blue-50 p-2 rounded text-sm">
+                                  <div className="font-medium text-xs text-blue-600 mb-1">RESPONSE:</div>
+                                  <div className="whitespace-pre-wrap text-xs max-h-32 overflow-y-auto">
+                                    {message.data.content}
+                                  </div>
+                                </div>
+                              )}
+                              {message.data.usage && (
+                                <div className="text-xs text-gray-600">
+                                  <span className="font-medium">Usage:</span> {JSON.stringify(message.data.usage)}
+                                </div>
+                              )}
+                              {message.data.error && (
+                                <div className="bg-red-50 p-2 rounded text-sm">
+                                  <div className="font-medium text-xs text-red-600 mb-1">ERROR:</div>
+                                  <div className="text-xs text-red-800">{message.data.error}</div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    </details>
+                  )}
+
+                  {/* Real-time LLM Messages */}
+                  {realtimeLLMMessages.length > 0 && (
+                    <details className="mt-4">
+                      <summary className="cursor-pointer font-medium text-green-600 hover:text-green-800">
+                        🔴 Real-time LLM Messages ({realtimeLLMMessages.length})
+                      </summary>
+                      <div className="mt-3 space-y-3 max-h-96 overflow-y-auto">
+                        {realtimeLLMMessages.map((message, index) => (
+                          <div key={index} className="border border-green-200 rounded-lg p-3 bg-green-50">
+                            <div className="flex justify-between items-start mb-2">
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                message.event_type === 'request' ? 'bg-green-100 text-green-800' :
+                                message.event_type === 'response' ? 'bg-blue-100 text-blue-800' :
+                                'bg-red-100 text-red-800'
+                              }`}>
+                                {message.event_type?.toUpperCase() || 'NEW'}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {new Date(message.timestamp || Date.now()).toLocaleString()}
+                              </span>
+                            </div>
+
+                            {/* Real-time Message Content */}
+                            <div className="space-y-2">
+                              <div className="bg-white p-2 rounded text-sm">
+                                <div className="font-medium text-xs text-gray-600 mb-1">
+                                  REAL-TIME MESSAGE:
+                                </div>
+                                <div className="whitespace-pre-wrap text-xs max-h-32 overflow-y-auto">
+                                  {JSON.stringify(message, null, 2)}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {/* No messages state */}
+                  {(!nodeLLMMessages || nodeLLMMessages.length === 0) && realtimeLLMMessages.length === 0 && (
+                    <div className="text-center py-8 text-gray-500">
+                      <div className="text-4xl mb-2">📡</div>
+                      <p className="text-sm">No LLM messages yet</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        Messages will appear here when this node starts communicating with the LLM
+                      </p>
+                    </div>
+                  )}
+                </div>
 
               {/* Raw Debug Data */}
               <details>

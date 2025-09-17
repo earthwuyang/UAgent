@@ -5,9 +5,24 @@ LLM Client for qwen3-max-review via DashScope
 import os
 import json
 import asyncio
-from typing import Dict, Any, Optional, List
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Callable
 from dashscope import Generation
 from dashscope.api_entities.dashscope_response import Role
+
+logger = logging.getLogger(__name__)
+
+# Import the node tracker
+try:
+    from .node_llm_tracker import llm_message_listener, node_llm_tracker
+    NODE_TRACKER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Node tracker not available: {e}")
+    NODE_TRACKER_AVAILABLE = False
+
+    async def llm_message_listener(event_type: str, data: dict):
+        pass
 
 
 class QwenLLMClient:
@@ -17,22 +32,58 @@ class QwenLLMClient:
         self.model_name = "qwen-max-latest"
         self.api_key = os.getenv("DASHSCOPE_API_KEY")
         self.api_available = bool(self.api_key)
+        self.message_listeners: List[Callable] = []  # For real-time monitoring
+
+        # Set up node tracker listener
+        self._setup_node_tracker()
+
+    def _setup_node_tracker(self):
+        """Set up the node-specific LLM tracker"""
+        self.add_message_listener(llm_message_listener)
+
+    def add_message_listener(self, listener: Callable):
+        """Add a listener for real-time LLM communication monitoring"""
+        self.message_listeners.append(listener)
+
+    def remove_message_listener(self, listener: Callable):
+        """Remove a message listener"""
+        if listener in self.message_listeners:
+            self.message_listeners.remove(listener)
+
+    async def _emit_message_event(self, event_type: str, data: Dict[str, Any]):
+        """Emit message event to all listeners"""
+        for listener in self.message_listeners:
+            try:
+                if asyncio.iscoroutinefunction(listener):
+                    await listener(event_type, data)
+                else:
+                    listener(event_type, data)
+            except Exception as e:
+                logger.error(f"Message listener error: {e}")
 
     async def generate_response(
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        node_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Generate response using qwen3-max-review"""
 
         if not self.api_available:
-            return {
+            error_response = {
                 "success": False,
                 "error": "DASHSCOPE_API_KEY not configured. Please set the environment variable.",
                 "model": self.model_name
             }
+            await self._emit_message_event("error", {
+                "timestamp": datetime.now().isoformat(),
+                "error": error_response["error"],
+                "model": self.model_name
+            })
+            return error_response
 
         messages = []
         if system_prompt:
@@ -44,6 +95,17 @@ class QwenLLMClient:
         messages.append({
             'role': Role.USER,
             'content': prompt
+        })
+
+        # Emit request event
+        await self._emit_message_event("request", {
+            "timestamp": datetime.now().isoformat(),
+            "model": self.model_name,
+            "node_id": node_id,
+            "context": context,
+            "messages": [{"role": msg['role'], "content": msg['content']} for msg in messages],
+            "temperature": temperature,
+            "max_tokens": max_tokens
         })
 
         try:
@@ -61,25 +123,62 @@ class QwenLLMClient:
 
             if response.status_code == 200:
                 content = response.output.choices[0].message.content
-                return {
+                success_response = {
                     "success": True,
                     "content": content,
                     "model": self.model_name,
                     "usage": response.usage if hasattr(response, 'usage') else None
                 }
+
+                # Emit successful response event
+                await self._emit_message_event("response", {
+                    "timestamp": datetime.now().isoformat(),
+                    "model": self.model_name,
+                    "node_id": node_id,
+                    "context": context,
+                    "content": content,
+                    "usage": response.usage if hasattr(response, 'usage') else None,
+                    "success": True
+                })
+
+                return success_response
             else:
-                return {
+                error_response = {
                     "success": False,
                     "error": f"API error: {response.code} - {response.message}",
                     "model": self.model_name
                 }
 
+                # Emit error response event
+                await self._emit_message_event("response", {
+                    "timestamp": datetime.now().isoformat(),
+                    "model": self.model_name,
+                    "node_id": node_id,
+                    "context": context,
+                    "error": error_response["error"],
+                    "success": False
+                })
+
+                return error_response
+
         except Exception as e:
-            return {
+            exception_response = {
                 "success": False,
                 "error": f"Exception: {str(e)}",
                 "model": self.model_name
             }
+
+            # Emit exception event
+            await self._emit_message_event("response", {
+                "timestamp": datetime.now().isoformat(),
+                "model": self.model_name,
+                "node_id": node_id,
+                "context": context,
+                "error": str(e),
+                "success": False
+            })
+
+            return exception_response
 
     async def analyze_literature(self, goal: str, papers: List[Dict]) -> Dict[str, Any]:
         """Analyze literature for research goal"""

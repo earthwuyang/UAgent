@@ -148,6 +148,44 @@ class ResearchDatabase:
                 )
             """)
 
+            # Research patterns table - learn from successful approaches
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern_type TEXT NOT NULL,  -- infrastructure, algorithm, debugging, etc.
+                    service_type TEXT NULL,  -- mongodb, postgresql, redis, etc.
+                    problem_description TEXT NOT NULL,
+                    solution_approach TEXT NOT NULL,  -- JSON object describing the approach
+                    success_rate REAL DEFAULT 0.0,
+                    usage_count INTEGER DEFAULT 1,
+                    average_confidence REAL DEFAULT 0.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    tags TEXT,  -- JSON array of searchable tags
+                    constraints_pattern TEXT,  -- JSON object of common constraints
+                    success_criteria_pattern TEXT  -- JSON array of typical success criteria
+                )
+            """)
+
+            # Pattern applications table - track when patterns are used
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pattern_applications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern_id INTEGER NOT NULL,
+                    goal_id TEXT NOT NULL,
+                    node_id TEXT NULL,
+                    application_success BOOLEAN NULL,  -- null if still running
+                    final_confidence REAL NULL,
+                    execution_time REAL NULL,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP NULL,
+                    adaptation_notes TEXT,  -- what was modified from the pattern
+                    FOREIGN KEY (pattern_id) REFERENCES research_patterns (id) ON DELETE CASCADE,
+                    FOREIGN KEY (goal_id) REFERENCES research_goals (id) ON DELETE CASCADE,
+                    FOREIGN KEY (node_id) REFERENCES research_nodes (id) ON DELETE SET NULL
+                )
+            """)
+
             # Create indexes for better performance
             conn.execute("CREATE INDEX IF NOT EXISTS idx_goals_status ON research_goals (status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_goals_created ON research_goals (created_at)")
@@ -157,6 +195,11 @@ class ResearchDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_results_node ON experiment_results (node_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node ON execution_logs (node_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON execution_logs (timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_type ON research_patterns (pattern_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_service ON research_patterns (service_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_success ON research_patterns (success_rate)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_applications_pattern ON pattern_applications (pattern_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_applications_goal ON pattern_applications (goal_id)")
 
             conn.commit()
 
@@ -523,3 +566,182 @@ class ResearchDatabase:
         except Exception as e:
             logger.error(f"Failed to search goals with query '{query}': {e}")
             return []
+
+    # Research Pattern Management Methods
+
+    def save_research_pattern(self, pattern_type: str, service_type: str, problem_description: str,
+                            solution_approach: Dict[str, Any], tags: List[str] = None,
+                            constraints_pattern: Dict[str, Any] = None,
+                            success_criteria_pattern: List[str] = None) -> int:
+        """Save a successful research pattern for future reuse"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute("""
+                    INSERT INTO research_patterns (
+                        pattern_type, service_type, problem_description, solution_approach,
+                        tags, constraints_pattern, success_criteria_pattern
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    pattern_type,
+                    service_type,
+                    problem_description,
+                    json.dumps(solution_approach),
+                    json.dumps(tags or []),
+                    json.dumps(constraints_pattern or {}),
+                    json.dumps(success_criteria_pattern or [])
+                ))
+                pattern_id = cursor.lastrowid
+                conn.commit()
+                logger.info(f"Saved research pattern {pattern_id} for {pattern_type}")
+                return pattern_id
+        except Exception as e:
+            logger.error(f"Failed to save research pattern: {e}")
+            return -1
+
+    def find_matching_patterns(self, pattern_type: str = None, service_type: str = None,
+                             problem_keywords: List[str] = None, min_success_rate: float = 0.0,
+                             limit: int = 10) -> List[Dict[str, Any]]:
+        """Find research patterns matching given criteria"""
+        try:
+            with self._get_connection() as conn:
+                query_parts = ["SELECT * FROM research_patterns WHERE 1=1"]
+                params = []
+
+                if pattern_type:
+                    query_parts.append("AND pattern_type = ?")
+                    params.append(pattern_type)
+
+                if service_type:
+                    query_parts.append("AND service_type = ?")
+                    params.append(service_type)
+
+                if problem_keywords:
+                    keyword_conditions = []
+                    for keyword in problem_keywords:
+                        keyword_conditions.append("problem_description LIKE ?")
+                        params.append(f"%{keyword}%")
+                    query_parts.append(f"AND ({' OR '.join(keyword_conditions)})")
+
+                if min_success_rate > 0:
+                    query_parts.append("AND success_rate >= ?")
+                    params.append(min_success_rate)
+
+                query_parts.append("ORDER BY success_rate DESC, usage_count DESC LIMIT ?")
+                params.append(limit)
+
+                query = " ".join(query_parts)
+                cursor = conn.execute(query, params)
+
+                patterns = []
+                for row in cursor:
+                    pattern_data = dict(row)
+                    pattern_data['solution_approach'] = json.loads(pattern_data['solution_approach'])
+                    pattern_data['tags'] = json.loads(pattern_data['tags'] or '[]')
+                    pattern_data['constraints_pattern'] = json.loads(pattern_data['constraints_pattern'] or '{}')
+                    pattern_data['success_criteria_pattern'] = json.loads(pattern_data['success_criteria_pattern'] or '[]')
+                    patterns.append(pattern_data)
+
+                return patterns
+        except Exception as e:
+            logger.error(f"Failed to find matching patterns: {e}")
+            return []
+
+    def update_pattern_success(self, pattern_id: int, application_success: bool, confidence: float = None):
+        """Update pattern success metrics when applied"""
+        try:
+            with self._get_connection() as conn:
+                # Get current stats
+                cursor = conn.execute("""
+                    SELECT usage_count, success_rate, average_confidence
+                    FROM research_patterns WHERE id = ?
+                """, (pattern_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return False
+
+                usage_count, current_success_rate, avg_confidence = row
+                new_usage_count = usage_count + 1
+
+                # Calculate new success rate
+                current_successes = int(usage_count * current_success_rate)
+                new_successes = current_successes + (1 if application_success else 0)
+                new_success_rate = new_successes / new_usage_count
+
+                # Calculate new average confidence
+                if confidence is not None:
+                    current_confidence_sum = avg_confidence * usage_count
+                    new_avg_confidence = (current_confidence_sum + confidence) / new_usage_count
+                else:
+                    new_avg_confidence = avg_confidence
+
+                # Update the pattern
+                conn.execute("""
+                    UPDATE research_patterns
+                    SET usage_count = ?, success_rate = ?, average_confidence = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (new_usage_count, new_success_rate, new_avg_confidence, pattern_id))
+
+                conn.commit()
+                logger.info(f"Updated pattern {pattern_id} success metrics")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update pattern success for {pattern_id}: {e}")
+            return False
+
+    def record_pattern_application(self, pattern_id: int, goal_id: str, node_id: str = None,
+                                 adaptation_notes: str = None) -> int:
+        """Record when a pattern is applied to a research goal"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute("""
+                    INSERT INTO pattern_applications (pattern_id, goal_id, node_id, adaptation_notes)
+                    VALUES (?, ?, ?, ?)
+                """, (pattern_id, goal_id, node_id, adaptation_notes))
+                application_id = cursor.lastrowid
+                conn.commit()
+                logger.info(f"Recorded pattern application {application_id}")
+                return application_id
+        except Exception as e:
+            logger.error(f"Failed to record pattern application: {e}")
+            return -1
+
+    def get_pattern_performance(self, pattern_type: str = None, service_type: str = None) -> Dict[str, Any]:
+        """Get performance statistics for research patterns"""
+        try:
+            with self._get_connection() as conn:
+                query_parts = ["""
+                    SELECT pattern_type, service_type,
+                           COUNT(*) as total_patterns,
+                           AVG(success_rate) as avg_success_rate,
+                           AVG(usage_count) as avg_usage_count,
+                           AVG(average_confidence) as avg_confidence
+                    FROM research_patterns WHERE 1=1
+                """]
+                params = []
+
+                if pattern_type:
+                    query_parts.append("AND pattern_type = ?")
+                    params.append(pattern_type)
+
+                if service_type:
+                    query_parts.append("AND service_type = ?")
+                    params.append(service_type)
+
+                query_parts.append("GROUP BY pattern_type, service_type ORDER BY avg_success_rate DESC")
+
+                query = " ".join(query_parts)
+                cursor = conn.execute(query, params)
+
+                stats = []
+                for row in cursor:
+                    stats.append(dict(row))
+
+                return {
+                    "pattern_performance": stats,
+                    "total_unique_patterns": len(stats)
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get pattern performance: {e}")
+            return {"pattern_performance": [], "total_unique_patterns": 0}

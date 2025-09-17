@@ -43,8 +43,10 @@ class ResearchPersistence:
                 "max_depth": goal.max_depth,
                 "max_experiments": goal.max_experiments,
                 "quality_threshold": goal.quality_threshold,
+                "status": getattr(goal, 'status', 'active'),
                 "created_at": goal.created_at.isoformat() if goal.created_at else datetime.now().isoformat(),
-                "status": "active"
+                "started_at": goal.started_at.isoformat() if getattr(goal, 'started_at', None) else None,
+                "completed_at": goal.completed_at.isoformat() if getattr(goal, 'completed_at', None) else None
             }
 
             # Save back to file
@@ -85,18 +87,24 @@ class ResearchPersistence:
 
             # Reconstruct ResearchGoal object
             goal = ResearchGoal(
+                id=goal_id,
                 title=goal_data["title"],
                 description=goal_data["description"],
                 success_criteria=goal_data["success_criteria"],
                 constraints=goal_data.get("constraints", {}),
                 max_depth=goal_data.get("max_depth", 5),
                 max_experiments=goal_data.get("max_experiments", 100),
-                quality_threshold=goal_data.get("quality_threshold", 0.7)
+                quality_threshold=goal_data.get("quality_threshold", 0.7),
+                status=goal_data.get("status", "active")
             )
 
-            # Set created_at if available
+            # Set timestamps if available
             if "created_at" in goal_data:
                 goal.created_at = datetime.fromisoformat(goal_data["created_at"])
+            if goal_data.get("started_at"):
+                goal.started_at = datetime.fromisoformat(goal_data["started_at"])
+            if goal_data.get("completed_at"):
+                goal.completed_at = datetime.fromisoformat(goal_data["completed_at"])
 
             return goal
 

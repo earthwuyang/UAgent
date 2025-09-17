@@ -41,17 +41,23 @@ class DatabaseIntegratedResearchSystem(HierarchicalResearchSystem):
 
                 # Reconstruct ResearchGoal object
                 goal = ResearchGoal(
+                    id=goal_data['id'],
                     title=goal_data['title'],
                     description=goal_data['description'],
                     success_criteria=goal_data['success_criteria'],
                     constraints=goal_data['constraints'],
                     max_depth=goal_data['max_depth'],
                     max_experiments=goal_data['max_experiments'],
-                    quality_threshold=goal_data['quality_threshold']
+                    quality_threshold=goal_data['quality_threshold'],
+                    status=goal_data.get('status', 'active')
                 )
 
                 if goal_data['created_at']:
                     goal.created_at = datetime.fromisoformat(goal_data['created_at'])
+                if goal_data.get('started_at'):
+                    goal.started_at = datetime.fromisoformat(goal_data['started_at'])
+                if goal_data.get('completed_at'):
+                    goal.completed_at = datetime.fromisoformat(goal_data['completed_at'])
 
                 self.active_goals[goal_id] = goal
 
@@ -245,17 +251,23 @@ class DatabaseIntegratedResearchSystem(HierarchicalResearchSystem):
 
             # Reconstruct goal object
             goal = ResearchGoal(
+                id=goal_details['id'],
                 title=goal_details['title'],
                 description=goal_details['description'],
                 success_criteria=goal_details['success_criteria'],
                 constraints=goal_details['constraints'],
                 max_depth=goal_details['max_depth'],
                 max_experiments=goal_details['max_experiments'],
-                quality_threshold=goal_details['quality_threshold']
+                quality_threshold=goal_details['quality_threshold'],
+                status=goal_details.get('status', 'active')
             )
 
             if goal_details['created_at']:
                 goal.created_at = datetime.fromisoformat(goal_details['created_at'])
+            if goal_details.get('started_at'):
+                goal.started_at = datetime.fromisoformat(goal_details['started_at'])
+            if goal_details.get('completed_at'):
+                goal.completed_at = datetime.fromisoformat(goal_details['completed_at'])
 
             # Add back to active goals
             self.active_goals[goal_id] = goal

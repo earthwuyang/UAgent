@@ -94,6 +94,178 @@ Use this directory for all code generation and execution related to this task.
         logger.info(f"Created workspace: {workspace_path}")
         return metadata
 
+    def parse_and_save_comprehensive_output(self, workspace_path: str, llm_output: str) -> Dict[str, List[str]]:
+        """Parse LLM output and save all generated files with proper structure"""
+        workspace = Path(workspace_path)
+        saved_files = {
+            "code_files": [],
+            "scripts": [],
+            "docs": [],
+            "configs": []
+        }
+
+        # Enhanced file parsing patterns
+        import re
+
+        # Pattern to match files with various formats
+        file_patterns = [
+            r"(?:###?\s*)?(?:File:|Filename:|Create|Save as:)?\s*[`\"']?([^`\"'\n]+\.(py|sh|yml|yaml|json|md|txt|dockerfile|env|conf))[`\"']?\s*\n(.*?)(?=\n(?:###?\s*)?(?:File:|Filename:|Create|Save as:)|$)",
+            r"```(\w+)?\s*(?:#\s*([^`\n]+\.(py|sh|yml|yaml|json|md|txt|dockerfile|env|conf)))?\n(.*?)```",
+        ]
+
+        files_found = []
+        for pattern in file_patterns:
+            matches = re.findall(pattern, llm_output, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                if len(match) >= 3:
+                    if isinstance(match[0], str) and '.' in match[0]:
+                        # First pattern match
+                        filename = match[0].strip()
+                        content = match[2].strip()
+                    else:
+                        # Second pattern match
+                        filename = match[1] if match[1] else f"generated_code.{match[0] if match[0] else 'txt'}"
+                        content = match[3].strip()
+
+                    files_found.append((filename, content))
+
+        # If no files found, create basic structure from content
+        if not files_found:
+            # Extract any code blocks
+            code_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", llm_output, re.DOTALL)
+            for i, code in enumerate(code_blocks):
+                if "FROM " in code or "RUN " in code:
+                    files_found.append((f"Dockerfile", code.strip()))
+                elif "version:" in code and "services:" in code:
+                    files_found.append((f"docker-compose.yml", code.strip()))
+                elif "#!/bin/bash" in code or "#!/bin/sh" in code:
+                    files_found.append((f"script_{i+1}.sh", code.strip()))
+                else:
+                    files_found.append((f"generated_code_{i+1}.py", code.strip()))
+
+        # Save files to appropriate directories
+        for filename, content in files_found:
+            try:
+                # Determine the appropriate directory
+                if filename.endswith(('.sh', '.bash')):
+                    target_dir = workspace / "scripts"
+                    target_dir.mkdir(exist_ok=True)
+                    saved_files["scripts"].append(filename)
+                elif filename.endswith(('.py', '.dockerfile', 'Dockerfile')):
+                    target_dir = workspace / "src"
+                    saved_files["code_files"].append(filename)
+                elif filename.endswith(('.yml', '.yaml', '.json', '.env', '.conf')):
+                    target_dir = workspace / "src"
+                    saved_files["configs"].append(filename)
+                elif filename.endswith(('.md', '.txt')):
+                    target_dir = workspace / "docs"
+                    saved_files["docs"].append(filename)
+                else:
+                    target_dir = workspace / "src"
+                    saved_files["code_files"].append(filename)
+
+                # Clean filename
+                clean_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                file_path = target_dir / clean_filename
+
+                # Write file with proper permissions
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
+                # Make shell scripts executable
+                if filename.endswith(('.sh', '.bash')):
+                    import stat
+                    file_path.chmod(file_path.stat().st_mode | stat.S_IEXEC)
+
+                logger.info(f"Saved file: {file_path}")
+
+            except Exception as e:
+                logger.error(f"Failed to save file {filename}: {e}")
+
+        # Generate comprehensive deployment instructions
+        self._generate_deployment_instructions(workspace, saved_files, llm_output)
+        return saved_files
+
+    def _generate_deployment_instructions(self, workspace: Path, saved_files: Dict[str, List[str]], llm_output: str):
+        """Generate comprehensive deployment instructions"""
+
+        instructions = f"""# Deployment Instructions
+
+Generated at: {datetime.now().isoformat()}
+
+## Files Generated
+"""
+
+        for category, files in saved_files.items():
+            if files:
+                instructions += f"\n### {category.replace('_', ' ').title()}\n"
+                for file in files:
+                    instructions += f"- {file}\n"
+
+        instructions += f"""
+
+## Quick Start
+
+### Prerequisites
+- Docker and Docker Compose installed
+- Python 3.8+ (if running locally)
+- Git (for version control)
+
+### Build and Deploy
+```bash
+# Navigate to the workspace
+cd {workspace.name}
+
+# Make scripts executable
+chmod +x scripts/*.sh
+
+# Build the application
+./scripts/build.sh
+
+# Run tests (if available)
+./scripts/test.sh
+
+# Deploy the application
+./scripts/deploy.sh
+
+# Run locally for development
+./scripts/run.sh
+```
+
+### Verification Steps
+1. Check that all containers are running: `docker ps`
+2. Check application logs: `docker logs <container_name>`
+3. Test endpoints: `curl http://localhost:<port>/health`
+4. Monitor resource usage: `docker stats`
+
+### Troubleshooting
+- If port conflicts occur, check running services: `netstat -tulpn`
+- For permission errors, ensure user is in docker group: `sudo usermod -aG docker $USER`
+- For build failures, check Dockerfile syntax and dependencies
+- For network issues, verify Docker network configuration
+
+### Generated Content Analysis
+"""
+
+        # Add analysis of what was generated
+        if "Dockerfile" in str(saved_files):
+            instructions += "✅ Docker containerization detected\n"
+        if any("compose" in f for f in saved_files.get("configs", [])):
+            instructions += "✅ Docker Compose orchestration detected\n"
+        if saved_files.get("scripts"):
+            instructions += "✅ Automated deployment scripts generated\n"
+
+        instructions += f"""
+### Complete LLM Output
+```
+{llm_output}
+```
+"""
+
+        # Save instructions
+        with open(workspace / "DEPLOYMENT.md", 'w') as f:
+            f.write(instructions)
+
     def create_python_venv(self, workspace_path: str, python_version: str = "python3") -> Dict[str, str]:
         """Create a Python virtual environment in the workspace"""
 

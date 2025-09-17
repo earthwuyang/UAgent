@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Any, Set, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
+from pathlib import Path
 import json
 import math
 import traceback
@@ -22,6 +23,8 @@ from ..utils.multi_modal_search import MultiModalSearchEngine
 from .repo_master import RepoMaster, AnalysisDepth
 from .llm_client import llm_client
 from .workspace_manager import WorkspaceManager
+from .infrastructure_deployer import InfrastructureDeployer
+from .code_verifier import CodeVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +46,6 @@ class ExperimentType(Enum):
     COMPUTATIONAL = "computational"
     THEORETICAL = "theoretical"
     EMPIRICAL = "empirical"
-    SIMULATION = "simulation"
     CODE_STUDY = "code_study"
     LITERATURE_ANALYSIS = "literature_analysis"
     COMPARATIVE = "comparative"
@@ -155,6 +157,10 @@ class ResearchGoal:
     time_budget: int = 7200  # 2 hours in seconds
     quality_threshold: float = 0.8
     priority: float = 1.0
+    status: str = "pending"
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
 
 
 class HierarchicalResearchSystem:
@@ -168,6 +174,9 @@ class HierarchicalResearchSystem:
 
         # Initialize workspace manager for code generation
         self.workspace_manager = WorkspaceManager()
+
+        # Initialize infrastructure deployer
+        self.infrastructure_deployer = InfrastructureDeployer(self.workspace_manager)
 
         # WebSocket manager for real-time logging (injected later to avoid circular imports)
         self.websocket_manager = None
@@ -183,6 +192,9 @@ class HierarchicalResearchSystem:
         # Tree search parameters
         self.exploration_constant = 1.4  # UCB exploration parameter
         self.parallel_limit = 8  # Max parallel experiments
+
+        # Concurrency protection
+        self._expansion_locks: Dict[str, asyncio.Lock] = {}  # Per-node expansion locks
 
         # Orchestrator reference (injected later to avoid circular imports)
         self.orchestrator = None
@@ -259,11 +271,6 @@ class HierarchicalResearchSystem:
                 "avg_duration": 900,  # 15 minutes
                 "resource_requirements": {"cpu": 4, "memory": "8GB"}
             },
-            ExperimentType.SIMULATION: {
-                "max_parallel": 3,
-                "avg_duration": 1200,  # 20 minutes
-                "resource_requirements": {"cpu": 4, "memory": "6GB"}
-            }
         }
 
     async def start_research_goal(
@@ -278,6 +285,7 @@ class HierarchicalResearchSystem:
         """Start a new hierarchical research goal"""
         goal_id = str(uuid.uuid4())
 
+        # Normal research goal handling (all tasks go through standard UAgent core)
         goal = ResearchGoal(
             id=goal_id,
             title=title,
@@ -285,7 +293,10 @@ class HierarchicalResearchSystem:
             success_criteria=success_criteria,
             constraints=constraints or {},
             max_depth=max_depth,
-            max_experiments=max_experiments
+            max_experiments=max_experiments,
+            status="active",
+            created_at=datetime.now(),
+            started_at=datetime.now()
         )
 
         self.active_goals[goal_id] = goal
@@ -308,6 +319,9 @@ class HierarchicalResearchSystem:
 
         # Start the research process
         asyncio.create_task(self._execute_research_tree(goal_id))
+
+        # Start periodic root completion checker for this goal
+        asyncio.create_task(self._periodic_root_completion_checker(goal_id))
 
         return goal_id
 
@@ -352,7 +366,7 @@ class HierarchicalResearchSystem:
             # Collect nodes that need experiments (new nodes + existing promising nodes without experiments)
             nodes_to_experiment = []
 
-            # Tree search phase: Selection, Expansion, Simulation, Backpropagation
+            # Tree search phase: Selection, Expansion, Evaluation, Backpropagation
             selected_node = await self._select_node_ucb(goal_id)
 
             if selected_node:
@@ -411,6 +425,10 @@ class HierarchicalResearchSystem:
             # Brief pause to prevent overwhelming the system
             await asyncio.sleep(1)
 
+        # Final check for root completion before synthesis
+        logger.info(f"🔚 Research loop completed for goal {goal_id}, performing final root completion check")
+        await self._check_root_completion(goal_id)
+
         # Final synthesis
         await self._synthesize_research_results(goal_id)
 
@@ -462,69 +480,104 @@ class HierarchicalResearchSystem:
         goal = self.active_goals[goal_id]
         node = tree[node_id]
 
-        new_node_ids = []
+        # Get or create a lock for this specific node
+        if node_id not in self._expansion_locks:
+            self._expansion_locks[node_id] = asyncio.Lock()
 
-        # Generate child nodes based on node type
-        if node.node_type == ResearchNodeType.ROOT:
-            # Generate initial research directions
-            child_configs = await self._generate_research_directions(goal_id)
-        elif node.node_type == ResearchNodeType.HYPOTHESIS:
-            # Generate experiments to test the hypothesis
-            child_configs = await self._generate_hypothesis_experiments(goal_id, node_id)
-        elif node.node_type == ResearchNodeType.EXPERIMENT:
-            # Generate follow-up experiments based on results
-            child_configs = await self._generate_followup_experiments(goal_id, node_id)
-        else:
-            child_configs = []
+        # Use lock to prevent race conditions during expansion
+        async with self._expansion_locks[node_id]:
+            # Prevent expanding the same node multiple times
+            if len(node.children) > 0:
+                print(f"🚫 Node {node_id} already has {len(node.children)} children, skipping expansion")
+                return []
 
-        # Create child nodes
-        for config in child_configs:
-            child_id = str(uuid.uuid4())
+            print(f"🔄 Expanding node {node_id} (type: {node.node_type})")
+            new_node_ids = []
 
-            child_node = ResearchNode(
-                id=child_id,
-                parent_id=node_id,
-                node_type=config["node_type"],
-                title=config["title"],
-                description=config["description"],
-                hypothesis=config.get("hypothesis"),
-                experiment_type=config.get("experiment_type"),
-                experiment_config=config.get("experiment_config", {}),
-                depth=node.depth + 1,
-                priority=config.get("priority", 0.5),
-                context=config.get("context", {})
-            )
+            # Generate child nodes based on node type
+            if node.node_type == ResearchNodeType.ROOT:
+                # Generate initial research directions
+                child_configs = await self._generate_research_directions(goal_id)
+            elif node.node_type == ResearchNodeType.HYPOTHESIS:
+                # Generate experiments to test the hypothesis
+                child_configs = await self._generate_hypothesis_experiments(goal_id, node_id)
+            elif node.node_type == ResearchNodeType.EXPERIMENT:
+                # Generate follow-up experiments based on results
+                child_configs = await self._generate_followup_experiments(goal_id, node_id)
+            else:
+                child_configs = []
 
-            tree[child_id] = child_node
-            node.children.append(child_id)
-            new_node_ids.append(child_id)
+            # Create child nodes
+            for config in child_configs:
+                child_id = str(uuid.uuid4())
 
-        return new_node_ids
+                child_node = ResearchNode(
+                    id=child_id,
+                    parent_id=node_id,
+                    node_type=config["node_type"],
+                    title=config["title"],
+                    description=config["description"],
+                    hypothesis=config.get("hypothesis"),
+                    experiment_type=config.get("experiment_type"),
+                    experiment_config=config.get("experiment_config", {}),
+                    depth=node.depth + 1,
+                    priority=config.get("priority", 0.5),
+                    context=config.get("context", {})
+                )
+
+                tree[child_id] = child_node
+                node.children.append(child_id)
+                new_node_ids.append(child_id)
+
+            return new_node_ids
 
     async def _plan_needed_experiments(self, goal_id: str) -> List[Dict[str, Any]]:
         """Use LLM to intelligently decide what types of experiments are needed for the goal"""
         goal = self.active_goals[goal_id]
 
-        system_prompt = """You are a research planning assistant. Given a research goal/task, determine what types of experiments or analyses are actually needed to accomplish it effectively.
+        system_prompt = """You are a research planning assistant. Your job is to determine the MINIMUM set of experiment types needed to accomplish a goal efficiently.
 
 Available experiment types:
-- LITERATURE_ANALYSIS: Research existing papers and studies (for complex research topics)
-- CODE_ANALYSIS: Analyze existing code implementations (when building on existing work)
-- THEORETICAL: Develop theoretical frameworks or models (for complex research problems)
-- COMPUTATIONAL: Implement and test solutions (for programming/implementation tasks)
+- COMPUTATIONAL: Implement and test solutions (for programming/deployment tasks)
+- LITERATURE_ANALYSIS: Research existing papers (only for complex academic research)
+- CODE_ANALYSIS: Analyze existing implementations (only when building on others' work)
+- THEORETICAL: Develop frameworks (only for complex theoretical problems)
 
-Guidelines:
-- For simple programming tasks (hello world, basic algorithms): Only COMPUTATIONAL is needed
-- For complex research questions: May need LITERATURE_ANALYSIS and THEORETICAL
-- For building on existing work: May need CODE_ANALYSIS
-- Be selective - don't include unnecessary experiment types
-- Prioritize experiments by importance (1.0 = highest, 0.5 = lowest)
+IMPORTANT GUIDELINES:
+- For infrastructure tasks (MongoDB, databases, deployments): ONLY use COMPUTATIONAL
+- For simple programming (hello world, scripts, apps): ONLY use COMPUTATIONAL
+- For implementation tasks: ONLY use COMPUTATIONAL
+- For setup/deployment tasks: ONLY use COMPUTATIONAL
+- LITERATURE_ANALYSIS is only needed for academic research topics
+- Be VERY selective - most tasks only need COMPUTATIONAL
+- Default to fewer experiment types, not more
 
-Return a JSON list with experiment plans."""
+Return a minimal JSON list focusing on efficiency."""
+
+        # Check if we have routing information from the unified task router
+        routing_info = goal.constraints.get('routing_info', {}) if goal.constraints else {}
+        task_classification = routing_info.get('classification', 'unknown')
+
+        print(f"🧠 Planning experiments for goal: {goal.title}")
+        print(f"🧠 Routing info available: {bool(routing_info)}")
+        print(f"🧠 Task classification: {task_classification}")
+
+        routing_context = f"\nTask Classification: {task_classification}" if task_classification != 'unknown' else ""
+        routing_guidance = ""
+
+        if task_classification == 'implementation':
+            routing_guidance = "\nROUTING GUIDANCE: This task has been classified as IMPLEMENTATION - focus on computational experiments only."
+            print(f"🧠 Using IMPLEMENTATION routing guidance")
+        elif task_classification == 'research':
+            routing_guidance = "\nROUTING GUIDANCE: This task has been classified as RESEARCH - consider literature analysis if needed."
+            print(f"🧠 Using RESEARCH routing guidance")
+        elif task_classification in ['search', 'data_analysis']:
+            routing_guidance = f"\nROUTING GUIDANCE: This task has been classified as {task_classification.upper()} - adapt experiments accordingly."
+            print(f"🧠 Using {task_classification.upper()} routing guidance")
 
         prompt = f"""Research Goal: {goal.title}
 Description: {goal.description}
-Success Criteria: {goal.success_criteria}
+Success Criteria: {goal.success_criteria}{routing_context}{routing_guidance}
 
 Analyze this goal and determine the minimum set of experiment types needed to accomplish it effectively. Consider:
 1. Is this a simple programming task or complex research?
@@ -569,32 +622,51 @@ Return JSON format:
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse LLM experiment planning JSON")
 
-                # Fallback: parse text response
+                # Fallback: parse text response more intelligently
                 plans = []
-                lines = content.split('\n')
-                for line in lines:
-                    line = line.strip().lower()
-                    if 'computational' in line:
+                content_lower = content.lower()
+
+                # Look for clear indications that only one type is needed
+                if ('only computational' in content_lower or
+                    'just computational' in content_lower or
+                    ('computational' in content_lower and ('no literature' in content_lower or 'skip literature' in content_lower))):
+                    plans.append({
+                        "experiment_type": "COMPUTATIONAL",
+                        "reasoning": "LLM recommended computational approach only",
+                        "priority": 0.9,
+                        "required": True
+                    })
+                else:
+                    # Check for each type, but avoid duplicates
+                    experiment_types = set()
+
+                    if 'computational' in content_lower and 'COMPUTATIONAL' not in experiment_types:
                         plans.append({
                             "experiment_type": "COMPUTATIONAL",
                             "reasoning": "LLM suggested computational approach",
                             "priority": 0.9,
                             "required": True
                         })
-                    elif 'literature' in line:
+                        experiment_types.add('COMPUTATIONAL')
+
+                    if ('literature' in content_lower and 'LITERATURE_ANALYSIS' not in experiment_types and
+                        'no literature' not in content_lower and 'skip literature' not in content_lower):
                         plans.append({
                             "experiment_type": "LITERATURE_ANALYSIS",
                             "reasoning": "LLM suggested literature review",
                             "priority": 0.7,
                             "required": False
                         })
-                    elif 'theoretical' in line:
+                        experiment_types.add('LITERATURE_ANALYSIS')
+
+                    if 'theoretical' in content_lower and 'THEORETICAL' not in experiment_types:
                         plans.append({
                             "experiment_type": "THEORETICAL",
                             "reasoning": "LLM suggested theoretical analysis",
                             "priority": 0.6,
                             "required": False
                         })
+                        experiment_types.add('THEORETICAL')
 
                 if plans:
                     logger.info(f"Parsed {len(plans)} experiment types from LLM text response")
@@ -645,12 +717,16 @@ Return JSON format:
                 "priority": 0.9,
                 "required": True
             })
+            # For simple programming and implementation, ONLY computational is needed
+            logger.info(f"Implementation task detected - using ONLY computational approach")
+            return plans
 
-        # Only add literature review for complex research tasks
-        if is_research_task and not is_simple_programming:
+        # Only add literature review for complex academic research (not implementation tasks)
+        if (is_research_task and not is_simple_programming and not is_implementation and
+            any(keyword in description_lower for keyword in ['academic', 'paper', 'study', 'survey', 'review'])):
             plans.append({
                 "experiment_type": "LITERATURE_ANALYSIS",
-                "reasoning": "Complex research task requires literature review",
+                "reasoning": "Complex academic research task requires literature review",
                 "priority": 0.7,
                 "required": False
             })
@@ -687,31 +763,55 @@ Return JSON format:
 
     async def _generate_research_directions(self, goal_id: str, allow_regeneration: bool = False) -> List[Dict[str, Any]]:
         """Generate initial research directions from the root goal"""
+        import time
+        call_id = str(int(time.time() * 1000))[-6:]  # Last 6 digits of timestamp
+        print(f"🔄 _generate_research_directions called: goal={goal_id}, allow_regen={allow_regeneration}, call_id={call_id}")
+
         goal = self.active_goals[goal_id]
         tree = self.research_trees[goal_id]
 
-        # Check what child types already exist, but allow re-expansion if existing ones failed or have low confidence
-        existing_types = set()
+        # Check what experiment types already exist (more precise than just node types)
+        existing_experiment_types = set()
+        existing_node_types = set()
         root_node = tree[f"{goal_id}_root"]
+        print(f"🔧 Checking existing children for goal {goal_id}")
+        print(f"🔧 Root node has {len(root_node.children)} children: {root_node.children}")
+
         for child_id in root_node.children:
             if child_id in tree:
                 child = tree[child_id]
-                # Only block if child exists AND is successful (confidence > 0.6)
-                # If allow_regeneration is True, ignore failed nodes and allow new attempts
+                print(f"🔧 Child {child_id}: type={child.node_type}, status={child.status}, confidence={child.confidence}")
+
+                # Get the experiment type if it exists
+                exp_type = getattr(child, 'experiment_type', None)
+
+                # Only block if child exists AND is successful/running
+                should_block = False
                 if allow_regeneration:
                     # Only block running nodes and high-confidence completed nodes
                     if child.status == NodeStatus.RUNNING or (child.status == NodeStatus.COMPLETED and child.confidence > 0.6):
-                        existing_types.add(child.node_type)
+                        should_block = True
+                        print(f"🔧 Blocking {child.node_type}/{exp_type} (regeneration mode)")
                 else:
                     # Original logic: block all non-failed attempts
                     if child.status == NodeStatus.COMPLETED and child.confidence > 0.6:
-                        existing_types.add(child.node_type)
+                        should_block = True
+                        print(f"🔧 Blocking {child.node_type}/{exp_type} (completed)")
                     elif child.status == NodeStatus.RUNNING:
-                        # Don't create duplicates of running nodes
-                        existing_types.add(child.node_type)
+                        should_block = True
+                        print(f"🔧 Blocking {child.node_type}/{exp_type} (running)")
+
+                if should_block:
+                    existing_node_types.add(child.node_type)
+                    if exp_type:
+                        existing_experiment_types.add(exp_type)
+
+        print(f"🔧 Final existing_node_types: {existing_node_types}")
+        print(f"🔧 Final existing_experiment_types: {existing_experiment_types}")
 
         # Use LLM to intelligently plan needed experiments
         experiment_plans = await self._plan_needed_experiments(goal_id)
+        print(f"🧠 LLM returned {len(experiment_plans)} experiment plans: {experiment_plans}")
 
         directions = []
 
@@ -762,20 +862,20 @@ Return JSON format:
                 experiment_type = ExperimentType.COMPUTATIONAL
                 config = {"reasoning": reasoning}
 
-            # Only add if this node type doesn't already exist (unless regenerating)
-            if node_type not in existing_types:
-                directions.append({
-                    "node_type": node_type,
-                    "title": f"{exp_type.replace('_', ' ').title()}: {goal.title}",
-                    "description": f"{reasoning} for {goal.description}",
-                    "experiment_type": experiment_type,
-                    "experiment_config": config,
-                    "priority": priority,
-                    "llm_planned": True
-                })
+            # Add direction - trust LLM's decision
+            print(f"✅ Adding direction: {exp_type} (node_type: {node_type}, exp_type: {experiment_type})")
+            directions.append({
+                "node_type": node_type,
+                "title": f"{exp_type.replace('_', ' ').title()}: {goal.title}",
+                "description": f"{reasoning} for {goal.description}",
+                "experiment_type": experiment_type,
+                "experiment_config": config,
+                "priority": priority,
+                "llm_planned": True
+            })
 
         # Only create code analysis if it doesn't exist and is applicable
-        if (ResearchNodeType.CODE_ANALYSIS not in existing_types and
+        if (ResearchNodeType.CODE_ANALYSIS not in existing_node_types and
             goal.description and ("code" in goal.description.lower() or "implementation" in goal.description.lower())):
             directions.append({
                 "node_type": ResearchNodeType.CODE_ANALYSIS,
@@ -804,13 +904,17 @@ Return JSON format:
                 "experiment_type": ExperimentType.COMPUTATIONAL,
                 "experiment_config": {
                     "approach": "minimal_solution",
-                    "reasoning": "Fallback computational approach"
+                    "reasoning": "Fallback computational approach",
+                    "max_iterations": 8,
+                    "max_debug_attempts": 5,
+                    "timeout": 120
                 },
                 "priority": 0.8,
                 "llm_planned": False
             })
 
         logger.info(f"Generated {len(directions)} intelligent research directions for goal: {goal.title}")
+        print(f"🔄 call_id={call_id} returning {len(directions)} directions: {[d.get('title', d.get('experiment_type', 'unknown')) for d in directions]}")
         return sorted(directions, key=lambda x: x["priority"], reverse=True)
 
     async def _generate_hypothesis_experiments(self, goal_id: str, node_id: str) -> List[Dict[str, Any]]:
@@ -829,24 +933,14 @@ Return JSON format:
             "experiment_config": {
                 "hypothesis": node.hypothesis,
                 "test_cases": 100,
-                "validation_method": "monte_carlo"
+                "validation_method": "monte_carlo",
+                "max_iterations": 8,
+                "max_debug_attempts": 5,
+                "timeout": 120
             },
             "priority": 0.8
         })
 
-        # Simulation experiment
-        experiments.append({
-            "node_type": ResearchNodeType.EXPERIMENT,
-            "title": f"Simulation: {node.hypothesis}",
-            "description": f"Simulation-based testing of {node.hypothesis}",
-            "experiment_type": ExperimentType.SIMULATION,
-            "experiment_config": {
-                "hypothesis": node.hypothesis,
-                "simulation_runs": 1000,
-                "parameters": {"accuracy": 0.95, "confidence": 0.9}
-            },
-            "priority": 0.75
-        })
 
         # Empirical analysis
         experiments.append({
@@ -899,7 +993,10 @@ Return JSON format:
                 "experiment_config": {
                     "base_config": best_result.data,
                     "optimization_target": "maximize_performance",
-                    "search_space": "hyperparameter_grid"
+                    "search_space": "hyperparameter_grid",
+                    "max_iterations": 8,
+                    "max_debug_attempts": 5,
+                    "timeout": 120
                 },
                 "priority": 0.8
             })
@@ -985,9 +1082,6 @@ Return JSON format:
             elif node.experiment_type == ExperimentType.COMPUTATIONAL:
                 self._log_execution(node, "DEBUG", "Executing computational experiment")
                 result = await self._run_computational_experiment(node)
-            elif node.experiment_type == ExperimentType.SIMULATION:
-                self._log_execution(node, "DEBUG", "Executing simulation experiment")
-                result = await self._run_simulation_experiment(node)
             elif node.experiment_type == ExperimentType.THEORETICAL:
                 self._log_execution(node, "DEBUG", "Executing theoretical experiment")
                 result = await self._run_theoretical_experiment(node)
@@ -1265,29 +1359,54 @@ Return JSON format:
         config = node.experiment_config
         task_description = node.description
 
+        # Enhanced step-by-step logging
+        self._log_execution(node, "INFO", "🚀 Starting computational experiment", {
+            "task_description": task_description,
+            "config": config
+        })
+
         try:
             # Create workspace for code generation if needed
             workspace_info = None
+            self._log_execution(node, "INFO", "🔍 Analyzing task requirements", {
+                "keywords_checked": ["docker", "python", "programming", "code", "script", "hello-world", "hello world"]
+            })
+
             if any(keyword in task_description.lower() for keyword in
                    ["docker", "python", "programming", "code", "script", "hello-world", "hello world"]):
 
                 # Determine task type
                 if "docker" in task_description.lower():
+                    self._log_execution(node, "INFO", "🐳 Detected Docker task", {"task_type": "docker"})
                     if "hello-world" in task_description.lower() or "hello world" in task_description.lower():
+                        self._log_execution(node, "INFO", "📦 Creating Docker Hello World workspace", {})
                         workspace_info = self.workspace_manager.get_docker_hello_world_workspace(node.title)
                     else:
+                        self._log_execution(node, "INFO", "📦 Creating Docker workspace", {})
                         workspace_info = self.workspace_manager.create_workspace(node.title, "docker")
                 else:
+                    self._log_execution(node, "INFO", "💻 Creating programming workspace", {"task_type": "programming"})
                     workspace_info = self.workspace_manager.create_workspace(node.title, "programming")
+
+                self._log_execution(node, "INFO", "✅ Workspace created successfully", {
+                    "workspace_path": workspace_info.get("path", "unknown"),
+                    "workspace_type": workspace_info.get("type", "unknown")
+                })
 
                 # Add workspace info to config
                 config = config.copy()
                 config["workspace"] = workspace_info
 
-            # Create code executor with configuration
-            max_iterations = config.get("max_iterations", 3)
-            max_debug_attempts = config.get("max_debug_attempts", 2)
-            timeout = config.get("timeout", 30)
+            # Create code executor with configuration - increased defaults for complex tasks
+            max_iterations = config.get("max_iterations", 8)
+            max_debug_attempts = config.get("max_debug_attempts", 5)
+            timeout = config.get("timeout", 120)  # Increased timeout for deployment tasks
+
+            self._log_execution(node, "INFO", "⚙️ Configuring code executor", {
+                "max_iterations": max_iterations,
+                "max_debug_attempts": max_debug_attempts,
+                "timeout": timeout
+            })
 
             executor = CodeExecutor(
                 max_iterations=max_iterations,
@@ -1296,7 +1415,102 @@ Return JSON format:
             )
 
             # Execute computational task with real code execution
-            execution_result = await executor.execute_computational_task(task_description, config)
+            execution_result = await executor.execute_computational_task(task_description, config, node.id)
+
+            # VERIFICATION LAYER: Universal code verification for all tasks
+            verification_result = None
+            if (workspace_info and execution_result.success):
+
+                # Use LLM to decide if code verification is needed
+                needs_verification = await self._should_verify_code(task_description, config)
+
+                if needs_verification:
+                    self._log_execution(node, "INFO", "🔍 LLM determined verification needed - checking generated code")
+
+                    # Extract workspace path
+                    workspace_path = workspace_info.get('workspace_path', workspace_info.get('path'))
+
+                    if workspace_path:
+                        # Use CodeVerifier to test generated code
+                        verifier = CodeVerifier()
+
+                        # Determine verification type based on workspace content
+                        if self._is_infrastructure_workspace(workspace_path):
+                            # Infrastructure deployment verification
+                            service_type = self._detect_service_type(workspace_path, task_description)
+                            verification_result = verifier.verify_infrastructure_deployment(workspace_path, service_type)
+                        else:
+                            # General code verification (scripts, programs, etc.)
+                            verification_result = verifier.verify_general_code(workspace_path, task_description)
+
+                        if not verification_result.success:
+                            self._log_execution(node, "ERROR", f"❌ Infrastructure verification failed: {verification_result.errors}")
+
+                            # Try autonomous Docker error fixing
+                            docker_fix_result = await self._attempt_docker_error_fix(
+                                workspace_path, task_description, verification_result.errors, config
+                            )
+
+                            if docker_fix_result and docker_fix_result['success']:
+                                self._log_execution(node, "INFO", "🔧 LLM successfully fixed Docker deployment errors")
+
+                                # Re-verify the fixed deployment
+                                retry_verification = verifier.verify_infrastructure_deployment(workspace_path, service_type)
+
+                                if retry_verification.success:
+                                    self._log_execution(node, "INFO", "✅ Fixed infrastructure deployment verified successfully")
+                                    execution_result.confidence = min(execution_result.confidence + 0.15, 1.0)
+                                    execution_result.insights.insert(0, "🔧 Docker errors fixed automatically by LLM")
+                                    execution_result.insights.extend([
+                                        "Infrastructure deployment errors resolved",
+                                        f"Fixed issues: {docker_fix_result['fixes_applied']}",
+                                        "Re-verification successful"
+                                    ])
+                                    execution_result.metrics['docker_errors_fixed'] = True
+                                    execution_result.metrics['fixes_applied'] = docker_fix_result['fixes_applied']
+                                else:
+                                    self._log_execution(node, "WARNING", "⚠️ Fixed deployment still has verification issues")
+                                    # Fall through to original error handling
+                                    execution_result.success = False
+                                    execution_result.confidence = 0.3  # Slightly higher for attempted fix
+                                    execution_result.insights = [
+                                        "⚠️ Infrastructure deployment partially fixed but still has issues",
+                                        f"Original errors: {verification_result.errors}",
+                                        f"Attempted fixes: {docker_fix_result['fixes_applied']}",
+                                        "Manual review may be required"
+                                    ] + verification_result.suggestions
+                                    execution_result.metrics['verification_failed'] = True
+                                    execution_result.metrics['verification_errors'] = verification_result.errors
+                                    execution_result.metrics['fix_attempted'] = True
+                            else:
+                                self._log_execution(node, "WARNING", "❌ LLM could not fix Docker deployment errors automatically")
+
+                                # Original error handling with enhanced messaging
+                                execution_result.success = False
+                                execution_result.confidence = 0.2
+                                execution_result.insights = [
+                                    "❌ Infrastructure deployment verification failed",
+                                    f"Deployment errors: {verification_result.errors}",
+                                    "Autonomous fix attempts failed",
+                                    "Generated scripts do not meet deployment requirements"
+                                ] + verification_result.suggestions
+                                execution_result.metrics['verification_failed'] = True
+                                execution_result.metrics['verification_errors'] = verification_result.errors
+                                execution_result.metrics['fix_attempted'] = False
+                        else:
+                            self._log_execution(node, "INFO", "✅ Infrastructure deployment verification passed")
+
+                            # Boost confidence for verified deployments
+                            execution_result.confidence = min(execution_result.confidence + 0.2, 1.0)
+                            execution_result.insights.insert(0, "✅ Infrastructure deployment verified successfully")
+                            execution_result.insights.extend([
+                                "All deployment scripts validated",
+                                "Docker configurations verified",
+                                "Shell scripts syntax checked"
+                            ])
+                            execution_result.metrics['verification_passed'] = True
+                else:
+                    self._log_execution(node, "INFO", "💭 LLM determined verification not needed - skipping code verification")
 
             # Convert CodeExecutionResult to ExperimentResult
             success = execution_result.success
@@ -1322,6 +1536,10 @@ Return JSON format:
                 "execution_outputs": execution_result.execution_outputs,
                 "execution_method": "real_code_execution"
             }
+
+            # Save generated code to workspace if available
+            if workspace_info and execution_result.code_blocks:
+                self._save_code_to_workspace(workspace_info, execution_result, node)
 
             # Add workspace information if created
             if workspace_info:
@@ -1378,43 +1596,260 @@ Return JSON format:
                 execution_time=execution_time
             )
 
-    async def _run_simulation_experiment(self, node: ResearchNode) -> ExperimentResult:
-        """Run simulation experiment"""
-        config = node.experiment_config
+    async def _attempt_docker_error_fix(
+        self, workspace_path: str, task_description: str, errors: list, config: dict
+    ) -> Optional[Dict[str, Any]]:
+        """Attempt to fix Docker deployment errors using LLM analysis"""
+        try:
+            logger.info(f"🔧 Attempting autonomous Docker error fixing for {len(errors)} errors")
 
-        # Simulate complex simulation
-        await asyncio.sleep(np.random.uniform(2, 8))
+            # Analyze error types and determine if they're fixable
+            fixable_errors = self._classify_docker_errors(errors)
 
-        simulation_runs = config.get("simulation_runs", 1000)
-        parameters = config.get("parameters", {})
+            if not fixable_errors:
+                logger.warning("No fixable Docker errors identified")
+                return {'success': False, 'reason': 'No fixable errors identified'}
 
-        # Generate simulation results
-        mean_performance = np.random.uniform(0.6, 0.9)
-        std_performance = np.random.uniform(0.05, 0.15)
+            # Read current Docker files
+            docker_files = self._read_docker_files(workspace_path)
+            if not docker_files:
+                logger.warning("No Docker files found to fix")
+                return {'success': False, 'reason': 'No Docker files found'}
 
-        results = {
-            "simulation_runs": simulation_runs,
-            "mean_performance": mean_performance,
-            "std_performance": std_performance,
-            "confidence_interval": [
-                mean_performance - 1.96 * std_performance,
-                mean_performance + 1.96 * std_performance
-            ]
-        }
+            # Use LLM to generate fixes
+            fix_result = await self._generate_docker_fixes(
+                task_description, fixable_errors, docker_files, config
+            )
 
-        return ExperimentResult(
-            experiment_id=node.id,
-            success=mean_performance > 0.7,
-            confidence=max(0, min(1, mean_performance - std_performance)),
-            metrics=results,
-            data=results,
-            insights=[
-                f"Simulation mean performance: {mean_performance:.3f}",
-                f"Performance variability: {std_performance:.3f}",
-                "Simulation results indicate " + ("high" if mean_performance > 0.8 else "moderate") + " confidence"
-            ],
-            execution_time=0.0
-        )
+            if fix_result and fix_result.get('success'):
+                # Apply the fixes to the workspace
+                fixes_applied = await self._apply_docker_fixes(workspace_path, fix_result['fixes'])
+
+                logger.info(f"✅ Applied {len(fixes_applied)} Docker fixes to workspace")
+                return {
+                    'success': True,
+                    'fixes_applied': fixes_applied,
+                    'fixed_files': list(fix_result['fixes'].keys())
+                }
+            else:
+                logger.warning("LLM could not generate viable Docker fixes")
+                return {'success': False, 'reason': 'LLM fix generation failed'}
+
+        except Exception as e:
+            logger.error(f"Docker error fixing failed: {e}")
+            return {'success': False, 'reason': f'Exception: {str(e)}'}
+
+    def _classify_docker_errors(self, errors: list) -> list:
+        """Classify which Docker errors are automatically fixable"""
+        fixable_errors = []
+
+        for error in errors:
+            error_str = str(error).lower()
+
+            # Port binding conflicts
+            if 'bind: address already in use' in error_str or 'port is already allocated' in error_str:
+                fixable_errors.append({
+                    'type': 'port_conflict',
+                    'error': error,
+                    'fixable': True,
+                    'fix_strategy': 'change_port'
+                })
+
+            # Image pull errors
+            elif 'pull access denied' in error_str or 'repository does not exist' in error_str:
+                fixable_errors.append({
+                    'type': 'image_error',
+                    'error': error,
+                    'fixable': True,
+                    'fix_strategy': 'fix_image_name'
+                })
+
+            # Missing files
+            elif 'no such file or directory' in error_str or 'file not found' in error_str:
+                fixable_errors.append({
+                    'type': 'missing_file',
+                    'error': error,
+                    'fixable': True,
+                    'fix_strategy': 'create_missing_file'
+                })
+
+            # Volume mount errors
+            elif 'invalid mount config' in error_str or 'bind source path does not exist' in error_str:
+                fixable_errors.append({
+                    'type': 'volume_error',
+                    'error': error,
+                    'fixable': True,
+                    'fix_strategy': 'fix_volume_paths'
+                })
+
+        return fixable_errors
+
+    def _read_docker_files(self, workspace_path: str) -> Dict[str, str]:
+        """Read Docker-related files from workspace"""
+        import os
+
+        docker_files = {}
+        common_files = [
+            'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
+            'deploy.sh', 'run.sh', '.dockerignore'
+        ]
+
+        try:
+            for filename in common_files:
+                filepath = os.path.join(workspace_path, filename)
+                if os.path.exists(filepath):
+                    with open(filepath, 'r') as f:
+                        docker_files[filename] = f.read()
+        except Exception as e:
+            logger.error(f"Error reading Docker files: {e}")
+
+        return docker_files
+
+    async def _generate_docker_fixes(
+        self, task_description: str, fixable_errors: list, docker_files: Dict[str, str], config: dict
+    ) -> Optional[Dict[str, Any]]:
+        """Use LLM to generate Docker configuration fixes"""
+
+        system_prompt = """You are a Docker deployment expert. Analyze Docker errors and provide fixes by modifying configuration files.
+
+        Common fixes:
+        1. Port conflicts: Change ports (3306→3307, 5432→5433, etc.)
+        2. Image errors: Use correct official images (mysql:8.0, postgres:13, redis:7-alpine)
+        3. Missing files: Create necessary init scripts or config files
+        4. Volume errors: Fix mount paths and create directories
+
+        Return a JSON object with fixes for each file:
+        {
+            "success": true,
+            "fixes": {
+                "docker-compose.yml": "fixed content here",
+                "Dockerfile": "fixed content here",
+                "init.sql": "CREATE TABLE..."
+            }
+        }"""
+
+        # Build error context
+        error_context = "\n".join([
+            f"Error {i+1} ({err['type']}): {err['error']}"
+            for i, err in enumerate(fixable_errors)
+        ])
+
+        # Build current files context
+        files_context = "\n".join([
+            f"=== {filename} ===\n{content}\n"
+            for filename, content in docker_files.items()
+        ])
+
+        prompt = f"""Task: {task_description}
+
+Docker Deployment Errors:
+{error_context}
+
+Current Docker Files:
+{files_context}
+
+Please fix these Docker errors by providing corrected file contents. Focus on:
+- Resolving port conflicts by using alternative ports
+- Using correct Docker image names
+- Creating missing files with appropriate content
+- Fixing volume mount paths
+
+Provide the complete fixed files as JSON:"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.1,  # Low temperature for precise fixes
+                max_tokens=3000
+            )
+
+            if response.get("success"):
+                content = response.get("content", "")
+
+                # Try to parse JSON response
+                try:
+                    import json
+                    # Extract JSON from response if it's wrapped
+                    if '```json' in content:
+                        content = content.split('```json')[1].split('```')[0].strip()
+                    elif '```' in content:
+                        content = content.split('```')[1].split('```')[0].strip()
+
+                    fix_result = json.loads(content)
+                    return fix_result
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse LLM fix response as JSON: {e}")
+                    # Try to extract fixes manually
+                    return self._extract_fixes_from_text(content, docker_files.keys())
+
+        except Exception as e:
+            logger.error(f"LLM Docker fix generation failed: {e}")
+
+        return None
+
+    def _extract_fixes_from_text(self, content: str, original_filenames: list) -> Optional[Dict[str, Any]]:
+        """Extract file fixes from text response when JSON parsing fails"""
+        fixes = {}
+
+        # Look for file content blocks
+        lines = content.split('\n')
+        current_file = None
+        current_content = []
+
+        for line in lines:
+            # Check for file headers
+            if any(filename in line for filename in original_filenames):
+                if current_file:
+                    fixes[current_file] = '\n'.join(current_content)
+
+                # Find filename in line
+                current_file = None
+                for filename in original_filenames:
+                    if filename in line:
+                        current_file = filename
+                        current_content = []
+                        break
+            elif current_file and line.strip():
+                current_content.append(line)
+
+        # Add the last file
+        if current_file:
+            fixes[current_file] = '\n'.join(current_content)
+
+        return {'success': len(fixes) > 0, 'fixes': fixes} if fixes else None
+
+    async def _apply_docker_fixes(self, workspace_path: str, fixes: Dict[str, str]) -> list:
+        """Apply Docker fixes to workspace files"""
+        import os
+
+        applied_fixes = []
+
+        try:
+            for filename, content in fixes.items():
+                if content and content.strip():
+                    filepath = os.path.join(workspace_path, filename)
+
+                    # Create backup if file exists
+                    if os.path.exists(filepath):
+                        backup_path = f"{filepath}.backup"
+                        os.rename(filepath, backup_path)
+                        applied_fixes.append(f"Backed up {filename}")
+
+                    # Write fixed content
+                    with open(filepath, 'w') as f:
+                        f.write(content.strip())
+
+                    applied_fixes.append(f"Fixed {filename}")
+                    logger.info(f"Applied fix to {filename}")
+
+        except Exception as e:
+            logger.error(f"Error applying Docker fixes: {e}")
+            applied_fixes.append(f"Error: {str(e)}")
+
+        return applied_fixes
+
 
     async def _run_theoretical_experiment(self, node: ResearchNode) -> ExperimentResult:
         """Run theoretical analysis experiment using qwen3-max-review"""
@@ -1428,14 +1863,14 @@ Return JSON format:
             theoretical_strength = 0.8  # High confidence for LLM-generated hypotheses
             success = True
         else:
-            # Fallback simulation
+            # Fallback theoretical analysis
             await asyncio.sleep(np.random.uniform(1, 3))
-            theoretical_strength = np.random.uniform(0.5, 0.9)
-            success = theoretical_strength > 0.6
+            theoretical_strength = 0.6  # Moderate confidence for fallback
+            success = False
             insights = [
-                f"Theoretical analysis strength: {theoretical_strength:.3f}",
-                "Framework provides " + ("strong" if theoretical_strength > 0.7 else "moderate") + " theoretical foundation",
-                f"LLM analysis failed: {hypothesis_result.get('error', 'Unknown error')}"
+                "Theoretical analysis could not be completed automatically",
+                f"LLM analysis failed: {hypothesis_result.get('error', 'Unknown error')}",
+                "Manual theoretical framework development may be required"
             ]
 
         execution_time = time.time() - start_time
@@ -1959,20 +2394,33 @@ Return JSON format:
             # Get successful child nodes
             successful_children = []
             failed_children = []
+            completed_children = []
+
+            logger.info(f"🔍 Checking root completion for {goal_id}_root with {len(root_node.children)} children")
+
             for child_id in root_node.children:
                 if child_id in tree:
                     child = tree[child_id]
-                    if child.status == NodeStatus.COMPLETED and child.confidence > 0.5:
-                        successful_children.append(child)
+                    logger.info(f"  Child {child_id}: status={child.status}, confidence={child.confidence:.3f}")
+
+                    if child.status == NodeStatus.COMPLETED:
+                        completed_children.append(child)
+                        if child.confidence > 0.5:
+                            successful_children.append(child)
                     elif child.status == NodeStatus.FAILED:
                         failed_children.append(child)
 
-            # Complete root if we have at least 2 successful children
-            if len(successful_children) >= 2:
+            logger.info(f"  📊 Summary: {len(completed_children)} completed, {len(successful_children)} successful (conf>0.5), {len(failed_children)} failed")
+
+            # Complete root if we have completed children (relaxed from 2 to 1 for better UX)
+            # and at least one has good confidence, OR if all children are completed
+            if (len(successful_children) >= 1) or (len(completed_children) > 0 and len(completed_children) == len(root_node.children)):
                 root_node.status = NodeStatus.COMPLETED
-                root_node.confidence = np.mean([child.confidence for child in successful_children])
+                # Use successful children confidence if available, otherwise all completed children
+                confidence_children = successful_children if successful_children else completed_children
+                root_node.confidence = np.mean([child.confidence for child in confidence_children])
                 root_node.completed_at = datetime.now()
-                logger.info(f"ROOT node {goal_id}_root completed with {len(successful_children)} successful children (confidence: {root_node.confidence:.2f})")
+                logger.info(f"✅ ROOT node {goal_id}_root completed with {len(completed_children)} completed children, {len(successful_children)} high-confidence (final confidence: {root_node.confidence:.2f})")
 
                 # Generate completion report automatically
                 await self._generate_completion_report(goal_id)
@@ -1983,6 +2431,36 @@ Return JSON format:
 
                 # Update total reward for tree search
                 root_node.total_reward = root_node.confidence * root_node.visits
+
+    async def _periodic_root_completion_checker(self, goal_id: str):
+        """Periodically check root completion every 30 seconds until goal is completed or removed"""
+        try:
+            while goal_id in self.active_goals:
+                await asyncio.sleep(30)  # Check every 30 seconds
+
+                # Skip if goal no longer exists
+                if goal_id not in self.active_goals:
+                    break
+
+                tree = self.research_trees.get(goal_id)
+                if not tree:
+                    break
+
+                root_node = tree.get(f"{goal_id}_root")
+                if not root_node:
+                    break
+
+                # Only check if root is still pending
+                if root_node.status == NodeStatus.PENDING:
+                    logger.info(f"⏰ Periodic root completion check for goal {goal_id}")
+                    await self._check_root_completion(goal_id)
+                else:
+                    # Root is already completed, stop checking
+                    logger.info(f"✅ Root node for goal {goal_id} is already completed, stopping periodic checker")
+                    break
+
+        except Exception as e:
+            logger.error(f"Error in periodic root completion checker for goal {goal_id}: {e}")
 
     async def _generate_completion_report(self, goal_id: str):
         """Generate a comprehensive completion report when the root node is completed"""
@@ -2199,15 +2677,217 @@ Return JSON format:
         }
         return status_mapping.get(status, "PENDING")
 
+    async def _should_verify_code(self, task_description: str, config: Dict[str, Any]) -> bool:
+        """Use qwen3-max-review to intelligently decide if code verification is needed"""
+        system_prompt = """You are a code verification decision expert. Determine if a task requires code verification before claiming success.
+
+Code verification is needed for:
+- Infrastructure deployment (Docker, databases, services)
+- Executable scripts that must work (deploy.sh, manage.sh)
+- System configuration that affects functionality
+- Anything that needs to run without errors
+
+Code verification is NOT needed for:
+- Pure research/analysis reports
+- Documentation generation
+- Literature reviews
+- Theoretical analysis
+- Markdown/text file generation
+
+Respond with just "YES" or "NO" and a brief reason."""
+
+        prompt = f"""Task: {task_description}
+
+Configuration: {config}
+
+Should this task undergo code verification before claiming success?
+Consider: Does this task generate executable code, infrastructure, or scripts that need to actually work?"""
+
+        try:
+            llm_response = await llm_client.generate_response(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.1,  # Low temperature for consistent decisions
+                max_tokens=100
+            )
+
+            if llm_response.get("success"):
+                content = llm_response.get("content", "").strip().upper()
+
+                # Parse LLM response
+                if content.startswith("YES"):
+                    logger.info(f"LLM decided verification needed: {content}")
+                    return True
+                elif content.startswith("NO"):
+                    logger.info(f"LLM decided verification not needed: {content}")
+                    return False
+
+            # Fallback to heuristic decision
+            logger.warning("LLM verification decision unclear, using heuristics")
+            return self._heuristic_verification_decision(task_description, config)
+
+        except Exception as e:
+            logger.error(f"LLM verification decision failed: {e}")
+            return self._heuristic_verification_decision(task_description, config)
+
+    def _heuristic_verification_decision(self, task_description: str, config: Dict[str, Any]) -> bool:
+        """Fallback heuristic for verification decision"""
+        task_lower = task_description.lower()
+
+        # Verify if task involves executable content
+        executable_keywords = ['deploy', 'script', 'docker', 'server', 'database', 'service', 'install', 'setup', 'mongodb', 'postgresql', 'redis']
+        needs_verification = any(keyword in task_lower for keyword in executable_keywords)
+
+        # Don't verify if clearly a report/analysis task
+        report_keywords = ['report', 'analysis', 'review', 'documentation', 'markdown', 'summary']
+        is_report_task = any(keyword in task_lower for keyword in report_keywords)
+
+        return needs_verification and not is_report_task
+
+    def _is_infrastructure_workspace(self, workspace_path: str) -> bool:
+        """Detect if workspace contains infrastructure deployment files"""
+        from pathlib import Path
+
+        workspace = Path(workspace_path)
+        if not workspace.exists():
+            return False
+
+        # Check for infrastructure files
+        infra_files = ['docker-compose.yml', 'docker-compose.yaml', 'Dockerfile']
+        has_infra_files = any((workspace / file).exists() for file in infra_files)
+
+        # Check for deployment scripts
+        deployment_scripts = ['deploy.sh', 'manage.sh', 'start.sh', 'setup.sh']
+        has_deployment_scripts = any((workspace / script).exists() for script in deployment_scripts)
+
+        return has_infra_files or has_deployment_scripts
+
+    def _detect_service_type(self, workspace_path: str, task_description: str) -> str:
+        """Detect service type from workspace content and task description"""
+        from pathlib import Path
+
+        task_lower = task_description.lower()
+
+        # Check task description for service keywords
+        if any(keyword in task_lower for keyword in ['mongodb', 'mongo']):
+            return 'mongodb'
+        elif any(keyword in task_lower for keyword in ['postgresql', 'postgres']):
+            return 'postgresql'
+        elif 'redis' in task_lower:
+            return 'redis'
+        elif 'mysql' in task_lower:
+            return 'mysql'
+
+        # Check workspace files for service indicators
+        workspace = Path(workspace_path)
+        if workspace.exists():
+            # Check docker-compose.yml content
+            compose_file = workspace / 'docker-compose.yml'
+            if compose_file.exists():
+                try:
+                    content = compose_file.read_text().lower()
+                    if 'mongo' in content:
+                        return 'mongodb'
+                    elif 'postgres' in content:
+                        return 'postgresql'
+                    elif 'redis' in content:
+                        return 'redis'
+                    elif 'mysql' in content:
+                        return 'mysql'
+                except Exception:
+                    pass
+
+        return 'unknown'
+
+    def _save_code_to_workspace(self, workspace_info: Dict[str, Any], execution_result, node) -> None:
+        """Save generated code to the permanent workspace directory"""
+        try:
+            workspace_path = workspace_info.get('workspace_path') or workspace_info.get('path')
+            if not workspace_path:
+                self._log_execution(node, "WARNING", "No workspace path found, cannot save code")
+                return
+
+            workspace_path = Path(workspace_path)
+            src_dir = workspace_path / "src"
+            src_dir.mkdir(exist_ok=True)
+
+            # Save all generated code blocks
+            for i, code_block in enumerate(execution_result.code_blocks):
+                if code_block.strip():
+                    # Determine file extension based on content
+                    if any(keyword in code_block.lower() for keyword in ['docker', 'from ', 'run ', 'copy']):
+                        filename = f"generated_code_{i+1}.dockerfile" if i > 0 else "Dockerfile"
+                    elif any(keyword in code_block.lower() for keyword in ['#!/bin/bash', 'docker run', 'docker pull']):
+                        filename = f"generated_script_{i+1}.sh" if i > 0 else "deploy.sh"
+                    elif any(keyword in code_block.lower() for keyword in ['version:', 'services:', 'networks:']):
+                        filename = f"generated_compose_{i+1}.yml" if i > 0 else "docker-compose.yml"
+                    elif 'import ' in code_block or 'def ' in code_block or 'print(' in code_block:
+                        filename = f"generated_code_{i+1}.py" if i > 0 else "main.py"
+                    else:
+                        filename = f"generated_code_{i+1}.txt"
+
+                    code_file = src_dir / filename
+                    with open(code_file, 'w') as f:
+                        f.write(code_block)
+
+                    self._log_execution(node, "INFO", f"💾 Saved code to {filename}", {
+                        "file_size": len(code_block),
+                        "lines": len(code_block.split('\n'))
+                    })
+
+            # Save final working code if different from blocks
+            if execution_result.final_code and execution_result.final_code not in execution_result.code_blocks:
+                final_code_file = src_dir / "final_working_code.py"
+                with open(final_code_file, 'w') as f:
+                    f.write(execution_result.final_code)
+                self._log_execution(node, "INFO", "💾 Saved final working code")
+
+            # Save execution metadata
+            metadata = {
+                "node_id": node.id,
+                "task_description": node.description,
+                "execution_success": execution_result.success,
+                "confidence": execution_result.confidence,
+                "iterations": execution_result.iterations,
+                "debug_attempts": execution_result.debug_attempts,
+                "execution_time": execution_result.execution_time,
+                "code_blocks_count": len(execution_result.code_blocks),
+                "saved_at": datetime.now().isoformat(),
+                "execution_outputs": execution_result.execution_outputs,
+                "insights": execution_result.insights
+            }
+
+            metadata_file = workspace_path / "execution_metadata.json"
+            import json
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            self._log_execution(node, "INFO", f"✅ All generated code saved to workspace", {
+                "workspace_path": str(workspace_path),
+                "files_saved": len(execution_result.code_blocks) + (1 if execution_result.final_code else 0),
+                "execution_success": execution_result.success
+            })
+
+        except Exception as e:
+            self._log_execution(node, "ERROR", f"Failed to save code to workspace: {str(e)}")
+
     async def list_active_research_goals(self) -> List[Dict[str, Any]]:
         """List all active research goals"""
-        return [
-            {
+        result = []
+        for goal_id, goal in self.active_goals.items():
+            # Simplified calculation to avoid potential hangs
+            try:
+                tree_nodes = self.research_trees.get(goal_id, {})
+                completed_count = sum(1 for node in tree_nodes.values() if hasattr(node, 'status') and node.status == NodeStatus.COMPLETED)
+            except Exception as e:
+                logger.error(f"Error calculating experiments for goal {goal_id}: {e}")
+                completed_count = 0
+
+            result.append({
                 "goal_id": goal_id,
                 "title": goal.title,
                 "description": goal.description,
                 "created_at": goal.id,  # Using ID as timestamp placeholder
-                "experiments_run": len([n for n in self.research_trees.get(goal_id, {}).values() if n.status == NodeStatus.COMPLETED])
-            }
-            for goal_id, goal in self.active_goals.items()
-        ]
+                "experiments_run": completed_count
+            })
+        return result

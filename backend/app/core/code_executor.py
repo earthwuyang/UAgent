@@ -43,6 +43,7 @@ except ImportError as e:
             pass
 
 from .llm_client import llm_client
+from .workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,145 +64,183 @@ class CodeExecutionResult:
 
 
 class CodeExecutor:
-    """Executes generated code with iterative debugging"""
+    """Executes generated code with iterative debugging and comprehensive setup"""
 
     def __init__(self, max_iterations: int = 3, max_debug_attempts: int = 2, timeout: int = 30):
         self.max_iterations = max_iterations
         self.max_debug_attempts = max_debug_attempts
         self.timeout = timeout
+        self.workspace_manager = WorkspaceManager()
 
-    async def execute_computational_task(self, task_description: str, config: Dict[str, Any]) -> CodeExecutionResult:
+    async def execute_computational_task(self, task_description: str, config: Dict[str, Any], node_id: str = None) -> CodeExecutionResult:
         """
         Execute a computational task with iterative code generation and debugging
         """
         start_time = time.time()
 
+        # Create dedicated workspace for this task
+        workspace_metadata = self.workspace_manager.create_workspace(
+            task_name=task_description[:100],  # Limit length for filename
+            task_type="computational"
+        )
+        workspace_path = workspace_metadata["workspace_path"]
+        workspace = Path(workspace_path)
+
+        logger.info(f"Created workspace for task: {workspace_path}")
+
         if not INTERPRETER_AVAILABLE:
             # Fallback to LLM-only code generation without execution
-            logger.warning("Interpreter not available, falling back to LLM-only code generation")
-            return await self._fallback_llm_only_generation(task_description, config, start_time)
+            logger.warning("Interpreter not available, falling back to comprehensive LLM generation")
+            return await self._fallback_comprehensive_generation(task_description, config, start_time, node_id, workspace_path)
 
-        # Create temporary workspace
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = Path(temp_dir)
-            interpreter = Interpreter(working_dir=workspace, timeout=self.timeout)
+        # Create interpreter in the workspace
+        interpreter = Interpreter(working_dir=workspace, timeout=self.timeout)
 
+        try:
+            # Generate initial code and parse comprehensive output
+            llm_output = await self._generate_comprehensive_solution(task_description, config, node_id)
+
+            # Parse and save all generated files
+            saved_files = self.workspace_manager.parse_and_save_comprehensive_output(workspace_path, llm_output)
+
+            # Extract code blocks for execution
+            code_blocks = self._extract_code_blocks(llm_output)
+
+            execution_outputs = []
+            debug_attempts = 0
+            final_code = None
+            success = False
+            insights = []
+
+            for iteration in range(self.max_iterations):
+                logger.info(f"Code execution iteration {iteration + 1}/{self.max_iterations}")
+
+                # Try to execute each code block
+                current_code = code_blocks[min(iteration, len(code_blocks) - 1)]
+
+                # Execute code with debugging
+                execution_result, debug_info = await self._execute_with_debugging(
+                    interpreter, current_code, task_description
+                )
+
+                execution_outputs.append({
+                    'iteration': iteration + 1,
+                    'code': current_code,
+                    'execution_result': execution_result.__dict__ if execution_result else None,
+                    'debug_info': debug_info
+                })
+
+                debug_attempts += debug_info.get('debug_attempts', 0)
+
+                # Check if execution was successful
+                if execution_result and execution_result.exc_type is None:
+                    success = True
+                    final_code = current_code
+                    insights.extend(self._extract_insights_from_execution(execution_result, task_description))
+                    break
+
+                # If execution failed, try to fix the code
+                if iteration < self.max_iterations - 1:
+                    logger.info(f"Code execution failed, attempting to fix...")
+                    fixed_code = await self._fix_code(current_code, execution_result, task_description)
+                    if fixed_code and fixed_code != current_code:
+                        code_blocks.append(fixed_code)
+
+            execution_time = time.time() - start_time
+
+            # Calculate confidence based on success and execution quality
+            confidence = self._calculate_confidence(success, execution_outputs, debug_attempts)
+
+            # Generate comprehensive metrics
+            metrics = self._generate_metrics(execution_outputs, debug_attempts, execution_time, task_description)
+
+            return CodeExecutionResult(
+                success=success,
+                confidence=confidence,
+                code_blocks=code_blocks,
+                execution_outputs=execution_outputs,
+                final_code=final_code,
+                execution_time=execution_time,
+                iterations=len(execution_outputs),
+                debug_attempts=debug_attempts,
+                insights=insights,
+                metrics=metrics
+            )
+
+        except Exception as e:
+            logger.error(f"Code execution failed with exception: {e}")
+            execution_time = time.time() - start_time
+
+            return CodeExecutionResult(
+                success=False,
+                confidence=0.0,
+                code_blocks=[],
+                execution_outputs=[],
+                final_code=None,
+                execution_time=execution_time,
+                iterations=0,
+                debug_attempts=0,
+                insights=[f"Code execution failed with exception: {str(e)}"],
+                metrics={'error': str(e), 'execution_time': execution_time}
+            )
+
+        finally:
+            # Clean up interpreter
             try:
-                # Generate initial code
-                code_blocks = await self._generate_initial_code(task_description, config)
+                interpreter.cleanup_session()
+            except:
+                pass
 
-                execution_outputs = []
-                debug_attempts = 0
-                final_code = None
-                success = False
-                insights = []
+    async def _generate_initial_code(self, task_description: str, config: Dict[str, Any], node_id: str = None) -> List[str]:
+        """Generate initial code implementations with comprehensive setup"""
+        system_prompt = """You are an expert DevOps engineer and programmer. Generate a COMPLETE deployment solution that includes:
 
-                for iteration in range(self.max_iterations):
-                    logger.info(f"Code execution iteration {iteration + 1}/{self.max_iterations}")
+        1. ALL necessary code files (Python, Dockerfile, docker-compose.yml, etc.)
+        2. DETAILED step-by-step reproduction instructions
+        3. AUTOMATED scripts for building, testing, and deployment
+        4. ERROR handling and logging for every step
+        5. VALIDATION scripts to verify the deployment works
 
-                    # Try to execute each code block
-                    current_code = code_blocks[min(iteration, len(code_blocks) - 1)]
-
-                    # Execute code with debugging
-                    execution_result, debug_info = await self._execute_with_debugging(
-                        interpreter, current_code, task_description
-                    )
-
-                    execution_outputs.append({
-                        'iteration': iteration + 1,
-                        'code': current_code,
-                        'execution_result': execution_result.__dict__ if execution_result else None,
-                        'debug_info': debug_info
-                    })
-
-                    debug_attempts += debug_info.get('debug_attempts', 0)
-
-                    # Check if execution was successful
-                    if execution_result and execution_result.exc_type is None:
-                        success = True
-                        final_code = current_code
-                        insights.extend(self._extract_insights_from_execution(execution_result, task_description))
-                        break
-
-                    # If execution failed, try to fix the code
-                    if iteration < self.max_iterations - 1:
-                        logger.info(f"Code execution failed, attempting to fix...")
-                        fixed_code = await self._fix_code(current_code, execution_result, task_description)
-                        if fixed_code and fixed_code != current_code:
-                            code_blocks.append(fixed_code)
-
-                execution_time = time.time() - start_time
-
-                # Calculate confidence based on success and execution quality
-                confidence = self._calculate_confidence(success, execution_outputs, debug_attempts)
-
-                # Generate comprehensive metrics
-                metrics = self._generate_metrics(execution_outputs, debug_attempts, execution_time, task_description)
-
-                return CodeExecutionResult(
-                    success=success,
-                    confidence=confidence,
-                    code_blocks=code_blocks,
-                    execution_outputs=execution_outputs,
-                    final_code=final_code,
-                    execution_time=execution_time,
-                    iterations=len(execution_outputs),
-                    debug_attempts=debug_attempts,
-                    insights=insights,
-                    metrics=metrics
-                )
-
-            except Exception as e:
-                logger.error(f"Code execution failed with exception: {e}")
-                execution_time = time.time() - start_time
-
-                return CodeExecutionResult(
-                    success=False,
-                    confidence=0.0,
-                    code_blocks=[],
-                    execution_outputs=[],
-                    final_code=None,
-                    execution_time=execution_time,
-                    iterations=0,
-                    debug_attempts=0,
-                    insights=[f"Code execution failed with exception: {str(e)}"],
-                    metrics={'error': str(e), 'execution_time': execution_time}
-                )
-
-            finally:
-                # Clean up interpreter
-                try:
-                    interpreter.cleanup_session()
-                except:
-                    pass
-
-    async def _generate_initial_code(self, task_description: str, config: Dict[str, Any]) -> List[str]:
-        """Generate initial code implementations"""
-        system_prompt = """You are an expert programmer. Generate working Python code that solves the given computational task.
-
-        Requirements:
-        1. Write complete, executable Python code
-        2. Include proper error handling
-        3. Add print statements to show results
-        4. Make the code self-contained (import required modules)
-        5. Focus on correctness and clarity
-
-        Generate 2-3 different approaches if possible."""
+        CRITICAL: Always log every step, command, and action. Include verbose output for debugging.
+        Generate production-ready, complete solutions, not just basic examples."""
 
         prompt = f"""Task: {task_description}
         Configuration: {config}
 
-        Please generate working Python code to solve this task. Provide multiple approaches if applicable.
-        Each code block should be complete and executable on its own.
+        Generate a COMPLETE solution including:
 
-        Format your response with code blocks clearly marked with ```python tags."""
+        ## 1. Code Implementation
+        - All necessary source files
+        - Complete Dockerfile and docker-compose.yml
+        - Configuration files
+
+        ## 2. Automated Scripts
+        - build.sh: Build the application
+        - run.sh: Run the application locally
+        - test.sh: Test the deployment
+        - deploy.sh: Deploy to production
+
+        ## 3. Step-by-Step Instructions
+        - Prerequisites and dependencies
+        - Exact commands to reproduce
+        - How to verify it's working
+        - Troubleshooting common issues
+
+        ## 4. Logging and Monitoring
+        - Log every operation
+        - Include health checks
+        - Error reporting mechanisms
+
+        Format each file clearly with filename headers and proper code blocks."""
 
         try:
             llm_response = await llm_client.generate_response(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=0.3,
-                max_tokens=3000
+                max_tokens=3000,
+                node_id=node_id,
+                context={"task": "code_generation", "step": "initial"}
             )
 
             if llm_response.get("success"):
@@ -317,6 +356,119 @@ class CodeExecutor:
         """Generate an improved version of the code"""
         return await self._debug_and_fix_code(code, execution_result, task_description)
 
+    async def _generate_comprehensive_solution(self, task_description: str, config: Dict[str, Any], node_id: str = None) -> str:
+        """Generate comprehensive solution with all files and instructions"""
+        llm_response = await llm_client.generate_response(
+            prompt=f"""Task: {task_description}
+Configuration: {config}
+
+Generate a COMPLETE solution including:
+
+## 1. Code Implementation
+- All necessary source files
+- Complete Dockerfile and docker-compose.yml
+- Configuration files
+
+## 2. Automated Scripts
+- build.sh: Build the application
+- run.sh: Run the application locally
+- test.sh: Test the deployment
+- deploy.sh: Deploy to production
+
+## 3. Step-by-Step Instructions
+- Prerequisites and dependencies
+- Exact commands to reproduce
+- How to verify it's working
+- Troubleshooting common issues
+
+## 4. Logging and Monitoring
+- Log every operation
+- Include health checks
+- Error reporting mechanisms
+
+Format each file clearly with filename headers and proper code blocks.""",
+            system_prompt="""You are an expert DevOps engineer and programmer. Generate a COMPLETE deployment solution that includes:
+
+1. ALL necessary code files (Python, Dockerfile, docker-compose.yml, etc.)
+2. DETAILED step-by-step reproduction instructions
+3. AUTOMATED scripts for building, testing, and deployment
+4. ERROR handling and logging for every step
+5. VALIDATION scripts to verify the deployment works
+
+CRITICAL: Always log every step, command, and action. Include verbose output for debugging.
+Generate production-ready, complete solutions, not just basic examples.""",
+            temperature=0.3,
+            max_tokens=4000,
+            node_id=node_id,
+            context={"task": "comprehensive_deployment", "step": "generation"}
+        )
+
+        if llm_response.get("success"):
+            return llm_response.get("content", "")
+        else:
+            return f"# Failed to generate comprehensive solution\n# Error: {llm_response.get('error', 'Unknown error')}"
+
+    async def _fallback_comprehensive_generation(self, task_description: str, config: Dict[str, Any], start_time: float, node_id: str = None, workspace_path: str = None) -> CodeExecutionResult:
+        """Enhanced fallback method that generates comprehensive deployment setup"""
+        try:
+            # Generate comprehensive solution
+            llm_output = await self._generate_comprehensive_solution(task_description, config, node_id)
+
+            # Parse and save all generated files
+            if workspace_path:
+                saved_files = self.workspace_manager.parse_and_save_comprehensive_output(workspace_path, llm_output)
+            else:
+                saved_files = {"code_files": [], "scripts": [], "docs": [], "configs": []}
+
+            execution_time = time.time() - start_time
+
+            # Enhanced insights based on what was generated
+            insights = [
+                "Comprehensive deployment solution generated",
+                f"Generated {len(saved_files.get('code_files', []))} code files",
+                f"Generated {len(saved_files.get('scripts', []))} automation scripts",
+                f"Generated {len(saved_files.get('configs', []))} configuration files",
+                f"Generated {len(saved_files.get('docs', []))} documentation files"
+            ]
+
+            if workspace_path:
+                insights.append(f"All files saved to: {workspace_path}")
+                insights.append("DEPLOYMENT.md created with step-by-step instructions")
+
+            return CodeExecutionResult(
+                success=len(saved_files.get('code_files', [])) > 0,
+                confidence=0.8 if saved_files.get('scripts') else 0.6,
+                code_blocks=self._extract_code_blocks(llm_output),
+                execution_outputs=[],
+                final_code=llm_output,
+                execution_time=execution_time,
+                iterations=1,
+                debug_attempts=0,
+                insights=insights,
+                metrics={
+                    'execution_time': execution_time,
+                    'comprehensive_generation': True,
+                    'files_generated': sum(len(files) for files in saved_files.values()),
+                    'workspace_path': workspace_path,
+                    'saved_files': saved_files
+                }
+            )
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            return CodeExecutionResult(
+                success=False,
+                confidence=0.0,
+                code_blocks=[],
+                execution_outputs=[],
+                final_code=None,
+                execution_time=execution_time,
+                iterations=0,
+                debug_attempts=0,
+                insights=[f"Comprehensive generation failed: {str(e)}"],
+                metrics={'error': str(e), 'execution_time': execution_time}
+            )
+
     def _extract_code_blocks(self, content: str) -> List[str]:
         """Extract Python code blocks from markdown-formatted content"""
         import re
@@ -385,11 +537,11 @@ class CodeExecutor:
             )
         }
 
-    async def _fallback_llm_only_generation(self, task_description: str, config: Dict[str, Any], start_time: float) -> CodeExecutionResult:
+    async def _fallback_llm_only_generation(self, task_description: str, config: Dict[str, Any], start_time: float, node_id: str = None) -> CodeExecutionResult:
         """Fallback method when code execution is not available"""
         try:
             # Generate code using LLM only
-            code_blocks = await self._generate_initial_code(task_description, config)
+            code_blocks = await self._generate_initial_code(task_description, config, node_id)
             execution_time = time.time() - start_time
 
             # Simulate basic analysis without execution
