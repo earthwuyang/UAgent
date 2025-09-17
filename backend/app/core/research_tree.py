@@ -21,6 +21,7 @@ from collections import defaultdict
 from ..utils.multi_modal_search import MultiModalSearchEngine
 from .repo_master import RepoMaster, AnalysisDepth
 from .llm_client import llm_client
+from .workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,12 @@ class HierarchicalResearchSystem:
         self.search_engine = MultiModalSearchEngine()
         self.repo_master = RepoMaster()
 
+        # Initialize workspace manager for code generation
+        self.workspace_manager = WorkspaceManager()
+
+        # WebSocket manager for real-time logging (injected later to avoid circular imports)
+        self.websocket_manager = None
+
         # Research tree state
         self.research_trees: Dict[str, Dict[str, ResearchNode]] = {}
         self.active_goals: Dict[str, ResearchGoal] = {}
@@ -193,6 +200,41 @@ class HierarchicalResearchSystem:
         )
         node.execution_logs.append(log_entry)
         print(f"[{level}] Node {node.id}: {message}")  # Also print for real-time debugging
+
+        # Broadcast to WebSocket connections if available
+        if self.websocket_manager:
+            asyncio.create_task(self._broadcast_log_update(node, log_entry))
+
+    async def _broadcast_log_update(self, node: ResearchNode, log_entry: ExecutionLog):
+        """Broadcast log update to WebSocket connections"""
+        try:
+            # Find the goal_id for this node
+            goal_id = None
+            for gid, tree in self.research_trees.items():
+                if node.id in tree:
+                    goal_id = gid
+                    break
+
+            if goal_id and self.websocket_manager:
+                log_message = {
+                    "type": "execution_log",
+                    "node_id": node.id,
+                    "log": {
+                        "level": log_entry.level,
+                        "message": log_entry.message,
+                        "timestamp": log_entry.timestamp.isoformat(),
+                        "context": log_entry.context
+                    }
+                }
+
+                # Send to goal-level subscribers
+                await self.websocket_manager.send_to_goal(goal_id, log_message)
+
+                # Send to node-specific subscribers
+                await self.websocket_manager.send_to_node(node.id, log_message)
+
+        except Exception as e:
+            logger.debug(f"Failed to broadcast log update: {e}")
 
     def _initialize_experiment_types(self) -> Dict[ExperimentType, Dict[str, Any]]:
         """Initialize experiment type configurations"""
@@ -314,8 +356,21 @@ class HierarchicalResearchSystem:
             selected_node = await self._select_node_ucb(goal_id)
 
             if selected_node:
-                # Expand the selected node
-                new_nodes = await self._expand_node(goal_id, selected_node.id)
+                needs_result_first = selected_node.node_type in {
+                    ResearchNodeType.EXPERIMENT,
+                    ResearchNodeType.LITERATURE,
+                    ResearchNodeType.CODE_ANALYSIS,
+                }
+                if needs_result_first and not selected_node.results:
+                    # Run experiment for this node first, then expand to create follow-ups
+                    logger.info(f"Running experiment first for {selected_node.node_type.value} node {selected_node.id} before expansion")
+                    res = await self._run_experiment(goal_id, selected_node.id)
+                    await self._backpropagate_result(goal_id, selected_node.id, res)
+                    # Now expansion will actually produce follow-ups
+                    new_nodes = await self._expand_node(goal_id, selected_node.id)
+                else:
+                    new_nodes = await self._expand_node(goal_id, selected_node.id)
+
                 nodes_to_experiment.extend(new_nodes)
 
             # Also find existing promising nodes that haven't run experiments yet
@@ -364,36 +419,42 @@ class HierarchicalResearchSystem:
         tree = self.research_trees[goal_id]
         goal = self.active_goals[goal_id]
 
-        # Find leaf nodes that can be expanded
-        expandable_nodes = []
-        for node in tree.values():
-            if (
-                (node.status in [NodeStatus.PENDING, NodeStatus.PROMISING] or
-                 (node.status == NodeStatus.COMPLETED and node.node_type == ResearchNodeType.ROOT)) and
-                node.depth < goal.max_depth and
-                len(node.children) < self._get_max_children(node)
-            ):
-                expandable_nodes.append(node)
+        def expandable(n: ResearchNode) -> bool:
+            if n.depth >= goal.max_depth:
+                return False
+            # sensible default if _get_max_children missing or misconfigured
+            try:
+                max_children = max(0, int(self._get_max_children(n)))
+            except Exception:
+                max_children = 3 if n.node_type != ResearchNodeType.ROOT else 5
+            if len(n.children) >= max_children:
+                return False
+            # For node types whose follow-ups depend on results, require results
+            needs_result = n.node_type in {
+                ResearchNodeType.EXPERIMENT,
+                ResearchNodeType.LITERATURE,
+                ResearchNodeType.CODE_ANALYSIS,
+            }
+            return (not needs_result) or bool(n.results)
 
-        if not expandable_nodes:
+        # include PENDING, PROMISING, and COMPLETED nodes that are expandable
+        candidates = [
+            n for n in tree.values()
+            if n.status in {NodeStatus.PENDING, NodeStatus.PROMISING, NodeStatus.COMPLETED}
+            and expandable(n)
+        ]
+        if not candidates:
             return None
 
-        # Calculate UCB scores
-        total_visits = sum(node.visits for node in tree.values())
-
-        for node in expandable_nodes:
-            if node.visits == 0:
-                node.ucb_score = float('inf')
+        total_visits = max(1, sum(max(0, n.visits) for n in tree.values()))
+        for n in candidates:
+            if n.visits == 0:
+                n.ucb_score = float("inf")
             else:
-                exploitation = node.total_reward / node.visits
-                exploration = self.exploration_constant * math.sqrt(
-                    math.log(total_visits) / node.visits
-                )
-                node.ucb_score = exploitation + exploration
-
-        # Select node with highest UCB score
-        selected = max(expandable_nodes, key=lambda n: n.ucb_score)
-        return selected
+                exploitation = n.total_reward / n.visits
+                exploration = self.exploration_constant * math.sqrt(math.log(total_visits) / n.visits)
+                n.ucb_score = exploitation + exploration
+        return max(candidates, key=lambda n: n.ucb_score)
 
     async def _expand_node(self, goal_id: str, node_id: str) -> List[str]:
         """Expand a node by generating child experiments"""
@@ -440,6 +501,190 @@ class HierarchicalResearchSystem:
 
         return new_node_ids
 
+    async def _plan_needed_experiments(self, goal_id: str) -> List[Dict[str, Any]]:
+        """Use LLM to intelligently decide what types of experiments are needed for the goal"""
+        goal = self.active_goals[goal_id]
+
+        system_prompt = """You are a research planning assistant. Given a research goal/task, determine what types of experiments or analyses are actually needed to accomplish it effectively.
+
+Available experiment types:
+- LITERATURE_ANALYSIS: Research existing papers and studies (for complex research topics)
+- CODE_ANALYSIS: Analyze existing code implementations (when building on existing work)
+- THEORETICAL: Develop theoretical frameworks or models (for complex research problems)
+- COMPUTATIONAL: Implement and test solutions (for programming/implementation tasks)
+
+Guidelines:
+- For simple programming tasks (hello world, basic algorithms): Only COMPUTATIONAL is needed
+- For complex research questions: May need LITERATURE_ANALYSIS and THEORETICAL
+- For building on existing work: May need CODE_ANALYSIS
+- Be selective - don't include unnecessary experiment types
+- Prioritize experiments by importance (1.0 = highest, 0.5 = lowest)
+
+Return a JSON list with experiment plans."""
+
+        prompt = f"""Research Goal: {goal.title}
+Description: {goal.description}
+Success Criteria: {goal.success_criteria}
+
+Analyze this goal and determine the minimum set of experiment types needed to accomplish it effectively. Consider:
+1. Is this a simple programming task or complex research?
+2. Does it require literature review or can it be solved directly?
+3. What's the most efficient path to success?
+
+Return JSON format:
+[
+  {{
+    "experiment_type": "COMPUTATIONAL",
+    "reasoning": "Direct implementation needed",
+    "priority": 0.9,
+    "required": true
+  }}
+]"""
+
+        try:
+            llm_response = await llm_client.generate_response(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.3,
+                max_tokens=1000
+            )
+
+            if llm_response.get("success"):
+                content = llm_response.get("content", "")
+
+                # Try to extract JSON from the response
+                import json
+                import re
+
+                # Look for JSON array in the response
+                json_pattern = r'\[[\s\S]*?\]'
+                json_match = re.search(json_pattern, content)
+
+                if json_match:
+                    json_str = json_match.group()
+                    try:
+                        experiment_plans = json.loads(json_str)
+                        logger.info(f"LLM planned {len(experiment_plans)} experiment types for goal: {goal.title}")
+                        return experiment_plans
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse LLM experiment planning JSON")
+
+                # Fallback: parse text response
+                plans = []
+                lines = content.split('\n')
+                for line in lines:
+                    line = line.strip().lower()
+                    if 'computational' in line:
+                        plans.append({
+                            "experiment_type": "COMPUTATIONAL",
+                            "reasoning": "LLM suggested computational approach",
+                            "priority": 0.9,
+                            "required": True
+                        })
+                    elif 'literature' in line:
+                        plans.append({
+                            "experiment_type": "LITERATURE_ANALYSIS",
+                            "reasoning": "LLM suggested literature review",
+                            "priority": 0.7,
+                            "required": False
+                        })
+                    elif 'theoretical' in line:
+                        plans.append({
+                            "experiment_type": "THEORETICAL",
+                            "reasoning": "LLM suggested theoretical analysis",
+                            "priority": 0.6,
+                            "required": False
+                        })
+
+                if plans:
+                    logger.info(f"Parsed {len(plans)} experiment types from LLM text response")
+                    return plans
+
+        except Exception as e:
+            logger.error(f"LLM experiment planning failed: {e}")
+
+        # Fallback: intelligent heuristics based on goal characteristics
+        return self._fallback_experiment_planning(goal)
+
+    def _fallback_experiment_planning(self, goal) -> List[Dict[str, Any]]:
+        """Fallback heuristic-based experiment planning when LLM fails"""
+        plans = []
+        description_lower = goal.description.lower()
+        title_lower = goal.title.lower()
+
+        # Simple programming task indicators
+        simple_programming_keywords = [
+            'hello world', 'hello-world', 'print', 'basic', 'simple',
+            'tutorial', 'beginner', 'example', 'demo'
+        ]
+
+        # Complex research indicators
+        research_keywords = [
+            'research', 'analysis', 'study', 'investigation', 'survey',
+            'review', 'comprehensive', 'advanced', 'novel', 'approach'
+        ]
+
+        # Implementation task indicators
+        implementation_keywords = [
+            'implement', 'build', 'create', 'develop', 'code', 'program',
+            'algorithm', 'function', 'system', 'application'
+        ]
+
+        is_simple_programming = any(keyword in description_lower or keyword in title_lower
+                                  for keyword in simple_programming_keywords)
+        is_research_task = any(keyword in description_lower or keyword in title_lower
+                              for keyword in research_keywords)
+        is_implementation = any(keyword in description_lower or keyword in title_lower
+                               for keyword in implementation_keywords)
+
+        # Always include computational for implementation tasks
+        if is_implementation or is_simple_programming:
+            plans.append({
+                "experiment_type": "COMPUTATIONAL",
+                "reasoning": "Implementation/programming task detected",
+                "priority": 0.9,
+                "required": True
+            })
+
+        # Only add literature review for complex research tasks
+        if is_research_task and not is_simple_programming:
+            plans.append({
+                "experiment_type": "LITERATURE_ANALYSIS",
+                "reasoning": "Complex research task requires literature review",
+                "priority": 0.7,
+                "required": False
+            })
+
+        # Add theoretical analysis for research problems
+        if is_research_task and 'theoretical' in description_lower:
+            plans.append({
+                "experiment_type": "THEORETICAL",
+                "reasoning": "Theoretical research component detected",
+                "priority": 0.6,
+                "required": False
+            })
+
+        # Add code analysis if building on existing work
+        if 'existing' in description_lower or 'based on' in description_lower:
+            plans.append({
+                "experiment_type": "CODE_ANALYSIS",
+                "reasoning": "Building on existing work requires code analysis",
+                "priority": 0.5,
+                "required": False
+            })
+
+        # Default fallback for unclear tasks
+        if not plans:
+            plans.append({
+                "experiment_type": "COMPUTATIONAL",
+                "reasoning": "Default computational approach",
+                "priority": 0.8,
+                "required": True
+            })
+
+        logger.info(f"Fallback planning generated {len(plans)} experiment types")
+        return plans
+
     async def _generate_research_directions(self, goal_id: str, allow_regeneration: bool = False) -> List[Dict[str, Any]]:
         """Generate initial research directions from the root goal"""
         goal = self.active_goals[goal_id]
@@ -465,22 +710,69 @@ class HierarchicalResearchSystem:
                         # Don't create duplicates of running nodes
                         existing_types.add(child.node_type)
 
+        # Use LLM to intelligently plan needed experiments
+        experiment_plans = await self._plan_needed_experiments(goal_id)
+
         directions = []
 
-        # Only create literature analysis if it doesn't exist
-        if ResearchNodeType.LITERATURE not in existing_types:
-            directions.append({
-                "node_type": ResearchNodeType.LITERATURE,
-                "title": f"Literature Analysis: {goal.title}",
-                "description": f"Comprehensive literature review for {goal.description}",
-                "experiment_type": ExperimentType.LITERATURE_ANALYSIS,
-                "experiment_config": {
+        # Convert experiment plans to research directions
+        for plan in experiment_plans:
+            exp_type = plan.get("experiment_type", "COMPUTATIONAL")
+            priority = plan.get("priority", 0.8)
+            reasoning = plan.get("reasoning", "LLM planned experiment")
+
+            # Map experiment types to node types and configurations
+            if exp_type == "COMPUTATIONAL":
+                node_type = ResearchNodeType.EXPERIMENT
+                experiment_type = ExperimentType.COMPUTATIONAL
+                config = {
+                    "approach": "direct_implementation",
+                    "focus": "practical_solution",
+                    "reasoning": reasoning
+                }
+            elif exp_type == "LITERATURE_ANALYSIS":
+                node_type = ResearchNodeType.LITERATURE
+                experiment_type = ExperimentType.LITERATURE_ANALYSIS
+                config = {
                     "search_queries": [goal.title, goal.description] + goal.success_criteria,
-                    "max_papers": 50,
-                    "analysis_depth": "comprehensive"
-                },
-                "priority": 0.9
-            })
+                    "max_papers": 30,
+                    "analysis_depth": "focused",
+                    "reasoning": reasoning
+                }
+            elif exp_type == "THEORETICAL":
+                node_type = ResearchNodeType.HYPOTHESIS
+                experiment_type = ExperimentType.THEORETICAL
+                config = {
+                    "hypothesis_count": 3,
+                    "evidence_threshold": 0.7,
+                    "reasoning": reasoning
+                }
+            elif exp_type == "CODE_ANALYSIS":
+                node_type = ResearchNodeType.CODE_ANALYSIS
+                experiment_type = ExperimentType.CODE_STUDY
+                config = {
+                    "search_terms": [goal.title, "implementation", "algorithm"],
+                    "languages": ["python", "javascript", "cpp"],
+                    "analysis_depth": "focused",
+                    "reasoning": reasoning
+                }
+            else:
+                # Default to computational
+                node_type = ResearchNodeType.EXPERIMENT
+                experiment_type = ExperimentType.COMPUTATIONAL
+                config = {"reasoning": reasoning}
+
+            # Only add if this node type doesn't already exist (unless regenerating)
+            if node_type not in existing_types:
+                directions.append({
+                    "node_type": node_type,
+                    "title": f"{exp_type.replace('_', ' ').title()}: {goal.title}",
+                    "description": f"{reasoning} for {goal.description}",
+                    "experiment_type": experiment_type,
+                    "experiment_config": config,
+                    "priority": priority,
+                    "llm_planned": True
+                })
 
         # Only create code analysis if it doesn't exist and is applicable
         if (ResearchNodeType.CODE_ANALYSIS not in existing_types and
@@ -498,102 +790,28 @@ class HierarchicalResearchSystem:
                 "priority": 0.8
             })
 
-        # Only create hypothesis generation if it doesn't exist
-        if ResearchNodeType.HYPOTHESIS not in existing_types:
-            directions.append({
-                "node_type": ResearchNodeType.HYPOTHESIS,
-                "title": f"Hypothesis Generation: {goal.title}",
-                "description": f"Generate testable hypotheses for {goal.description}",
-                "hypothesis": f"Primary hypothesis for {goal.title}",
-                "experiment_type": ExperimentType.THEORETICAL,
-                "experiment_config": {
-                    "hypothesis_count": 5,
-                    "evidence_threshold": 0.7
-                },
-                "priority": 0.85
-            })
-
-        # Add experimental design direction if not exists (basic research only at ROOT level)
-        if ResearchNodeType.EXPERIMENT not in existing_types:
-            directions.append({
-                "node_type": ResearchNodeType.EXPERIMENT,
-                "title": f"Experimental Design: {goal.title}",
-                "description": f"Design and execute empirical experiments for {goal.description}",
-                "experiment_type": ExperimentType.COMPUTATIONAL,
-                "experiment_config": {
-                    "experimental_design": "factorial",
-                    "variables": ["performance", "accuracy", "efficiency"],
-                    "sample_size": 100
-                },
-                "priority": 0.8
-            })
-
-        # Add data analysis direction if not exists (basic research only)
-        if len(existing_types) < 4:  # Limit basic research directions to 4
-            directions.append({
-                "node_type": ResearchNodeType.LITERATURE,
-                "title": f"Extended Analysis: {goal.title}",
-                "description": f"Extended research analysis with different methodologies for {goal.description}",
-                "experiment_type": ExperimentType.LITERATURE_ANALYSIS,
-                "experiment_config": {
-                    "search_strategy": "expanded",
-                    "methodology": "systematic_review",
-                    "cross_domain": True
-                },
-                "priority": 0.7
-            })
 
         # NOTE: Hierarchical and Synthesis nodes are now created as children of successful research nodes
         # This is handled in _generate_followup_experiments() method
 
-        # When allow_regeneration is True, add alternative approaches and deeper hierarchical exploration
-        if allow_regeneration:
-            logger.info("Regenerating research directions due to failures. Adding alternative approaches...")
-
-            # Add alternative computational approaches
+        # If no directions at all (LLM planning failed completely), add minimal computational approach
+        if not directions:
+            logger.warning("No experiment plans generated, adding minimal computational approach")
             directions.append({
                 "node_type": ResearchNodeType.EXPERIMENT,
-                "title": f"Alternative Computational Analysis: {goal.title}",
-                "description": f"Alternative computational approach with different parameters for {goal.description}",
+                "title": f"Direct Implementation: {goal.title}",
+                "description": f"Direct implementation approach for {goal.description}",
                 "experiment_type": ExperimentType.COMPUTATIONAL,
                 "experiment_config": {
-                    "experimental_design": "randomized_controlled",
-                    "variables": ["throughput", "latency", "scalability"],
-                    "sample_size": 150,
-                    "alternative_approach": True
+                    "approach": "minimal_solution",
+                    "reasoning": "Fallback computational approach"
                 },
-                "priority": 0.85
+                "priority": 0.8,
+                "llm_planned": False
             })
 
-            # Add simulation-based experiments
-            directions.append({
-                "node_type": ResearchNodeType.EXPERIMENT,
-                "title": f"Simulation Study: {goal.title}",
-                "description": f"Simulation-based validation for {goal.description}",
-                "experiment_type": ExperimentType.SIMULATION,
-                "experiment_config": {
-                    "simulation_type": "monte_carlo",
-                    "iterations": 10000,
-                    "scenarios": ["best_case", "worst_case", "average_case"]
-                },
-                "priority": 0.8
-            })
-
-            # Add empirical validation experiments
-            directions.append({
-                "node_type": ResearchNodeType.EXPERIMENT,
-                "title": f"Empirical Validation: {goal.title}",
-                "description": f"Real-world empirical validation for {goal.description}",
-                "experiment_type": ExperimentType.EMPIRICAL,
-                "experiment_config": {
-                    "validation_method": "field_study",
-                    "data_sources": ["production", "benchmarks", "user_studies"],
-                    "metrics": ["performance", "usability", "reliability"]
-                },
-                "priority": 0.9
-            })
-
-        return directions
+        logger.info(f"Generated {len(directions)} intelligent research directions for goal: {goal.title}")
+        return sorted(directions, key=lambda x: x["priority"], reverse=True)
 
     async def _generate_hypothesis_experiments(self, goal_id: str, node_id: str) -> List[Dict[str, Any]]:
         """Generate experiments to test a hypothesis"""
@@ -1039,38 +1257,126 @@ class HierarchicalResearchSystem:
         )
 
     async def _run_computational_experiment(self, node: ResearchNode) -> ExperimentResult:
-        """Run computational experiment"""
+        """Run computational experiment with real code execution and debugging"""
+        import time
+        from .code_executor import CodeExecutor
+
+        start_time = time.time()
         config = node.experiment_config
+        task_description = node.description
 
-        # Simulate computational experiment
-        await asyncio.sleep(np.random.uniform(1, 5))  # Simulate computation time
+        try:
+            # Create workspace for code generation if needed
+            workspace_info = None
+            if any(keyword in task_description.lower() for keyword in
+                   ["docker", "python", "programming", "code", "script", "hello-world", "hello world"]):
 
-        # Generate synthetic results
-        test_cases = config.get("test_cases", 100)
-        success_rate = np.random.uniform(0.6, 0.95)
+                # Determine task type
+                if "docker" in task_description.lower():
+                    if "hello-world" in task_description.lower() or "hello world" in task_description.lower():
+                        workspace_info = self.workspace_manager.get_docker_hello_world_workspace(node.title)
+                    else:
+                        workspace_info = self.workspace_manager.create_workspace(node.title, "docker")
+                else:
+                    workspace_info = self.workspace_manager.create_workspace(node.title, "programming")
 
-        results = {
-            "test_cases_run": test_cases,
-            "success_rate": success_rate,
-            "performance_metrics": {
-                "accuracy": np.random.uniform(0.7, 0.95),
-                "precision": np.random.uniform(0.6, 0.9),
-                "recall": np.random.uniform(0.6, 0.9)
+                # Add workspace info to config
+                config = config.copy()
+                config["workspace"] = workspace_info
+
+            # Create code executor with configuration
+            max_iterations = config.get("max_iterations", 3)
+            max_debug_attempts = config.get("max_debug_attempts", 2)
+            timeout = config.get("timeout", 30)
+
+            executor = CodeExecutor(
+                max_iterations=max_iterations,
+                max_debug_attempts=max_debug_attempts,
+                timeout=timeout
+            )
+
+            # Execute computational task with real code execution
+            execution_result = await executor.execute_computational_task(task_description, config)
+
+            # Convert CodeExecutionResult to ExperimentResult
+            success = execution_result.success
+            confidence = execution_result.confidence
+
+            # Build comprehensive metrics
+            metrics = {
+                "execution_time": execution_result.execution_time,
+                "code_execution_success": execution_result.success,
+                "total_iterations": execution_result.iterations,
+                "debug_attempts": execution_result.debug_attempts,
+                "code_blocks_generated": len(execution_result.code_blocks),
+                "has_working_code": execution_result.final_code is not None,
+                **execution_result.metrics
             }
-        }
 
-        return ExperimentResult(
-            experiment_id=node.id,
-            success=success_rate > 0.7,
-            confidence=success_rate,
-            metrics=results,
-            data=results,
-            insights=[
-                f"Achieved {success_rate:.2%} success rate",
-                f"Performance metrics indicate {'promising' if success_rate > 0.8 else 'mixed'} results"
-            ],
-            execution_time=0.0
-        )
+            # Build data with all execution details
+            data = {
+                "task_description": task_description,
+                "config": config,
+                "code_blocks": execution_result.code_blocks,
+                "final_code": execution_result.final_code,
+                "execution_outputs": execution_result.execution_outputs,
+                "execution_method": "real_code_execution"
+            }
+
+            # Add workspace information if created
+            if workspace_info:
+                data["workspace"] = workspace_info
+
+            # Use execution insights plus summary insights
+            insights = execution_result.insights.copy()
+
+            # Add workspace-specific insights
+            if workspace_info:
+                insights.append(f"Code generated in workspace: {workspace_info['workspace_path']}")
+                if workspace_info.get("bash_script"):
+                    insights.append(f"Bash script available: {workspace_info['bash_script']}")
+                if workspace_info.get("python_script"):
+                    insights.append(f"Python script available: {workspace_info['python_script']}")
+            if execution_result.final_code:
+                insights.insert(0, f"Successfully generated and executed working code")
+                insights.append(f"Final code has {len(execution_result.final_code.split())} lines")
+            else:
+                insights.insert(0, f"Code generation attempted but execution failed")
+
+            insights.append(f"Completed {execution_result.iterations} iterations with {execution_result.debug_attempts} debug attempts")
+
+            return ExperimentResult(
+                experiment_id=node.id,
+                success=success,
+                confidence=confidence,
+                metrics=metrics,
+                data=data,
+                insights=insights[:15],  # Limit insights to prevent overwhelming output
+                execution_time=execution_result.execution_time
+            )
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"Computational experiment failed: {str(e)}")
+
+            return ExperimentResult(
+                experiment_id=node.id,
+                success=False,
+                confidence=0.0,
+                metrics={
+                    "exception": str(e),
+                    "execution_time": execution_time,
+                    "code_execution_success": False
+                },
+                data={
+                    "task_description": task_description,
+                    "config": config,
+                    "exception_details": str(e),
+                    "execution_method": "real_code_execution"
+                },
+                insights=[f"Computational experiment failed with exception: {str(e)}"],
+                execution_time=execution_time
+            )
 
     async def _run_simulation_experiment(self, node: ResearchNode) -> ExperimentResult:
         """Run simulation experiment"""
@@ -1409,14 +1715,28 @@ class HierarchicalResearchSystem:
         start_time = datetime.now()
 
         try:
-            # Get the research goal context
-            goal_id = node.id.split('_')[0] if '_' in node.id else node.id
-            if goal_id in self.active_goals:
-                goal = self.active_goals[goal_id]
-                tree = self.research_trees[goal_id]
-            else:
-                goal = None
-                tree = {}
+            # Get the research goal context - improved goal_id extraction
+            goal_id = None
+            goal = None
+            tree = {}
+
+            # Try to find the goal_id by checking all active goals
+            for active_goal_id, active_goal in self.active_goals.items():
+                if active_goal_id in self.research_trees:
+                    tree_nodes = self.research_trees[active_goal_id]
+                    if node.id in tree_nodes:
+                        goal_id = active_goal_id
+                        goal = active_goal
+                        tree = tree_nodes
+                        break
+
+            # Fallback: try original method
+            if not goal_id:
+                potential_goal_id = node.id.split('_')[0] if '_' in node.id else node.id
+                if potential_goal_id in self.active_goals:
+                    goal_id = potential_goal_id
+                    goal = self.active_goals[goal_id]
+                    tree = self.research_trees[goal_id]
 
             result = ExperimentResult(
                 experiment_id=node.id,
@@ -1508,14 +1828,53 @@ class HierarchicalResearchSystem:
             # Add domain-specific synthesis based on goal
             if goal:
                 synthesis_insights.append(f"Research synthesis for: {goal.title}")
-                if "optimization" in goal.title.lower():
+                title_lower = goal.title.lower()
+                description_lower = goal.description.lower() if goal.description else ""
+
+                # Docker-specific synthesis
+                if any(keyword in title_lower + description_lower for keyword in ["docker", "container", "hello-world", "hello world"]):
+                    synthesis_insights.extend([
+                        "Docker containerization task identified",
+                        "Recommended approach: Pull official hello-world image and execute",
+                        "Environment setup: Ensure Docker daemon is running",
+                        "Execution command: docker run hello-world"
+                    ])
+                    if node_count == 0:
+                        synthesis_insights.extend([
+                            "Generated Docker hello-world execution plan",
+                            "No complex dependencies required for hello-world container",
+                            "Expected output: Success message from Docker hello-world image"
+                        ])
+
+                elif "optimization" in title_lower:
                     synthesis_insights.append("Focus area: Performance and efficiency optimization")
-                elif "analysis" in goal.title.lower():
+                elif "analysis" in title_lower:
                     synthesis_insights.append("Focus area: Analytical framework development")
+                elif any(keyword in title_lower + description_lower for keyword in ["python", "programming", "code"]):
+                    synthesis_insights.extend([
+                        "Programming task synthesis",
+                        "Workspace recommendation: ./workspace/task-{timestamp}",
+                        "Environment: Use virtual environment or Docker container"
+                    ])
 
             # Calculate final confidence based on input quality and synthesis completeness
-            confidence = min(avg_confidence * 1.1 + 0.1, 1.0) if node_count >= 2 else 0.5
-            success = node_count >= 2 and avg_confidence > 0.3
+            # More lenient requirements for simple tasks
+            if node_count >= 2:
+                confidence = min(avg_confidence * 1.1 + 0.1, 1.0)
+                success = avg_confidence > 0.3
+            elif node_count == 1:
+                # Allow synthesis with single high-quality node
+                confidence = max(avg_confidence * 0.8, 0.6)
+                success = avg_confidence > 0.5
+            else:
+                # No completed nodes - create basic synthesis based on goal
+                confidence = 0.7 if goal else 0.5
+                success = goal is not None
+                synthesis_insights.extend([
+                    "Synthesis performed based on research goal analysis",
+                    "No parent experiment results available for synthesis",
+                    "Generated conceptual framework for task completion"
+                ])
 
             # Final metrics
             final_metrics = {
@@ -1614,6 +1973,9 @@ class HierarchicalResearchSystem:
                 root_node.confidence = np.mean([child.confidence for child in successful_children])
                 root_node.completed_at = datetime.now()
                 logger.info(f"ROOT node {goal_id}_root completed with {len(successful_children)} successful children (confidence: {root_node.confidence:.2f})")
+
+                # Generate completion report automatically
+                await self._generate_completion_report(goal_id)
             # If most children failed and we have insufficient successes, generate new research directions
             elif len(failed_children) >= 2 and len(successful_children) < 2:
                 logger.warning(f"ROOT node has {len(failed_children)} failed children, generating new research directions...")
@@ -1621,6 +1983,27 @@ class HierarchicalResearchSystem:
 
                 # Update total reward for tree search
                 root_node.total_reward = root_node.confidence * root_node.visits
+
+    async def _generate_completion_report(self, goal_id: str):
+        """Generate a comprehensive completion report when the root node is completed"""
+        try:
+            # Import here to avoid circular imports
+            from .report_generator import MarkdownReportGenerator
+
+            # Create report generator instance
+            report_generator = MarkdownReportGenerator(self)
+
+            # Generate the report
+            report_path = await report_generator.generate_completion_report(goal_id)
+
+            goal = self.active_goals[goal_id]
+            logger.info(f"📄 Completion report generated for '{goal.title}': {report_path}")
+            logger.info(f"🌐 View report at: /api/research-tree/goals/{goal_id}/report/view")
+            logger.info(f"📥 Download report at: /api/research-tree/goals/{goal_id}/report/download")
+
+        except Exception as e:
+            logger.error(f"Failed to generate completion report for goal {goal_id}: {e}")
+            # Don't raise the exception to avoid disrupting the main research flow
 
     async def _is_goal_satisfied(self, goal_id: str) -> bool:
         """Check if research goal is satisfied"""
@@ -1670,14 +2053,34 @@ class HierarchicalResearchSystem:
         """Get maximum number of children for a node type"""
         max_children = {
             ResearchNodeType.ROOT: 5,
-            ResearchNodeType.HYPOTHESIS: 4,
+            ResearchNodeType.HYPOTHESIS: 3,
             ResearchNodeType.EXPERIMENT: 3,
-            ResearchNodeType.CODE_ANALYSIS: 3,
             ResearchNodeType.LITERATURE: 2,
-            ResearchNodeType.SYNTHESIS: 0,
-            ResearchNodeType.VALIDATION: 2
+            ResearchNodeType.CODE_ANALYSIS: 2,
+            ResearchNodeType.SYNTHESIS: 1,
+            ResearchNodeType.VALIDATION: 1,
+            ResearchNodeType.HIERARCHICAL_RESEARCH: 3,
         }
         return max_children.get(node.node_type, 2)
+
+    def _is_done(self, goal_id: str, node_id: str) -> bool:
+        """Check if a node is truly done (completed and not expandable)"""
+        goal = self.active_goals[goal_id]
+        node = self.research_trees[goal_id][node_id]
+
+        if node.status in {NodeStatus.FAILED, NodeStatus.PRUNED}:
+            return True
+        if node.status != NodeStatus.COMPLETED:
+            return False
+
+        # completed but still expandable? then NOT done
+        return not (
+            node.depth < goal.max_depth
+            and len(node.children) < self._get_max_children(node)
+            and (node.node_type not in {
+                ResearchNodeType.EXPERIMENT, ResearchNodeType.LITERATURE, ResearchNodeType.CODE_ANALYSIS
+            } or bool(node.results))
+        )
 
     async def get_research_tree_status(self, goal_id: str) -> Dict[str, Any]:
         """Get comprehensive status of research tree"""

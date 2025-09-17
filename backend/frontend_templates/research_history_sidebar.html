@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research History Sidebar</title>
+    <style>
+        /* Research History Sidebar Styles */
+        .research-sidebar {
+            width: 320px;
+            height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            position: fixed;
+            left: 0;
+            top: 0;
+            overflow-y: auto;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            background: rgba(0,0,0,0.1);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .sidebar-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0 0 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sidebar-subtitle {
+            font-size: 12px;
+            opacity: 0.8;
+            margin: 0;
+        }
+
+        .search-container {
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: none;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        .search-input::placeholder {
+            color: rgba(255,255,255,0.6);
+        }
+
+        .search-input:focus {
+            background: rgba(255,255,255,0.2);
+        }
+
+        .filter-tabs {
+            display: flex;
+            padding: 15px 20px;
+            gap: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .filter-tab {
+            padding: 6px 12px;
+            border-radius: 15px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            border: none;
+            outline: none;
+        }
+
+        .filter-tab:hover {
+            background: rgba(255,255,255,0.2);
+        }
+
+        .filter-tab.active {
+            background: rgba(255,255,255,0.3);
+            font-weight: 600;
+        }
+
+        .history-list {
+            padding: 10px 0;
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+        }
+
+        .history-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .history-item:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .history-item.active {
+            background: rgba(255,255,255,0.15);
+            border-left: 4px solid #fff;
+            padding-left: 16px;
+        }
+
+        .history-item-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin: 0 0 5px 0;
+            line-height: 1.3;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .history-item-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .status-badge {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-active { background: #4ade80; color: #064e3b; }
+        .status-completed { background: #60a5fa; color: #1e3a8a; }
+        .status-failed { background: #f87171; color: #7f1d1d; }
+        .status-archived { background: #a3a3a3; color: #262626; }
+
+        .history-item-date {
+            font-size: 11px;
+            opacity: 0.7;
+        }
+
+        .history-item-stats {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            opacity: 0.8;
+            margin-top: 5px;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+        }
+
+        .history-item-actions {
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            gap: 5px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .history-item:hover .history-item-actions {
+            opacity: 1;
+        }
+
+        .action-btn {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            transition: all 0.2s ease;
+        }
+
+        .action-btn:hover {
+            background: rgba(255,255,255,0.3);
+            transform: scale(1.1);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            font-size: 14px;
+            opacity: 0.7;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            opacity: 0.7;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+            opacity: 0.5;
+        }
+
+        .stats-summary {
+            padding: 15px 20px;
+            background: rgba(0,0,0,0.1);
+            border-top: 1px solid rgba(255,255,255,0.1);
+            font-size: 12px;
+        }
+
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+
+        /* Responsive design */
+        @media (max-width: 768px) {
+            .research-sidebar {
+                width: 100%;
+                transform: translateX(-100%);
+                transition: transform 0.3s ease;
+            }
+
+            .research-sidebar.open {
+                transform: translateX(0);
+            }
+        }
+
+        /* Custom scrollbar */
+        .research-sidebar::-webkit-scrollbar,
+        .history-list::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .research-sidebar::-webkit-scrollbar-track,
+        .history-list::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .research-sidebar::-webkit-scrollbar-thumb,
+        .history-list::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.3);
+            border-radius: 3px;
+        }
+
+        .research-sidebar::-webkit-scrollbar-thumb:hover,
+        .history-list::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.5);
+        }
+    </style>
+</head>
+<body>
+    <!-- Research History Sidebar Component -->
+    <div class="research-sidebar" id="researchSidebar">
+        <!-- Header -->
+        <div class="sidebar-header">
+            <h2 class="sidebar-title">
+                🔬 Research History
+            </h2>
+            <p class="sidebar-subtitle">View and manage all research sessions</p>
+        </div>
+
+        <!-- Search -->
+        <div class="search-container">
+            <input type="text"
+                   class="search-input"
+                   placeholder="Search research goals..."
+                   id="searchInput">
+        </div>
+
+        <!-- Filter Tabs -->
+        <div class="filter-tabs">
+            <button class="filter-tab active" data-status="all">All</button>
+            <button class="filter-tab" data-status="active">Active</button>
+            <button class="filter-tab" data-status="completed">Done</button>
+            <button class="filter-tab" data-status="archived">Archive</button>
+        </div>
+
+        <!-- History List -->
+        <div class="history-list" id="historyList">
+            <div class="loading" id="loadingIndicator">Loading research history...</div>
+        </div>
+
+        <!-- Stats Summary -->
+        <div class="stats-summary" id="statsSummary" style="display: none;">
+            <div class="stats-row">
+                <span>Total Goals:</span>
+                <span id="totalGoals">0</span>
+            </div>
+            <div class="stats-row">
+                <span>Active:</span>
+                <span id="activeGoals">0</span>
+            </div>
+            <div class="stats-row">
+                <span>Success Rate:</span>
+                <span id="successRate">0%</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class ResearchHistorySidebar {
+            constructor() {
+                this.currentFilter = 'all';
+                this.currentSearch = '';
+                this.history = [];
+                this.activeGoalId = null;
+
+                this.initializeEventListeners();
+                this.loadHistory();
+            }
+
+            initializeEventListeners() {
+                // Search input
+                const searchInput = document.getElementById('searchInput');
+                searchInput.addEventListener('input', (e) => {
+                    this.currentSearch = e.target.value;
+                    this.filterAndRenderHistory();
+                });
+
+                // Filter tabs
+                document.querySelectorAll('.filter-tab').forEach(tab => {
+                    tab.addEventListener('click', (e) => {
+                        document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+                        e.target.classList.add('active');
+                        this.currentFilter = e.target.dataset.status;
+                        this.filterAndRenderHistory();
+                    });
+                });
+            }
+
+            async loadHistory() {
+                try {
+                    const response = await fetch('/api/research-tree/history?limit=100');
+                    const data = await response.json();
+                    this.history = data.history;
+                    this.filterAndRenderHistory();
+                    this.updateStatsSummary();
+                } catch (error) {
+                    console.error('Failed to load research history:', error);
+                    this.showError('Failed to load research history');
+                }
+            }
+
+            filterAndRenderHistory() {
+                let filtered = this.history;
+
+                // Apply status filter
+                if (this.currentFilter !== 'all') {
+                    filtered = filtered.filter(item => item.status === this.currentFilter);
+                }
+
+                // Apply search filter
+                if (this.currentSearch) {
+                    const query = this.currentSearch.toLowerCase();
+                    filtered = filtered.filter(item =>
+                        item.title.toLowerCase().includes(query) ||
+                        item.description.toLowerCase().includes(query)
+                    );
+                }
+
+                this.renderHistory(filtered);
+            }
+
+            renderHistory(items) {
+                const historyList = document.getElementById('historyList');
+                const loadingIndicator = document.getElementById('loadingIndicator');
+
+                loadingIndicator.style.display = 'none';
+
+                if (items.length === 0) {
+                    historyList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📭</div>
+                            <p>No research sessions found</p>
+                            <small>Start a new research goal to see it here</small>
+                        </div>
+                    `;
+                    return;
+                }
+
+                historyList.innerHTML = items.map(item => this.renderHistoryItem(item)).join('');
+
+                // Add click listeners to history items
+                historyList.querySelectorAll('.history-item').forEach(element => {
+                    element.addEventListener('click', () => {
+                        const goalId = element.dataset.goalId;
+                        this.selectGoal(goalId);
+                    });
+                });
+
+                // Add action button listeners
+                historyList.querySelectorAll('.action-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const action = btn.dataset.action;
+                        const goalId = btn.closest('.history-item').dataset.goalId;
+                        this.handleAction(action, goalId);
+                    });
+                });
+            }
+
+            renderHistoryItem(item) {
+                const createdDate = new Date(item.created_at).toLocaleDateString();
+                const isActive = item.id === this.activeGoalId;
+
+                const successRate = item.success_rate || 0;
+                const completionRate = item.completion_rate || 0;
+
+                return `
+                    <div class="history-item ${isActive ? 'active' : ''}" data-goal-id="${item.id}">
+                        <h3 class="history-item-title">${this.escapeHtml(item.title)}</h3>
+
+                        <div class="history-item-meta">
+                            <span class="status-badge status-${item.status}">${item.status}</span>
+                            <span class="history-item-date">${createdDate}</span>
+                        </div>
+
+                        <div class="history-item-stats">
+                            <span class="stat">
+                                📊 ${item.total_nodes || 0} nodes
+                            </span>
+                            <span class="stat">
+                                ✅ ${successRate.toFixed(0)}% success
+                            </span>
+                            <span class="stat">
+                                📈 ${(item.max_confidence * 100 || 0).toFixed(0)}% conf
+                            </span>
+                        </div>
+
+                        <div class="history-item-actions">
+                            ${this.getActionButtons(item)}
+                        </div>
+                    </div>
+                `;
+            }
+
+            getActionButtons(item) {
+                const buttons = [];
+
+                if (item.status === 'active') {
+                    buttons.push('<button class="action-btn" data-action="view" title="View Details">👁</button>');
+                    buttons.push('<button class="action-btn" data-action="archive" title="Archive">📦</button>');
+                } else if (item.status === 'archived') {
+                    buttons.push('<button class="action-btn" data-action="view" title="View Details">👁</button>');
+                    buttons.push('<button class="action-btn" data-action="restore" title="Restore">🔄</button>');
+                    buttons.push('<button class="action-btn" data-action="delete" title="Delete">🗑</button>');
+                } else {
+                    buttons.push('<button class="action-btn" data-action="view" title="View Details">👁</button>');
+                    buttons.push('<button class="action-btn" data-action="archive" title="Archive">📦</button>');
+                }
+
+                // Add report button for completed goals
+                if (item.status === 'completed' || (item.successful_results > 0 && item.total_results > 0)) {
+                    buttons.push('<button class="action-btn" data-action="report" title="View Report">📄</button>');
+                }
+
+                return buttons.join('');
+            }
+
+            async handleAction(action, goalId) {
+                try {
+                    let response;
+
+                    switch (action) {
+                        case 'view':
+                            this.viewGoalDetails(goalId);
+                            break;
+
+                        case 'archive':
+                            response = await fetch(`/api/research-tree/history/${goalId}/archive`, {
+                                method: 'POST'
+                            });
+                            if (response.ok) {
+                                this.showNotification('Goal archived successfully');
+                                this.loadHistory();
+                            }
+                            break;
+
+                        case 'restore':
+                            response = await fetch(`/api/research-tree/history/${goalId}/restore`, {
+                                method: 'POST'
+                            });
+                            if (response.ok) {
+                                this.showNotification('Goal restored successfully');
+                                this.loadHistory();
+                            }
+                            break;
+
+                        case 'delete':
+                            if (confirm('Are you sure you want to permanently delete this research goal?')) {
+                                response = await fetch(`/api/research-tree/history/${goalId}`, {
+                                    method: 'DELETE'
+                                });
+                                if (response.ok) {
+                                    this.showNotification('Goal deleted successfully');
+                                    this.loadHistory();
+                                }
+                            }
+                            break;
+
+                        case 'report':
+                            this.viewMarkdownReport(goalId);
+                            break;
+                    }
+                } catch (error) {
+                    console.error(`Failed to ${action} goal:`, error);
+                    this.showError(`Failed to ${action} goal`);
+                }
+            }
+
+            selectGoal(goalId) {
+                this.activeGoalId = goalId;
+
+                // Update active state in UI
+                document.querySelectorAll('.history-item').forEach(item => {
+                    item.classList.toggle('active', item.dataset.goalId === goalId);
+                });
+
+                // Emit event for parent application
+                window.dispatchEvent(new CustomEvent('goalSelected', {
+                    detail: { goalId }
+                }));
+            }
+
+            viewGoalDetails(goalId) {
+                // Emit event for parent application to handle
+                window.dispatchEvent(new CustomEvent('viewGoalDetails', {
+                    detail: { goalId }
+                }));
+            }
+
+            async viewMarkdownReport(goalId) {
+                try {
+                    // Try to open the report in a new tab/window
+                    const reportUrl = `/api/research-tree/goals/${goalId}/report/view`;
+
+                    // First check if report exists
+                    const checkResponse = await fetch(`/api/research-tree/goals/${goalId}/report/raw`);
+
+                    if (checkResponse.ok) {
+                        // Report exists, open in new tab
+                        window.open(reportUrl, '_blank');
+                        this.showNotification('Opening markdown report...');
+                    } else if (checkResponse.status === 404) {
+                        // Report doesn't exist, try to generate it
+                        const confirmation = confirm('No report found for this goal. Generate one now?');
+                        if (confirmation) {
+                            this.showNotification('Generating report...');
+                            const generateResponse = await fetch(`/api/research-tree/goals/${goalId}/generate-report`, {
+                                method: 'POST'
+                            });
+
+                            if (generateResponse.ok) {
+                                // Report generated successfully, now open it
+                                window.open(reportUrl, '_blank');
+                                this.showNotification('Report generated and opened!');
+                            } else {
+                                this.showError('Failed to generate report. Goal may not have sufficient results yet.');
+                            }
+                        }
+                    } else {
+                        this.showError('Failed to access report');
+                    }
+                } catch (error) {
+                    console.error('Failed to view markdown report:', error);
+                    this.showError('Failed to view markdown report');
+                }
+            }
+
+            updateStatsSummary() {
+                const statsSummary = document.getElementById('statsSummary');
+
+                if (this.history.length === 0) {
+                    statsSummary.style.display = 'none';
+                    return;
+                }
+
+                const totalGoals = this.history.length;
+                const activeGoals = this.history.filter(h => h.status === 'active').length;
+                const completedGoals = this.history.filter(h => h.status === 'completed').length;
+                const successRate = completedGoals / Math.max(totalGoals, 1) * 100;
+
+                document.getElementById('totalGoals').textContent = totalGoals;
+                document.getElementById('activeGoals').textContent = activeGoals;
+                document.getElementById('successRate').textContent = `${successRate.toFixed(0)}%`;
+
+                statsSummary.style.display = 'block';
+            }
+
+            showNotification(message) {
+                // You can replace this with your preferred notification system
+                alert(message);
+            }
+
+            showError(message) {
+                // You can replace this with your preferred error display
+                console.error(message);
+                alert(`Error: ${message}`);
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            // Public methods for external control
+            refresh() {
+                this.loadHistory();
+            }
+
+            setActiveGoal(goalId) {
+                this.selectGoal(goalId);
+            }
+
+            toggle() {
+                const sidebar = document.getElementById('researchSidebar');
+                sidebar.classList.toggle('open');
+            }
+        }
+
+        // Initialize the sidebar when DOM is loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            window.researchHistory = new ResearchHistorySidebar();
+        });
+
+        // Listen for goal selection events from parent application
+        window.addEventListener('goalChanged', (event) => {
+            if (window.researchHistory) {
+                window.researchHistory.setActiveGoal(event.detail.goalId);
+            }
+        });
+    </script>
+</body>
+</html>
