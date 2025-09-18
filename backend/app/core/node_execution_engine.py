@@ -567,6 +567,25 @@ Ensure that any port conflicts or missing files are fixed by modifying the files
                         "notes": node.experiment_config
                     }
                     return fallback_config, fallback_inputs
+                elif exp_type == ExperimentType.CODE_STUDY:
+                    # Fallback for CODE_STUDY: use search-based approach to find relevant code
+                    fallback_config = WorkflowConfig(
+                        workflow_type=WorkflowType.MULTI_MODAL_SEARCH,
+                        strategy=OrchestrationStrategy.ADAPTIVE,
+                        components=["search_engine", "ai_scientist", "agent_lab"],
+                        parameters={
+                            "search_breadth": "comprehensive",
+                            "result_synthesis": True,
+                            "code_analysis_focus": True
+                        },
+                    )
+                    fallback_inputs = {
+                        **base_inputs,
+                        "query": f"code analysis {node.title} {node.description}",
+                        "search_types": ["code", "web"],
+                        "code_study_mode": True
+                    }
+                    return fallback_config, fallback_inputs
                 return None, {}
 
             analysis_depth = node.experiment_config.get("analysis_depth", "semantic")

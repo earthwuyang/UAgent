@@ -42,26 +42,34 @@ class SemanticMemoryEngine:
     Semantic memory engine with vector embeddings and MMR-based retrieval
     """
 
-    def __init__(self, embedding_dimension: int = 1536, use_openai_embeddings: bool = True):
+    def __init__(self, embedding_dimension: int = 384, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         self.embedding_dimension = embedding_dimension
-        self.use_openai_embeddings = use_openai_embeddings
+        self.model_name = model_name
 
-        # Initialize embedding client
-        self._embedding_client = None
-        if use_openai_embeddings:
-            try:
-                import openai
-                self._embedding_client = openai
-            except ImportError:
-                logger.warning("OpenAI not available, falling back to simple text matching")
-                self.use_openai_embeddings = False
+        # Initialize Hugging Face embedding model
+        self._embedding_model = None
+        self._model_available = False
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._embedding_model = SentenceTransformer(model_name)
+            self._model_available = True
+            # Update dimension based on actual model
+            self.embedding_dimension = self._embedding_model.get_sentence_embedding_dimension()
+            logger.info(f"Initialized embedding model {model_name} with dimension {self.embedding_dimension}")
+        except ImportError:
+            logger.warning("sentence-transformers not available, falling back to simple text matching")
+            self._model_available = False
+        except Exception as e:
+            logger.error(f"Failed to load embedding model {model_name}: {e}")
+            self._model_available = False
 
         # Cache for embeddings
         self._embedding_cache: Dict[str, List[float]] = {}
 
     async def generate_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding for text"""
-        if not self.use_openai_embeddings:
+        """Generate embedding for text using Hugging Face model"""
+        if not self._model_available:
             return None
 
         try:
@@ -70,13 +78,16 @@ class SemanticMemoryEngine:
             if text_hash in self._embedding_cache:
                 return self._embedding_cache[text_hash]
 
-            # Generate embedding using OpenAI
-            if self._embedding_client:
-                response = await self._embedding_client.Embedding.acreate(
-                    input=[text],
-                    model="text-embedding-ada-002"
+            # Generate embedding using Hugging Face model
+            if self._embedding_model:
+                # Run in thread pool to avoid blocking
+                import asyncio
+                loop = asyncio.get_event_loop()
+
+                embedding = await loop.run_in_executor(
+                    None,
+                    lambda: self._embedding_model.encode([text], normalize_embeddings=True)[0].tolist()
                 )
-                embedding = response['data'][0]['embedding']
 
                 # Cache the result
                 self._embedding_cache[text_hash] = embedding
@@ -378,13 +389,14 @@ class SemanticMemoryEngine:
         return {
             "cached_embeddings": len(self._embedding_cache),
             "embedding_dimension": self.embedding_dimension,
-            "using_openai_embeddings": self.use_openai_embeddings,
+            "model_name": self.model_name,
+            "model_available": self._model_available,
             "cache_size_mb": sum(len(str(emb)) for emb in self._embedding_cache.values()) / (1024 * 1024)
         }
 
     async def batch_generate_embeddings(self, texts: List[str]) -> List[Optional[List[float]]]:
         """Generate embeddings for multiple texts efficiently"""
-        if not self.use_openai_embeddings:
+        if not self._model_available:
             return [None] * len(texts)
 
         try:
@@ -403,14 +415,17 @@ class SemanticMemoryEngine:
                     indices_to_generate.append(i)
 
             # Generate missing embeddings in batch
-            if texts_to_generate and self._embedding_client:
-                response = await self._embedding_client.Embedding.acreate(
-                    input=texts_to_generate,
-                    model="text-embedding-ada-002"
+            if texts_to_generate and self._embedding_model:
+                # Run in thread pool to avoid blocking
+                import asyncio
+                loop = asyncio.get_event_loop()
+
+                batch_embeddings = await loop.run_in_executor(
+                    None,
+                    lambda: self._embedding_model.encode(texts_to_generate, normalize_embeddings=True).tolist()
                 )
 
-                for i, embedding_data in enumerate(response['data']):
-                    embedding = embedding_data['embedding']
+                for i, embedding in enumerate(batch_embeddings):
                     original_index = indices_to_generate[i]
                     embeddings[original_index] = embedding
 
