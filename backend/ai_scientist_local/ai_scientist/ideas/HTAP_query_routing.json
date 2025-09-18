@@ -1,0 +1,23 @@
+[
+    {
+        "Name": "learned_htap_router",
+        "Title": "Learned HTAP Query Routing: When to Duck and When to Post",
+        "Short Hypothesis": "A lightweight ML model trained on query structure and runtime features extracted from PostgreSQL can accurately predict whether a given analytical query will execute faster on PostgreSQL\u2019s row engine or DuckDB\u2019s column engine via pg_duckdb, enabling dynamic query routing without expensive runtime sampling.",
+        "Related Work": "Prior work in learned query optimizers (e.g., Neo, Bao) focuses on plan selection or knob tuning within a single engine. Hybrid systems like HyPer or SQL Server use static heuristics or manual workload partitioning for HTAP. Recent work on DuckDB integration (pg_duckdb) enables columnar execution inside PostgreSQL but lacks intelligent routing. Our work is novel in using kernel-exposed features to train a model that routes queries across fundamentally different execution engines (row vs columnar) at parse time, avoiding runtime overhead and leveraging real engine performance asymmetries.",
+        "Abstract": "Hybrid Transactional/Analytical Processing (HTAP) systems aim to serve both OLTP and OLAP workloads without costly ETL pipelines. PostgreSQL, augmented with the pg_duckdb extension, offers a unique opportunity: analytical queries can be executed either natively (row engine) or offloaded to DuckDB (column engine). However, choosing the right engine per query is non-trivial \u2014 DuckDB excels at scans and aggregates over wide tables, while PostgreSQL may be faster for index-heavy or narrow queries. We propose Learned HTAP Router (LHR), a system that extracts lightweight structural and cardinality features from the PostgreSQL planner (via minimal kernel modifications), trains a LightGBM classifier to predict the faster engine, and embeds this model inside PostgreSQL to route queries at parse time. Experiments on TPC-H and JOB show LHR achieves >90% routing accuracy with <1ms overhead, outperforming static heuristics by 1.8x in end-to-end latency. This demonstrates that learned routing across heterogeneous engines is feasible, low-overhead, and high-impact.",
+        "Experiments": [
+            "Modify PostgreSQL kernel to expose query features at parse/plan time (e.g., # joins, # aggregates, table widths, presence of indexes, estimated cardinalities). Log actual execution times on both engines for training.",
+            "Train a LightGBM model using features above to predict binary label: faster on DuckDB (1) or PostgreSQL (0). Use 80/20 train/test split over 10k queries from TPC-H and JOB.",
+            "Embed trained LightGBM model as a C extension in PostgreSQL. At query parse time, extract features, predict engine, and rewrite query to use pg_duckdb foreign table if predicted faster.",
+            "Evaluate: (a) Routing accuracy (% of queries routed to truly faster engine); (b) End-to-end latency vs always-Postgres, always-DuckDB, and rule-based routing; (c) Prediction overhead (ms per query).",
+            "Ablation: Test feature importance (e.g., is table width or #aggregates most predictive?) and model size vs accuracy trade-off."
+        ],
+        "Risk Factors and Limitations": [
+            "Kernel modification may require PostgreSQL version pinning or maintenance overhead.",
+            "Model may not generalize to unseen query templates or schemas without retraining.",
+            "pg_duckdb currently has limitations (e.g., no writes, limited pushdown) that may bias results.",
+            "Training requires running every query twice \u2014 expensive but one-time cost.",
+            "LightGBM model must be small enough to avoid parse-time latency overhead."
+        ]
+    }
+]

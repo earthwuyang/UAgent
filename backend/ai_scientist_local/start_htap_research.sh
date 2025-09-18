@@ -1,0 +1,1 @@
+python launch_scientist_bfts.py --load_ideas "ai_scientist/ideas/HTAP_query_routing.json"  --add_dataset_ref --model_writeup qwen-max --model_citation qwen-max --model_review qwen-max --model_agg_plots qwen-max --num_cite_rounds 20
