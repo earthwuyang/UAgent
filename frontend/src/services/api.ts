@@ -140,3 +140,9 @@ export async function getSystemHealth() {
   if (!r.ok) throw new Error('health check failed')
   return r.json()
 }
+
+export async function getNodeWorkflowEvents(goalId: string, nodeId: string) {
+  const r = await fetch(`/api/research-tree/goals/${goalId}/nodes/${nodeId}/workflow-events`)
+  if (!r.ok) throw new Error('workflow events fetch failed')
+  return r.json()
+}

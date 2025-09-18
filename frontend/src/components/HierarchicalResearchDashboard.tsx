@@ -113,6 +113,12 @@ const researchAPI = {
     return response.json()
   },
 
+  getWorkflowEvents: async (goalId: string, nodeId: string) => {
+    const response = await fetch(`${API_BASE}/goals/${goalId}/nodes/${nodeId}/workflow-events`)
+    if (!response.ok) throw new Error('Failed to get workflow events')
+    return response.json()
+  },
+
   expandNode: async (goalId: string, nodeId: string) => {
     const response = await fetch(`${API_BASE}/goals/${goalId}/manual-experiment`, {
       method: 'POST',
@@ -193,6 +199,9 @@ interface TreeNode {
   children: TreeNode[]
   depth: number
   visits: number
+  node_type?: string
+  task_type?: string
+  layer?: number
 }
 
 interface ResearchGoal {
@@ -218,6 +227,7 @@ export default function HierarchicalResearchDashboard() {
   const [nodeLLMMessages, setNodeLLMMessages] = useState<any>(null)
   const [nodeLLMSummary, setNodeLLMSummary] = useState<any>(null)
   const [realtimeLLMMessages, setRealtimeLLMMessages] = useState<any[]>([])
+  const [workflowEvents, setWorkflowEvents] = useState<any[]>([])
   const [sseConnected, setSseConnected] = useState(false)
 
   // Form state for new research goals
@@ -281,13 +291,29 @@ export default function HierarchicalResearchDashboard() {
     if (!selectedGoal || !selectedNode) {
       setSseConnected(false)
       setRealtimeLLMMessages([])
+      setWorkflowEvents([])
       return
     }
 
     console.log('🔌 Setting up SSE connection for node:', selectedNode.id)
 
+    // Prime existing workflow events
+    researchAPI.getWorkflowEvents(selectedGoal, selectedNode.id)
+      .then(response => {
+        const events = response.events || []
+        setWorkflowEvents(events.slice(-200))
+      })
+      .catch(error => {
+        console.error('Failed to fetch workflow events:', error)
+        setWorkflowEvents([])
+      })
+
     const eventSource = new EventSource(
       `${API_BASE}/goals/${selectedGoal}/nodes/${selectedNode.id}/llm-messages/stream`
+    )
+
+    const workflowEventSource = new EventSource(
+      `${API_BASE}/goals/${selectedGoal}/nodes/${selectedNode.id}/workflow-events/stream`
     )
 
     eventSource.onopen = () => {
@@ -313,6 +339,29 @@ export default function HierarchicalResearchDashboard() {
       }
     }
 
+    workflowEventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'heartbeat') {
+          return
+        }
+
+        if (data.event) {
+          setWorkflowEvents(prev => {
+            const next = [...prev, data.event]
+            return next.slice(-200)
+          })
+          console.log('🧠 Workflow event received:', data.event)
+        }
+      } catch (error) {
+        console.error('❌ Error parsing workflow SSE message:', error)
+      }
+    }
+
+    workflowEventSource.onerror = (error) => {
+      console.error('❌ Workflow SSE connection error:', error)
+    }
+
     eventSource.onerror = (error) => {
       console.error('❌ SSE connection error:', error)
       setSseConnected(false)
@@ -322,8 +371,10 @@ export default function HierarchicalResearchDashboard() {
     return () => {
       console.log('🔌 Closing SSE connection for node:', selectedNode.id)
       eventSource.close()
+      workflowEventSource.close()
       setSseConnected(false)
       setRealtimeLLMMessages([])
+      setWorkflowEvents([])
     }
   }, [selectedGoal, selectedNode])
 
@@ -708,7 +759,11 @@ export default function HierarchicalResearchDashboard() {
         literature: 'Literature review and analysis',
         code_analysis: 'Code repository analysis',
         synthesis: 'Result synthesis and integration',
-        validation: 'Validation and verification study'
+        validation: 'Validation and verification study',
+        hierarchical_research: 'AI-Scientist style hierarchical exploration',
+        web_search: 'Multi-modal search and evidence gathering',
+        agent_collaboration: 'AgentLab collaborative development branch',
+        code_execution: 'Direct code execution, testing, or deployment tasks'
       }
       return descriptions[type as keyof typeof descriptions] || 'Research node'
     }
@@ -782,6 +837,36 @@ export default function HierarchicalResearchDashboard() {
             <div className="text-xs text-gray-600 mt-1">
               {getTypeDescription(selectedNode.type)}
             </div>
+          </div>
+        </div>
+
+        {/* Workflow Events */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h5 className="font-medium">Workflow Events</h5>
+            <span className="text-xs text-gray-500">{workflowEvents.length}</span>
+          </div>
+          <div className="bg-white border rounded max-h-48 overflow-y-auto">
+            {workflowEvents.length === 0 ? (
+              <div className="p-3 text-xs text-gray-500">No workflow telemetry yet.</div>
+            ) : (
+              workflowEvents.slice(-12).reverse().map((event, index) => {
+                const eventPayload = event.event || {}
+                const label = eventPayload.event || eventPayload.status || 'event'
+                const timestamp = event.timestamp || eventPayload.timestamp
+                return (
+                  <div key={`${label}-${index}`} className="p-3 border-b last:border-b-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-gray-700 uppercase tracking-wide">{label}</span>
+                      <span className="text-[10px] text-gray-400">{timestamp ? new Date(timestamp).toLocaleTimeString() : ''}</span>
+                    </div>
+                    <pre className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words">
+                      {JSON.stringify(eventPayload, null, 2)}
+                    </pre>
+                  </div>
+                )
+              })
+            )}
           </div>
         </div>
 
@@ -1538,7 +1623,7 @@ export default function HierarchicalResearchDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="h-full min-h-0 flex flex-col bg-gray-50 overflow-hidden">
       <header className="bg-white shadow">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-6">
@@ -1579,15 +1664,17 @@ export default function HierarchicalResearchDashboard() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-        <div className="px-4 py-6 sm:px-0">
+      <main className="flex-1 min-h-0 overflow-hidden max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+        <div className="px-4 py-6 sm:px-0 h-full min-h-0 flex flex-col">
           {loading === 'loading' ? (
             <div className="bg-white p-6 rounded-lg shadow text-center">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
               <p>Loading research data...</p>
             </div>
           ) : (
-            renderTabContent()
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              {renderTabContent()}
+            </div>
           )}
         </div>
       </main>

@@ -39,6 +39,9 @@ class ResearchNodeType(Enum):
     SYNTHESIS = "synthesis"          # Result synthesis node
     VALIDATION = "validation"        # Validation experiment
     HIERARCHICAL_RESEARCH = "hierarchical_research"  # Multi-agent hierarchical research
+    WEB_SEARCH = "web_search"        # Web or multi-modal search branch
+    AGENT_COLLABORATION = "agent_collaboration"  # AgentLab collaborative workflow
+    CODE_EXECUTION = "code_execution"  # Targeted code execution / testing branch
 
 
 class ExperimentType(Enum):
@@ -51,6 +54,10 @@ class ExperimentType(Enum):
     COMPARATIVE = "comparative"
     ABLATION = "ablation"
     HIERARCHICAL_MULTI_AGENT = "hierarchical_multi_agent"
+    AI_SCIENTIST_DISCOVERY = "ai_scientist_discovery"
+    AGENT_LAB_EXPERIMENT = "agent_lab_experiment"
+    WEB_SEARCH_ANALYSIS = "web_search_analysis"
+    CODE_EXECUTION_TEST = "code_execution_test"
     SYNTHESIS = "synthesis"
 
 
@@ -198,6 +205,7 @@ class HierarchicalResearchSystem:
 
         # Orchestrator reference (injected later to avoid circular imports)
         self.orchestrator = None
+        self.node_execution_engine = None
 
         # Integration engines
         self.experiment_types = self._initialize_experiment_types()
@@ -270,6 +278,26 @@ class HierarchicalResearchSystem:
                 "max_parallel": 2,
                 "avg_duration": 900,  # 15 minutes
                 "resource_requirements": {"cpu": 4, "memory": "8GB"}
+            },
+            ExperimentType.AI_SCIENTIST_DISCOVERY: {
+                "max_parallel": 1,
+                "avg_duration": 1200,
+                "resource_requirements": {"cpu": 4, "memory": "16GB", "gpu": False}
+            },
+            ExperimentType.AGENT_LAB_EXPERIMENT: {
+                "max_parallel": 2,
+                "avg_duration": 900,
+                "resource_requirements": {"cpu": 4, "memory": "8GB"}
+            },
+            ExperimentType.WEB_SEARCH_ANALYSIS: {
+                "max_parallel": 6,
+                "avg_duration": 150,
+                "resource_requirements": {"cpu": 1, "memory": "1GB"}
+            },
+            ExperimentType.CODE_EXECUTION_TEST: {
+                "max_parallel": 2,
+                "avg_duration": 600,
+                "resource_requirements": {"cpu": 2, "memory": "4GB"}
             },
         }
 
@@ -535,24 +563,27 @@ class HierarchicalResearchSystem:
         """Use LLM to intelligently decide what types of experiments are needed for the goal"""
         goal = self.active_goals[goal_id]
 
-        system_prompt = """You are a research planning assistant. Your job is to determine the MINIMUM set of experiment types needed to accomplish a goal efficiently.
+        system_prompt = """You are a ROMA-style research planner for uagent. Decide which experiment branches the hierarchical research tree should spawn next.
 
 Available experiment types:
-- COMPUTATIONAL: Implement and test solutions (for programming/deployment tasks)
-- LITERATURE_ANALYSIS: Research existing papers (only for complex academic research)
-- CODE_ANALYSIS: Analyze existing implementations (only when building on others' work)
-- THEORETICAL: Develop frameworks (only for complex theoretical problems)
+- COMPUTATIONAL: implement/execute code solutions, iterate quickly.
+- LITERATURE_ANALYSIS: gather academic background, survey papers, extract insights.
+- CODE_ANALYSIS: inspect existing repositories, patterns, or competitor codebases.
+- THEORETICAL: produce conceptual frameworks, proofs, algorithm design.
+- AI_SCIENTIST_DISCOVERY: launch deep hierarchical AI-Scientist exploration (multi-phase tree search).
+- AGENT_LAB_EXPERIMENT: coordinate multi-agent collaboration (design/implement/test pipeline) with AgentLab.
+- WEB_SEARCH_ANALYSIS: run multi-modal web/code/academic search to collect evidence and examples.
+- CODE_EXECUTION_TEST: execute artefacts, run tests/benchmarks, validate deployments.
 
-IMPORTANT GUIDELINES:
-- For infrastructure tasks (MongoDB, databases, deployments): ONLY use COMPUTATIONAL
-- For simple programming (hello world, scripts, apps): ONLY use COMPUTATIONAL
-- For implementation tasks: ONLY use COMPUTATIONAL
-- For setup/deployment tasks: ONLY use COMPUTATIONAL
-- LITERATURE_ANALYSIS is only needed for academic research topics
-- Be VERY selective - most tasks only need COMPUTATIONAL
-- Default to fewer experiment types, not more
-
-Return a minimal JSON list focusing on efficiency."""
+Guidelines:
+- Choose the smallest set that lets the tree cover all necessary capabilities.
+- Implementation-only jobs usually need COMPUTATIONAL (optionally CODE_EXECUTION_TEST if verification is required).
+- Scientific/unknown research should combine WEB_SEARCH_ANALYSIS, LITERATURE_ANALYSIS, AI_SCIENTIST_DISCOVERY, and possibly AGENT_LAB_EXPERIMENT.
+- Large code base reviews should leverage CODE_ANALYSIS and CODE_EXECUTION_TEST.
+- Whenever experimentation is speculative, include AI_SCIENTIST_DISCOVERY to drive deeper branching.
+- When integrating multiple agents, include AGENT_LAB_EXPERIMENT.
+- Always return JSON (list of objects) with experiment_type, reasoning, priority (0-1), required (boolean).
+- Keep list short (1-4 items) but comprehensive for the goal."""
 
         # Check if we have routing information from the unified task router
         routing_info = goal.constraints.get('routing_info', {}) if goal.constraints else {}
@@ -566,14 +597,17 @@ Return a minimal JSON list focusing on efficiency."""
         routing_guidance = ""
 
         if task_classification == 'implementation':
-            routing_guidance = "\nROUTING GUIDANCE: This task has been classified as IMPLEMENTATION - focus on computational experiments only."
-            print(f"🧠 Using IMPLEMENTATION routing guidance")
+            routing_guidance = "\nROUTING GUIDANCE: IMPLEMENTATION task – emphasise COMPUTATIONAL and CODE_EXECUTION_TEST for verification."
+            print("🧠 Using IMPLEMENTATION routing guidance")
         elif task_classification == 'research':
-            routing_guidance = "\nROUTING GUIDANCE: This task has been classified as RESEARCH - consider literature analysis if needed."
-            print(f"🧠 Using RESEARCH routing guidance")
-        elif task_classification in ['search', 'data_analysis']:
-            routing_guidance = f"\nROUTING GUIDANCE: This task has been classified as {task_classification.upper()} - adapt experiments accordingly."
-            print(f"🧠 Using {task_classification.upper()} routing guidance")
+            routing_guidance = "\nROUTING GUIDANCE: RESEARCH task – combine WEB_SEARCH_ANALYSIS, LITERATURE_ANALYSIS, AI_SCIENTIST_DISCOVERY, and AGENT_LAB_EXPERIMENT when appropriate."
+            print("🧠 Using RESEARCH routing guidance")
+        elif task_classification == 'search':
+            routing_guidance = "\nROUTING GUIDANCE: SEARCH task – prioritise WEB_SEARCH_ANALYSIS (and optionally LITERATURE_ANALYSIS)."
+            print("🧠 Using SEARCH routing guidance")
+        elif task_classification == 'data_analysis':
+            routing_guidance = "\nROUTING GUIDANCE: DATA_ANALYSIS task – pair COMPUTATIONAL with CODE_EXECUTION_TEST (if verification) and WEB_SEARCH_ANALYSIS for datasets."
+            print("🧠 Using DATA_ANALYSIS routing guidance")
 
         prompt = f"""Research Goal: {goal.title}
 Description: {goal.description}
@@ -618,7 +652,11 @@ Return JSON format:
                     try:
                         experiment_plans = json.loads(json_str)
                         logger.info(f"LLM planned {len(experiment_plans)} experiment types for goal: {goal.title}")
-                        return experiment_plans
+                        return self._post_process_experiment_plans(
+                            experiment_plans,
+                            goal,
+                            task_classification
+                        )
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse LLM experiment planning JSON")
 
@@ -670,7 +708,11 @@ Return JSON format:
 
                 if plans:
                     logger.info(f"Parsed {len(plans)} experiment types from LLM text response")
-                    return plans
+                    return self._post_process_experiment_plans(
+                        plans,
+                        goal,
+                        task_classification
+                    )
 
         except Exception as e:
             logger.error(f"LLM experiment planning failed: {e}")
@@ -683,6 +725,7 @@ Return JSON format:
         plans = []
         description_lower = goal.description.lower()
         title_lower = goal.title.lower()
+        classification = (goal.constraints or {}).get('routing_info', {}).get('classification', 'unknown')
 
         # Simple programming task indicators
         simple_programming_keywords = [
@@ -717,13 +760,19 @@ Return JSON format:
                 "priority": 0.9,
                 "required": True
             })
-            # For simple programming and implementation, ONLY computational is needed
-            logger.info(f"Implementation task detected - using ONLY computational approach")
-            return plans
+            if any(keyword in description_lower for keyword in ['test', 'validate', 'deploy', 'benchmark', 'ci', 'cd']):
+                plans.append({
+                    "experiment_type": "CODE_EXECUTION_TEST",
+                    "reasoning": "Task mentions validation or deployment",
+                    "priority": 0.7,
+                    "required": False
+                })
+            logger.info("Implementation task fallback planning applied")
+            return self._post_process_experiment_plans(plans, goal, classification)
 
         # Only add literature review for complex academic research (not implementation tasks)
         if (is_research_task and not is_simple_programming and not is_implementation and
-            any(keyword in description_lower for keyword in ['academic', 'paper', 'study', 'survey', 'review'])):
+            any(keyword in description_lower for keyword in ['academic', 'paper', 'study', 'survey', 'review', 'experiment'])):
             plans.append({
                 "experiment_type": "LITERATURE_ANALYSIS",
                 "reasoning": "Complex academic research task requires literature review",
@@ -741,7 +790,7 @@ Return JSON format:
             })
 
         # Add code analysis if building on existing work
-        if 'existing' in description_lower or 'based on' in description_lower:
+        if 'existing' in description_lower or 'based on' in description_lower or 'repository' in description_lower:
             plans.append({
                 "experiment_type": "CODE_ANALYSIS",
                 "reasoning": "Building on existing work requires code analysis",
@@ -759,7 +808,84 @@ Return JSON format:
             })
 
         logger.info(f"Fallback planning generated {len(plans)} experiment types")
-        return plans
+        return self._post_process_experiment_plans(plans, goal, classification)
+
+    def _post_process_experiment_plans(self, plans: List[Dict[str, Any]], goal: ResearchGoal,
+                                       classification: str) -> List[Dict[str, Any]]:
+        """Normalise and enrich experiment plans with heuristic coverage."""
+        normalized: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_plan(exp_type: str, reasoning: str, priority: float, required: bool):
+            key = exp_type.upper()
+            if key in seen:
+                return
+            normalized.append({
+                "experiment_type": key,
+                "reasoning": reasoning,
+                "priority": float(min(max(priority, 0.1), 1.0)),
+                "required": bool(required)
+            })
+            seen.add(key)
+
+        for plan in plans:
+            key = str(plan.get("experiment_type", "COMPUTATIONAL")).upper()
+            reasoning = plan.get("reasoning", "LLM planned experiment")
+            priority = float(plan.get("priority", 0.7))
+            required = bool(plan.get("required", False))
+            add_plan(key, reasoning, priority, required)
+
+        classification = classification or (goal.constraints or {}).get('routing_info', {}).get('classification', 'unknown')
+        description_lower = goal.description.lower()
+        success_criteria_count = len(goal.success_criteria or [])
+
+        if classification == 'research':
+            add_plan('WEB_SEARCH_ANALYSIS', 'Research tasks need multi-modal evidence gathering', 0.8, True)
+            add_plan('AI_SCIENTIST_DISCOVERY', 'Deep hierarchical exploration for scientific discovery', 0.85, True)
+            if success_criteria_count > 2:
+                add_plan('AGENT_LAB_EXPERIMENT', 'Coordinate multi-agent collaboration to cover broad criteria', 0.75, False)
+            add_plan('LITERATURE_ANALYSIS', 'Survey academic work to ground hypotheses', 0.7, False)
+
+        elif classification == 'search':
+            # Focus on search-centric activities
+            add_plan('WEB_SEARCH_ANALYSIS', 'Primary task classified as search', 0.9, True)
+            normalized = [p for p in normalized if p["experiment_type"] in {'WEB_SEARCH_ANALYSIS', 'LITERATURE_ANALYSIS'}]
+            seen = {p["experiment_type"] for p in normalized}
+            if 'WEB_SEARCH_ANALYSIS' not in seen:
+                add_plan('WEB_SEARCH_ANALYSIS', 'Ensure search branch exists', 0.9, True)
+
+        elif classification == 'implementation':
+            # Keep execution-focused branches only
+            filtered = []
+            for plan in normalized:
+                if plan["experiment_type"] in {'COMPUTATIONAL', 'CODE_EXECUTION_TEST', 'CODE_ANALYSIS'}:
+                    filtered.append(plan)
+            normalized = filtered or normalized
+            seen = {p["experiment_type"] for p in normalized}
+            if 'COMPUTATIONAL' not in seen:
+                add_plan('COMPUTATIONAL', 'Baseline implementation branch required', 0.9, True)
+            if any(keyword in description_lower for keyword in ['test', 'validate', 'deployment', 'benchmark', 'ci', 'cd']) and 'CODE_EXECUTION_TEST' not in seen:
+                add_plan('CODE_EXECUTION_TEST', 'Run execution/tests to validate deployment', 0.75, False)
+
+        elif classification == 'data_analysis':
+            add_plan('COMPUTATIONAL', 'Process and analyse data programmatically', 0.85, True)
+            add_plan('CODE_EXECUTION_TEST', 'Validate analysis scripts with execution/tests', 0.7, False)
+            add_plan('WEB_SEARCH_ANALYSIS', 'Gather external datasets or benchmarks', 0.6, False)
+
+        # Heuristics based on goal content
+        if 'benchmark' in description_lower or 'performance' in description_lower:
+            add_plan('CODE_EXECUTION_TEST', 'Benchmarking requires execution/testing', 0.65, False)
+
+        if 'agent' in description_lower or success_criteria_count >= 4:
+            add_plan('AGENT_LAB_EXPERIMENT', 'Multiple agents collaborating to satisfy diverse criteria', 0.7, False)
+
+        if 'new algorithm' in description_lower or 'novel' in description_lower:
+            add_plan('AI_SCIENTIST_DISCOVERY', 'Novel algorithm exploration via hierarchical search', 0.8, True)
+
+        if not normalized:
+            add_plan('COMPUTATIONAL', 'Fallback computational branch', 0.8, True)
+
+        return normalized
 
     async def _generate_research_directions(self, goal_id: str, allow_regeneration: bool = False) -> List[Dict[str, Any]]:
         """Generate initial research directions from the root goal"""
@@ -817,12 +943,13 @@ Return JSON format:
 
         # Convert experiment plans to research directions
         for plan in experiment_plans:
-            exp_type = plan.get("experiment_type", "COMPUTATIONAL")
+            raw_exp_type = plan.get("experiment_type", "COMPUTATIONAL")
+            exp_type = raw_exp_type.upper()
             priority = plan.get("priority", 0.8)
             reasoning = plan.get("reasoning", "LLM planned experiment")
 
             # Map experiment types to node types and configurations
-            if exp_type == "COMPUTATIONAL":
+            if exp_type in {"COMPUTATIONAL", ExperimentType.COMPUTATIONAL.value.upper()}:
                 node_type = ResearchNodeType.EXPERIMENT
                 experiment_type = ExperimentType.COMPUTATIONAL
                 config = {
@@ -830,7 +957,7 @@ Return JSON format:
                     "focus": "practical_solution",
                     "reasoning": reasoning
                 }
-            elif exp_type == "LITERATURE_ANALYSIS":
+            elif exp_type in {"LITERATURE_ANALYSIS", "LITERATURE", ExperimentType.LITERATURE_ANALYSIS.value.upper()}:
                 node_type = ResearchNodeType.LITERATURE
                 experiment_type = ExperimentType.LITERATURE_ANALYSIS
                 config = {
@@ -839,7 +966,7 @@ Return JSON format:
                     "analysis_depth": "focused",
                     "reasoning": reasoning
                 }
-            elif exp_type == "THEORETICAL":
+            elif exp_type in {"THEORETICAL", "HYPOTHESIS"}:
                 node_type = ResearchNodeType.HYPOTHESIS
                 experiment_type = ExperimentType.THEORETICAL
                 config = {
@@ -847,13 +974,55 @@ Return JSON format:
                     "evidence_threshold": 0.7,
                     "reasoning": reasoning
                 }
-            elif exp_type == "CODE_ANALYSIS":
+            elif exp_type in {"CODE_ANALYSIS", "CODE_STUDY", ExperimentType.CODE_STUDY.value.upper()}:
                 node_type = ResearchNodeType.CODE_ANALYSIS
                 experiment_type = ExperimentType.CODE_STUDY
                 config = {
                     "search_terms": [goal.title, "implementation", "algorithm"],
                     "languages": ["python", "javascript", "cpp"],
                     "analysis_depth": "focused",
+                    "reasoning": reasoning
+                }
+            elif exp_type in {"AI_SCIENTIST", "AI_SCIENTIST_DISCOVERY", ExperimentType.AI_SCIENTIST_DISCOVERY.value.upper()}:
+                node_type = ResearchNodeType.HIERARCHICAL_RESEARCH
+                experiment_type = ExperimentType.AI_SCIENTIST_DISCOVERY
+                config = {
+                    "research_questions": goal.success_criteria,
+                    "collaboration_enabled": True,
+                    "reasoning": reasoning,
+                    "strategy": "roma_recursive"
+                }
+            elif exp_type in {"AGENT_LAB", "AGENT_COLLABORATION", ExperimentType.AGENT_LAB_EXPERIMENT.value.upper()}:
+                node_type = ResearchNodeType.AGENT_COLLABORATION
+                experiment_type = ExperimentType.AGENT_LAB_EXPERIMENT
+                config = {
+                    "requirements": goal.success_criteria,
+                    "team_size": 4,
+                    "specialization_level": "high",
+                    "reasoning": reasoning
+                }
+            elif exp_type in {"WEB_SEARCH", "SEARCH", ExperimentType.WEB_SEARCH_ANALYSIS.value.upper()}:
+                node_type = ResearchNodeType.WEB_SEARCH
+                experiment_type = ExperimentType.WEB_SEARCH_ANALYSIS
+                config = {
+                    "search_query": goal.title,
+                    "search_types": ["web", "academic", "code"],
+                    "result_synthesis": True,
+                    "reasoning": reasoning
+                }
+            elif exp_type in {"CODE_EXECUTION", "CODE_TEST", ExperimentType.CODE_EXECUTION_TEST.value.upper()}:
+                node_type = ResearchNodeType.CODE_EXECUTION
+                experiment_type = ExperimentType.CODE_EXECUTION_TEST
+                repo_path = plan.get("repository_path") or plan.get("repo_path")
+                if goal.constraints:
+                    repo_path = repo_path or goal.constraints.get("repository_path")
+                if not repo_path:
+                    logger.info("Skipping CODE_EXECUTION_TEST plan due to missing repository path")
+                    continue
+                config = {
+                    "repository_path": repo_path,
+                    "timeout": plan.get("timeout", 180),
+                    "retries": plan.get("retries", 1),
                     "reasoning": reasoning
                 }
             else:
@@ -863,10 +1032,10 @@ Return JSON format:
                 config = {"reasoning": reasoning}
 
             # Add direction - trust LLM's decision
-            print(f"✅ Adding direction: {exp_type} (node_type: {node_type}, exp_type: {experiment_type})")
+            print(f"✅ Adding direction: {raw_exp_type} (node_type: {node_type}, exp_type: {experiment_type})")
             directions.append({
                 "node_type": node_type,
-                "title": f"{exp_type.replace('_', ' ').title()}: {goal.title}",
+                "title": f"{raw_exp_type.replace('_', ' ').title()}: {goal.title}",
                 "description": f"{reasoning} for {goal.description}",
                 "experiment_type": experiment_type,
                 "experiment_config": config,
@@ -1001,6 +1170,41 @@ Return JSON format:
                 "priority": 0.8
             })
 
+            repo_path = None
+            if isinstance(best_result.data, dict):
+                repo_path = best_result.data.get('repository_path') or best_result.data.get('repo_path')
+            if not repo_path and isinstance(node.experiment_config, dict):
+                repo_path = node.experiment_config.get('repository_path') or node.experiment_config.get('repo_path')
+
+            if repo_path:
+                experiments.append({
+                    "node_type": ResearchNodeType.CODE_EXECUTION,
+                    "title": f"Execution Validation: {node.title}",
+                    "description": "Run comprehensive execution/tests to validate the optimized solution",
+                    "experiment_type": ExperimentType.CODE_EXECUTION_TEST,
+                    "experiment_config": {
+                        "repository_path": repo_path,
+                        "timeout": 300,
+                        "retries": 2,
+                        "reasoning": "Validate results through automated execution"
+                    },
+                    "priority": 0.75
+                })
+
+            experiments.append({
+                "node_type": ResearchNodeType.AGENT_COLLABORATION,
+                "title": f"Agent Collaboration: {node.title}",
+                "description": "Coordinate specialised agents to extend and harden the successful result",
+                "experiment_type": ExperimentType.AGENT_LAB_EXPERIMENT,
+                "experiment_config": {
+                    "requirements": best_result.insights if isinstance(best_result.insights, list) else [],
+                    "team_size": 4,
+                    "specialization_level": "high",
+                    "reasoning": "Leverage AgentLab to expand on promising findings"
+                },
+                "priority": 0.78
+            })
+
         # Add hierarchical multi-agent analysis as a child of successful literature/code analysis
         if (best_result.success and best_result.confidence > 0.6 and
             node.node_type in [ResearchNodeType.LITERATURE, ResearchNodeType.CODE_ANALYSIS]):
@@ -1052,6 +1256,26 @@ Return JSON format:
                     "priority": 0.9
                 })
 
+        # Encourage web search expansion if not already explored and results strong
+        has_web_child = any(
+            tree[cid].node_type == ResearchNodeType.WEB_SEARCH if cid in tree else False
+            for cid in node.children
+        )
+        if best_result.success and best_result.confidence > 0.65 and not has_web_child:
+            experiments.append({
+                "node_type": ResearchNodeType.WEB_SEARCH,
+                "title": f"Extended Evidence Search: {node.title}",
+                "description": "Collect additional external evidence and examples to support the findings",
+                "experiment_type": ExperimentType.WEB_SEARCH_ANALYSIS,
+                "experiment_config": {
+                    "search_query": node.title,
+                    "search_types": ["web", "code", "academic"],
+                    "result_synthesis": True,
+                    "reasoning": "Broaden evidence after promising results"
+                },
+                "priority": 0.7
+            })
+
         return experiments
 
     async def _run_experiment(self, goal_id: str, node_id: str) -> ExperimentResult:
@@ -1072,8 +1296,44 @@ Return JSON format:
         })
 
         try:
+            workflow_events_log = node.debug_info.setdefault("workflow_events", [])
+
+            async def telemetry_handler(event: Dict[str, Any]):
+                event_record = {
+                    "timestamp": datetime.now().isoformat(),
+                    "event": event,
+                }
+                workflow_events_log.append(event_record)
+                stage = event.get("event") or event.get("status") or "workflow_event"
+                self._log_execution(
+                    node,
+                    "DEBUG",
+                    f"Workflow event: {stage}",
+                    {"workflow_event": event},
+                )
+
             # Execute experiment based on type
-            if node.experiment_type == ExperimentType.LITERATURE_ANALYSIS:
+            if (
+                self.node_execution_engine
+                and self.node_execution_engine.supports(node.experiment_type)
+            ):
+                self._log_execution(
+                    node,
+                    "DEBUG",
+                    "Delegating experiment to unified orchestration engine",
+                    {
+                        "experiment_type": node.experiment_type.value if node.experiment_type else "unknown",
+                        "goal_id": goal_id,
+                    },
+                )
+                timeout = node.experiment_config.get("timeout") if node.experiment_config else None
+                result = await self.node_execution_engine.execute_node(
+                    goal_id,
+                    node,
+                    timeout=timeout,
+                    telemetry_callback=telemetry_handler,
+                )
+            elif node.experiment_type == ExperimentType.LITERATURE_ANALYSIS:
                 self._log_execution(node, "DEBUG", "Executing literature analysis experiment")
                 result = await self._run_literature_experiment(node)
             elif node.experiment_type == ExperimentType.CODE_STUDY:
@@ -1098,7 +1358,7 @@ Return JSON format:
                 self._log_execution(node, "WARNING", f"Unknown experiment type: {node.experiment_type}, using default")
                 result = await self._run_default_experiment(node)
 
-            execution_time = (datetime.now() - start_time).total_seconds()
+            execution_time = result.execution_time or (datetime.now() - start_time).total_seconds()
             result.execution_time = execution_time
 
             # Log success

@@ -7,7 +7,7 @@ RepoMaster analysis, and multi-modal search into a cohesive workflow system
 import asyncio
 import uuid
 import logging
-from typing import Dict, List, Optional, Any, Union
+from typing import Awaitable, Callable, Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
@@ -85,6 +85,8 @@ class UnifiedOrchestrator:
         # Workflow management
         self.active_workflows: Dict[str, WorkflowResult] = {}
         self.workflow_templates: Dict[str, WorkflowConfig] = self._initialize_workflow_templates()
+        self._workflow_events: Dict[str, asyncio.Event] = {}
+        self._event_listeners: List[Callable[[Dict[str, Any]], Union[None, Awaitable[None]]]] = []
 
         # Component integration
         self._integrate_components()
@@ -139,6 +141,26 @@ class UnifiedOrchestrator:
         for agent_id, agent in self.meta_agent.agents.items():
             self.agent_lab.register_agent(agent)
 
+    def add_event_listener(self, listener: Callable[[Dict[str, Any]], Union[None, Awaitable[None]]]) -> None:
+        """Register a listener for workflow events."""
+        if listener not in self._event_listeners:
+            self._event_listeners.append(listener)
+
+    def remove_event_listener(self, listener: Callable[[Dict[str, Any]], Union[None, Awaitable[None]]]) -> None:
+        """Remove a previously registered event listener."""
+        if listener in self._event_listeners:
+            self._event_listeners.remove(listener)
+
+    async def _emit_event(self, event: Dict[str, Any]) -> None:
+        """Emit a workflow orchestration event to all listeners."""
+        for listener in list(self._event_listeners):
+            try:
+                result = listener(event)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:  # pragma: no cover - telemetry should not break execution
+                logger.debug(f"Workflow event listener error: {exc}")
+
     async def execute_workflow(
         self,
         workflow_config: Union[str, WorkflowConfig],
@@ -165,6 +187,18 @@ class UnifiedOrchestrator:
             components_used=config.components
         )
         self.active_workflows[workflow_id] = workflow_result
+        self._workflow_events[workflow_id] = asyncio.Event()
+
+        await self._emit_event({
+            "workflow_id": workflow_id,
+            "event": "workflow_scheduled",
+            "workflow_type": config.workflow_type.value,
+            "components": config.components,
+            "inputs": {k: v for k, v in (inputs or {}).items() if k in {"title", "description", "query", "repository_path"}}
+        })
+
+        if inputs is not None:
+            inputs["workflow_id"] = workflow_id
 
         # Execute workflow asynchronously
         asyncio.create_task(self._execute_workflow_async(workflow_id, config, inputs))
@@ -179,10 +213,20 @@ class UnifiedOrchestrator:
     ):
         """Execute workflow asynchronously"""
         workflow_result = self.active_workflows[workflow_id]
+        inputs = dict(inputs or {})
+        inputs.setdefault("workflow_id", workflow_id)
         start_time = datetime.now()
 
         try:
             workflow_result.status = "running"
+
+            await self._emit_event({
+                "workflow_id": workflow_id,
+                "event": "workflow_started",
+                "workflow_type": config.workflow_type.value,
+                "components": config.components,
+                "inputs": inputs,
+            })
 
             # Execute based on workflow type
             if config.workflow_type == WorkflowType.AUTOMATED_RESEARCH:
@@ -201,14 +245,59 @@ class UnifiedOrchestrator:
             workflow_result.results = results
             workflow_result.status = "completed"
 
+            await self._emit_event({
+                "workflow_id": workflow_id,
+                "event": "workflow_completed",
+                "status": "completed",
+                "results": results,
+                "components": config.components,
+            })
+
         except Exception as e:
             workflow_result.results = {"error": str(e)}
             workflow_result.status = "failed"
+
+            await self._emit_event({
+                "workflow_id": workflow_id,
+                "event": "workflow_failed",
+                "status": "failed",
+                "error": str(e),
+                "components": config.components,
+            })
 
         finally:
             end_time = datetime.now()
             workflow_result.execution_time = (end_time - start_time).total_seconds()
             workflow_result.completed_at = end_time
+
+            event = self._workflow_events.get(workflow_id)
+            if event:
+                event.set()
+                # Allow waiters to grab the event before we clean it up
+                # by scheduling removal in the next loop iteration.
+                loop = asyncio.get_running_loop()
+                loop.call_soon(self._workflow_events.pop, workflow_id, None)
+
+    async def wait_for_completion(self, workflow_id: str, timeout: Optional[float] = None) -> Optional[WorkflowResult]:
+        """Wait for a workflow to finish and return the final result."""
+        workflow = self.active_workflows.get(workflow_id)
+        if not workflow:
+            return None
+
+        if workflow.status in {"completed", "failed", "cancelled"}:
+            return workflow
+
+        event = self._workflow_events.get(workflow_id)
+        if not event:
+            # Workflow already finished but event cleaned up.
+            return workflow
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+        except asyncio.TimeoutError:
+            return self.active_workflows.get(workflow_id)
+
+        return self.active_workflows.get(workflow_id)
 
     async def _execute_research_workflow(
         self,
@@ -236,6 +325,16 @@ class UnifiedOrchestrator:
             initial_context=inputs
         )
 
+        await self._emit_event({
+            "workflow_id": inputs.get("workflow_id"),
+            "event": "ai_scientist_project_created",
+            "project_id": project_id,
+            "title": title,
+            "research_questions": research_questions,
+            "goal_id": inputs.get("goal_id"),
+            "node_id": inputs.get("node_id"),
+        })
+
         # Create collaboration session for research
         if config.parameters.get("collaboration_enabled", True):
             collab_session = await self.agent_lab.create_collaboration_session(
@@ -243,6 +342,15 @@ class UnifiedOrchestrator:
                 pattern=CollaborationPattern.HIERARCHICAL,
                 agent_roles=[AgentRole.RESEARCHER, AgentRole.ANALYZER, AgentRole.SYNTHESIZER]
             )
+
+            await self._emit_event({
+                "workflow_id": inputs.get("workflow_id"),
+                "event": "collaboration_session_started",
+                "session_id": collab_session,
+                "pattern": CollaborationPattern.HIERARCHICAL.value,
+                "goal_id": inputs.get("goal_id"),
+                "node_id": inputs.get("node_id"),
+            })
         else:
             collab_session = None
 
@@ -254,9 +362,25 @@ class UnifiedOrchestrator:
 
         # Execute research phases with ROMA-style recursion
         if config.strategy == OrchestrationStrategy.ROMA_RECURSIVE:
-            results["phases"] = await self._execute_recursive_research(project_id, collab_session)
+            results["phases"] = await self._execute_recursive_research(
+                project_id,
+                collab_session,
+                workflow_id=inputs.get("workflow_id"),
+            )
         else:
-            results["phases"] = await self._execute_sequential_research(project_id)
+            results["phases"] = await self._execute_sequential_research(
+                project_id,
+                workflow_id=inputs.get("workflow_id"),
+            )
+
+        await self._emit_event({
+            "workflow_id": inputs.get("workflow_id"),
+            "event": "research_workflow_completed",
+            "project_id": project_id,
+            "goal_id": inputs.get("goal_id"),
+            "node_id": inputs.get("node_id"),
+            "phase_count": len(results.get("phases", {})),
+        })
 
         return results
 
@@ -275,8 +399,23 @@ class UnifiedOrchestrator:
         # Analyze repository with RepoMaster
         repo_id = await self.repo_master.analyze_repository(repo_path, analysis_depth)
 
+        await self._emit_event({
+            "workflow_id": inputs.get("workflow_id"),
+            "event": "repository_analyzed",
+            "repo_id": repo_id,
+            "repository_path": repo_path,
+            "analysis_depth": analysis_depth.value,
+        })
+
         # Get repository summary
         repo_summary = await self.repo_master.get_repository_summary(repo_id)
+
+        await self._emit_event({
+            "workflow_id": inputs.get("workflow_id"),
+            "event": "repository_summary_ready",
+            "repo_id": repo_id,
+            "metrics_keys": list(repo_summary.keys()),
+        })
 
         # Create collaborative analysis session
         if "agent_lab" in config.components:
@@ -298,6 +437,14 @@ class UnifiedOrchestrator:
             collaborative_results = await self.agent_lab.execute_collaborative_task(
                 collab_session, analysis_task
             )
+
+            await self._emit_event({
+                "workflow_id": inputs.get("workflow_id"),
+                "event": "collaborative_analysis_completed",
+                "session_id": collab_session,
+                "task_id": analysis_task.id,
+                "result_keys": list(collaborative_results.keys()) if isinstance(collaborative_results, dict) else None,
+            })
         else:
             collaborative_results = {}
 
@@ -309,6 +456,13 @@ class UnifiedOrchestrator:
                 search_types=['code', 'web'],
                 limit=10
             )
+
+            await self._emit_event({
+                "workflow_id": inputs.get("workflow_id"),
+                "event": "related_projects_identified",
+                "query": search_query,
+                "counts": {k: len(v) if isinstance(v, list) else 0 for k, v in search_results.items()},
+            })
         else:
             search_results = {}
 
@@ -336,6 +490,14 @@ class UnifiedOrchestrator:
             agent_roles=[AgentRole.CODER, AgentRole.REVIEWER, AgentRole.TESTER, AgentRole.SYNTHESIZER]
         )
 
+        await self._emit_event({
+            "workflow_id": inputs.get("workflow_id"),
+            "event": "collaboration_session_started",
+            "session_id": collab_session,
+            "pattern": collab_pattern.value,
+            "project_name": project_name,
+        })
+
         # Break down project into tasks using meta-agent
         tasks = []
         for req in requirements:
@@ -354,8 +516,24 @@ class UnifiedOrchestrator:
             result = await self.agent_lab.execute_collaborative_task(collab_session, task)
             task_results[task_id] = result
 
+            await self._emit_event({
+                "workflow_id": inputs.get("workflow_id"),
+                "event": "collaborative_task_completed",
+                "session_id": collab_session,
+                "task_id": task_id,
+                "task_name": task.name,
+                "result_keys": list(result.keys()) if isinstance(result, dict) else None,
+            })
+
         # Get collaboration metrics
         metrics = await self.agent_lab.get_collaboration_metrics(collab_session)
+
+        await self._emit_event({
+            "workflow_id": inputs.get("workflow_id"),
+            "event": "collaboration_metrics_ready",
+            "session_id": collab_session,
+            "metrics_keys": list(metrics.keys()) if isinstance(metrics, dict) else None,
+        })
 
         return {
             "collaboration_session": collab_session,
@@ -452,7 +630,8 @@ class UnifiedOrchestrator:
     async def _execute_recursive_research(
         self,
         project_id: str,
-        collab_session: Optional[str]
+        collab_session: Optional[str],
+        workflow_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute research with ROMA-style recursive decomposition"""
         phases_results = {}
@@ -469,6 +648,14 @@ class UnifiedOrchestrator:
             # Execute phase with AI-Scientist
             phase_result = await self.ai_scientist.execute_research_phase(project_id, phase)
 
+            await self._emit_event({
+                "workflow_id": workflow_id,
+                "event": "research_phase_completed",
+                "project_id": project_id,
+                "phase": phase.value,
+                "summary_keys": list(phase_result.keys()),
+            })
+
             # If collaboration enabled, get peer review
             if collab_session:
                 review_task = Task(
@@ -483,6 +670,15 @@ class UnifiedOrchestrator:
                 )
                 phase_result["peer_review"] = peer_review
 
+                await self._emit_event({
+                    "workflow_id": workflow_id,
+                    "event": "peer_review_completed",
+                    "project_id": project_id,
+                    "phase": phase.value,
+                    "session_id": collab_session,
+                    "review_summary_keys": list(peer_review.keys()) if isinstance(peer_review, dict) else None,
+                })
+
             phases_results[phase.value] = phase_result
 
             # ROMA-style self-reflection after each phase
@@ -491,7 +687,7 @@ class UnifiedOrchestrator:
 
         return phases_results
 
-    async def _execute_sequential_research(self, project_id: str) -> Dict[str, Any]:
+    async def _execute_sequential_research(self, project_id: str, workflow_id: Optional[str] = None) -> Dict[str, Any]:
         """Execute research phases sequentially without collaboration"""
         # Define the phases to execute in order
         sequential_phases = [
@@ -507,6 +703,13 @@ class UnifiedOrchestrator:
         for phase in sequential_phases:
             logger.info(f"Executing {phase.value} phase")
             phase_result = await self.ai_scientist.execute_research_phase(project_id, phase)
+            await self._emit_event({
+                "workflow_id": workflow_id,
+                "event": "research_phase_completed",
+                "project_id": project_id,
+                "phase": phase.value,
+                "summary_keys": list(phase_result.keys()),
+            })
             results[phase.value] = phase_result
 
             # Stop if phase failed

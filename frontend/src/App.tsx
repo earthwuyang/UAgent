@@ -1,191 +1,159 @@
-import React, { useState } from 'react'
-import { apiSearch, githubSearch, runExperiment, startAIScientist, startAgentLab, getJob } from './services/api'
-import UnifiedDashboard from './components/UnifiedDashboard'
+import React, { useMemo, useState } from 'react'
 import HierarchicalResearchDashboard from './components/HierarchicalResearchDashboard'
 import LLMMonitor from './components/LLMMonitor'
 
+interface ChatMessage {
+  id: string
+  role: 'system' | 'user' | 'assistant'
+  content: string
+  timestamp: Date
+}
+
+type SidePanel = 'chat' | null
+
 export default function App() {
-  const [mode, setMode] = useState<'hierarchical' | 'unified' | 'legacy'>('hierarchical')
+  const [sidePanel, setSidePanel] = useState<SidePanel>('chat')
   const [showLLMMonitor, setShowLLMMonitor] = useState(false)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [
+    {
+      id: 'welcome',
+      role: 'system',
+      content:
+        'Welcome to uagent. Launch research goals in the tree and watch AI-Scientist, AgentLab, and RepoMaster collaborate directly inside the research tree.',
+      timestamp: new Date()
+    }
+  ])
+  const [chatInput, setChatInput] = useState('')
+  const [isProcessing, setIsProcessing] = useState(false)
 
-  if (mode === 'hierarchical') {
-    return (
-      <div>
-        <div className="fixed top-4 right-4 z-50 space-x-2">
-          <button
-            onClick={() => setShowLLMMonitor(true)}
-            className="px-3 py-1 bg-purple-200 text-purple-700 rounded text-sm hover:bg-purple-300"
-          >
-            🤖 LLM Monitor
-          </button>
-          <button
-            onClick={() => setMode('unified')}
-            className="px-3 py-1 bg-blue-200 text-blue-700 rounded text-sm hover:bg-blue-300"
-          >
-            Unified UI
-          </button>
-          <button
-            onClick={() => setMode('legacy')}
-            className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300"
-          >
-            Legacy UI
-          </button>
-        </div>
-        <HierarchicalResearchDashboard />
-        {/* LLM Monitor overlay */}
-        <LLMMonitor
-          isVisible={showLLMMonitor}
-          onClose={() => setShowLLMMonitor(false)}
-        />
-      </div>
-    )
+  const handleSendChat = async () => {
+    const trimmed = chatInput.trim()
+    if (!trimmed) return
+
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: trimmed,
+      timestamp: new Date()
+    }
+
+    setChatMessages((prev) => [...prev, userMsg])
+    setChatInput('')
+
+    // Placeholder assistant response tying back to unified orchestration
+    setIsProcessing(true)
+    const assistantMsg: ChatMessage = {
+      id: `assistant-${Date.now()}`,
+      role: 'assistant',
+      content:
+        'Got it. Track the node in the research tree to see AgentLab collaborators, AI-Scientist runs, and RepoMaster insights as the unified workflow progresses.',
+      timestamp: new Date()
+    }
+    setTimeout(() => {
+      setChatMessages((prev) => [...prev, assistantMsg])
+      setIsProcessing(false)
+    }, 400)
   }
 
-  if (mode === 'unified') {
-    return (
-      <div>
-        <div className="fixed top-4 right-4 z-50 space-x-2">
-          <button
-            onClick={() => setShowLLMMonitor(true)}
-            className="px-3 py-1 bg-purple-200 text-purple-700 rounded text-sm hover:bg-purple-300"
-          >
-            🤖 LLM Monitor
-          </button>
-          <button
-            onClick={() => setMode('hierarchical')}
-            className="px-3 py-1 bg-green-200 text-green-700 rounded text-sm hover:bg-green-300"
-          >
-            Tree Research
-          </button>
-          <button
-            onClick={() => setMode('legacy')}
-            className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300"
-          >
-            Legacy UI
-          </button>
-        </div>
-        <UnifiedDashboard />
-        {/* LLM Monitor overlay */}
-        <LLMMonitor
-          isVisible={showLLMMonitor}
-          onClose={() => setShowLLMMonitor(false)}
-        />
-      </div>
-    )
-  }
-
-  // Legacy UI below
-  const [q, setQ] = useState('site:github.com agent framework python')
-  const [results, setResults] = useState<any[]>([])
-  const [ghQuery, setGhQuery] = useState('agent framework repo')
-  const [ghResults, setGhResults] = useState<any[]>([])
-  const [expName, setExpName] = useState('baseline')
-  const [expResult, setExpResult] = useState<any | null>(null)
-  const [aiJob, setAiJob] = useState<string | null>(null)
-  const [labJob, setLabJob] = useState<string | null>(null)
-  const [jobInfo, setJobInfo] = useState<any | null>(null)
+  const sidePanelHeader = useMemo(() => (sidePanel === 'chat' ? 'Research Chat' : ''), [sidePanel])
 
   return (
-    <div style={{ fontFamily: 'sans-serif', padding: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div>
-          <h1>uagent (Legacy)</h1>
-          <p>ROMA-style UI + RepoMaster search + AI-Scientist parallel experiments</p>
+    <div className="h-screen bg-gray-50 flex flex-col">
+      <header className="bg-white border-b px-6 py-4 flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">uagent Research Tree</h1>
+            <p className="text-sm text-gray-600">
+              Hierarchical research orchestrated across AI-Scientist, AgentLab, RepoMaster, and multi-modal search – all inside the tree
+            </p>
+          </div>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => setSidePanel(sidePanel === 'chat' ? null : 'chat')}
+              className={`px-3 py-1 rounded text-sm border ${
+                sidePanel === 'chat' ? 'bg-blue-600 text-white border-blue-600' : 'bg-blue-50 text-blue-700 border-blue-200'
+              }`}
+            >
+              💬 Chat
+            </button>
+            <button
+              onClick={() => setShowLLMMonitor(true)}
+              className="px-3 py-1 bg-purple-100 text-purple-700 rounded text-sm border border-purple-200 hover:bg-purple-200"
+            >
+              🤖 LLM Monitor
+            </button>
+          </div>
         </div>
-        <div className="space-x-2">
-          <button
-            onClick={() => setMode('hierarchical')}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: '#22c55e',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            Tree Research
-          </button>
-          <button
-            onClick={() => setMode('unified')}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: '#3b82f6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            Unified UI
-          </button>
+      </header>
+
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        <div className="flex-1 min-h-0 flex flex-col">
+          <HierarchicalResearchDashboard />
         </div>
+
+        {sidePanel && (
+          <aside className="w-[420px] bg-white border-l flex flex-col">
+            <div className="p-3 border-b bg-gray-50 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">{sidePanelHeader}</h3>
+              <button
+                onClick={() => setSidePanel(null)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              <div className="flex flex-col h-full">
+                <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                  {chatMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`text-sm rounded px-3 py-2 ${
+                        message.role === 'system'
+                          ? 'bg-gray-100 text-gray-700'
+                          : message.role === 'assistant'
+                          ? 'bg-green-50 text-green-800 border border-green-200'
+                          : 'bg-blue-50 text-blue-800 border-blue-200 self-end'
+                      }`}
+                    >
+                      <div>{message.content}</div>
+                      <div className="text-[10px] text-gray-500 mt-1">
+                        {message.timestamp.toLocaleTimeString()}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="p-3 border-t bg-gray-50">
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Describe a research goal or code task..."
+                      className="flex-1 p-2 border rounded text-sm"
+                      disabled={isProcessing}
+                    />
+                    <button
+                      onClick={handleSendChat}
+                      disabled={isProcessing || !chatInput.trim()}
+                      className="px-3 py-2 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      ▶
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Hints: “Draft experiments for X” • “Analyze repo Y” • “Search papers on Z”
+                  </p>
+                </div>
+              </div>
+            </div>
+          </aside>
+        )}
+
       </div>
 
-      <section style={{ marginTop: 24 }}>
-        <h2>GitHub Search</h2>
-        <input style={{ width: '60%' }} value={q} onChange={(e) => setQ(e.target.value)} />
-        <button onClick={async () => setResults(await apiSearch(q))} style={{ marginLeft: 8 }}>Web Search</button>
-        <div style={{ marginTop: 8 }}>
-          <input style={{ width: '60%' }} value={ghQuery} onChange={(e) => setGhQuery(e.target.value)} placeholder='GitHub terms (site filter auto)'/>
-          <button onClick={async () => setGhResults(await githubSearch(ghQuery))} style={{ marginLeft: 8 }}>GitHub Search</button>
-        </div>
-        <ul>
-          {results.map((r, i) => (
-            <li key={i}>
-              <a href={r.link} target="_blank" rel="noreferrer">{r.title}</a>
-              <div style={{ color: '#666' }}>{r.snippet}</div>
-            </li>
-          ))}
-        </ul>
-        {ghResults.length > 0 && (
-          <>
-          <h3>GitHub Results</h3>
-          <ul>
-            {ghResults.map((r, i) => (
-              <li key={i}>
-                <a href={r.link} target="_blank" rel="noreferrer">{r.title}</a>
-                <div style={{ color: '#666' }}>{r.snippet}</div>
-              </li>
-            ))}
-          </ul>
-          </>
-        )}
-      </section>
-
-      <section style={{ marginTop: 24 }}>
-        <h2>Experiment Runner</h2>
-        <input value={expName} onChange={(e) => setExpName(e.target.value)} />
-        <button onClick={async () => setExpResult(await runExperiment(expName))} style={{ marginLeft: 8 }}>Run</button>
-        {expResult && (
-          <pre style={{ background: '#f6f8fa', padding: 12 }}>{JSON.stringify(expResult, null, 2)}</pre>
-        )}
-      </section>
-
-      <section style={{ marginTop: 24 }}>
-        <h2>AI-Scientist & AgentLab Jobs</h2>
-        <div>
-          <button onClick={async () => { const { job_id } = await startAIScientist(0); setAiJob(job_id); }}>Start AI-Scientist</button>
-          {aiJob && <span style={{ marginLeft: 8 }}>Job: {aiJob}</span>}
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <button onClick={async () => { const { job_id } = await startAgentLab(); setLabJob(job_id); }}>Start AgentLab</button>
-          {labJob && <span style={{ marginLeft: 8 }}>Job: {labJob}</span>}
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <input placeholder='Job ID' value={jobInfo?.id || aiJob || labJob || ''} onChange={(e) => setJobInfo({ id: e.target.value })} />
-          <button onClick={async () => { if (!jobInfo?.id && !aiJob && !labJob) return; const id = jobInfo?.id || aiJob || labJob!; const info = await getJob(id); setJobInfo(info); }}>Check Job</button>
-        </div>
-        {jobInfo && (
-          <pre style={{ background: '#f6f8fa', padding: 12, maxHeight: 300, overflow: 'auto' }}>{JSON.stringify(jobInfo, null, 2)}</pre>
-        )}
-      </section>
-
-      {/* LLM Monitor overlay */}
-      <LLMMonitor
-        isVisible={showLLMMonitor}
-        onClose={() => setShowLLMMonitor(false)}
-      />
+      <LLMMonitor isVisible={showLLMMonitor} onClose={() => setShowLLMMonitor(false)} />
     </div>
   )
 }

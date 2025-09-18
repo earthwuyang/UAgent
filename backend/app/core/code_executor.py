@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 
+logger = logging.getLogger(__name__)
+
 # Import AI Scientist interpreter
 import sys
 import os
@@ -44,8 +46,6 @@ except ImportError as e:
 
 from .llm_client import llm_client
 from .workspace_manager import WorkspaceManager
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -152,7 +152,14 @@ class CodeExecutor:
             confidence = self._calculate_confidence(success, execution_outputs, debug_attempts)
 
             # Generate comprehensive metrics
-            metrics = self._generate_metrics(execution_outputs, debug_attempts, execution_time, task_description)
+            metrics = self._generate_metrics(
+                execution_outputs,
+                debug_attempts,
+                execution_time,
+                task_description,
+                workspace_path=str(workspace),
+                saved_files=saved_files if isinstance(saved_files, dict) else {}
+            )
 
             return CodeExecutionResult(
                 success=success,
@@ -519,7 +526,15 @@ Generate production-ready, complete solutions, not just basic examples.""",
         final_confidence = max(0.1, base_confidence - debug_penalty - iteration_penalty)
         return final_confidence
 
-    def _generate_metrics(self, execution_outputs: List[Dict], debug_attempts: int, execution_time: float, task_description: str) -> Dict[str, Any]:
+    def _generate_metrics(
+        self,
+        execution_outputs: List[Dict],
+        debug_attempts: int,
+        execution_time: float,
+        task_description: str,
+        workspace_path: Optional[str] = None,
+        saved_files: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         """Generate comprehensive metrics"""
         return {
             'total_iterations': len(execution_outputs),
@@ -534,7 +549,9 @@ Generate production-ready, complete solutions, not just basic examples.""",
             'debugging_success_rate': (
                 1.0 - (debug_attempts / max(1, self.max_debug_attempts))
                 if debug_attempts <= self.max_debug_attempts else 0.0
-            )
+            ),
+            'workspace_path': workspace_path,
+            'generated_files': saved_files,
         }
 
     async def _fallback_llm_only_generation(self, task_description: str, config: Dict[str, Any], start_time: float, node_id: str = None) -> CodeExecutionResult:

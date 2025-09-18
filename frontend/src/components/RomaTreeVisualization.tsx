@@ -92,7 +92,36 @@ const TaskNodeComponent: React.FC<{ data: { node: TaskNode, isSelected?: boolean
     }
   }
 
-  const isPlanNode = node.node_type === 'PLAN'
+  const nodeTypeValue = (node as any).node_type || node.type || node.task_type || ''
+
+  const getNodeIcon = (type: string) => {
+    switch (type) {
+      case 'hierarchical_research':
+        return '🌐'
+      case 'web_search':
+        return '🔍'
+      case 'agent_collaboration':
+        return '🤝'
+      case 'code_execution':
+        return '💻'
+      case 'code_analysis':
+        return '🧩'
+      case 'literature':
+        return '📚'
+      case 'validation':
+        return '✅'
+      case 'synthesis':
+        return '🧠'
+      case 'hypothesis':
+        return '💡'
+      case 'experiment':
+        return '⚙️'
+      default:
+        return '⚙️'
+    }
+  }
+
+  const isPlanNode = nodeTypeValue === 'plan'
 
   return (
     <div className={`
@@ -105,10 +134,10 @@ const TaskNodeComponent: React.FC<{ data: { node: TaskNode, isSelected?: boolean
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center space-x-2">
           <span className="text-lg">
-            {isPlanNode ? '🧠' : '⚙️'}
+            {isPlanNode ? '🧠' : getNodeIcon(nodeTypeValue)}
           </span>
           <div className="px-2 py-1 bg-white bg-opacity-70 rounded text-xs font-medium">
-            {node.task_type}
+            {(node as any).task_type || nodeTypeValue || 'node'}
           </div>
           {node.layer > 0 && (
             <div className="px-2 py-1 bg-gray-200 rounded text-xs">

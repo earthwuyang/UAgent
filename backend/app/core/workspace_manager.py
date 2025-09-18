@@ -168,9 +168,11 @@ Use this directory for all code generation and execution related to this task.
                 clean_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
                 file_path = target_dir / clean_filename
 
+                cleaned_content = self._clean_file_content(clean_filename, content)
+
                 # Write file with proper permissions
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                    f.write(cleaned_content)
 
                 # Make shell scripts executable
                 if filename.endswith(('.sh', '.bash')):
@@ -185,6 +187,30 @@ Use this directory for all code generation and execution related to this task.
         # Generate comprehensive deployment instructions
         self._generate_deployment_instructions(workspace, saved_files, llm_output)
         return saved_files
+
+    def _clean_file_content(self, filename: str, raw_content: str) -> str:
+        """Strip markdown fences and extraneous prose from generated files."""
+        content = raw_content.strip()
+
+        # Extract primary code block if markdown fences present
+        if '```' in content:
+            import re
+            code_blocks = re.findall(r"```(?:\w+)?\n(.*?)```", content, re.DOTALL)
+            if code_blocks:
+                content = code_blocks[0].strip()
+            else:
+                content = content.replace('```', '').strip()
+
+        # Remove lingering markdown headers or fences
+        if content.startswith('```') and content.endswith('```'):
+            content = content.strip('`').strip()
+
+        # For shell scripts ensure shebang present
+        if filename.endswith(('.sh', '.bash')) and not content.startswith('#!'):
+            content = f"#!/bin/bash\n{content}"
+
+        # For docker-compose ensure YAML document clean (remove leading fenced markers etc handled above)
+        return content.strip() + "\n"
 
     def _generate_deployment_instructions(self, workspace: Path, saved_files: Dict[str, List[str]], llm_output: str):
         """Generate comprehensive deployment instructions"""

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 from ..core.research_tree import HierarchicalResearchSystem
 from ..core.unified_orchestrator import UnifiedOrchestrator
+from ..core.node_execution_engine import NodeExecutionEngine
 from ..core.report_generator import MarkdownReportGenerator
 from ..core.persistence import PersistentResearchSystem
 from ..core.enhanced_research_system import DatabaseIntegratedResearchSystem
@@ -34,6 +35,10 @@ aira_system = None  # Will be initialized on demand
 # Initialize and inject the orchestrator
 orchestrator = UnifiedOrchestrator()
 research_system.orchestrator = orchestrator
+
+# Connect node execution engine to delegate experiments through unified workflows
+node_execution_engine = NodeExecutionEngine(orchestrator)
+research_system.node_execution_engine = node_execution_engine
 
 # Initialize the report generator
 report_generator = MarkdownReportGenerator(research_system)
@@ -531,6 +536,15 @@ def _get_active_system():
     """Get the currently active research system (AIRA or standard)"""
     global aira_system, research_system
     return aira_system if aira_system is not None else research_system
+
+
+def _get_node(goal_id: str, node_id: str):
+    """Retrieve a node from the active research system"""
+    active_system = _get_active_system()
+    tree = active_system.research_trees.get(goal_id)
+    if not tree:
+        return None
+    return tree.get(node_id)
 
 
 @router.post("/goals/start", response_model=ResearchGoalResponse)
@@ -1966,6 +1980,25 @@ async def get_node_llm_messages(goal_id: str, node_id: str):
         raise HTTPException(status_code=500, detail=f"Error retrieving LLM messages: {str(e)}")
 
 
+@router.get("/goals/{goal_id}/nodes/{node_id}/workflow-events")
+async def get_node_workflow_events(goal_id: str, node_id: str):
+    """Return recorded workflow orchestration events for a node."""
+    node = _get_node(goal_id, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Node {node_id} not found for goal {goal_id}")
+
+    events = node.debug_info.get("workflow_events", [])
+    cleaned_events = [_clean_data_for_serialization(event) for event in events]
+
+    return {
+        "goal_id": goal_id,
+        "node_id": node_id,
+        "events": cleaned_events,
+        "count": len(cleaned_events),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 def _clean_data_for_serialization(data):
     """Clean data to ensure JSON serialization compatibility"""
     if isinstance(data, dict):
@@ -2076,6 +2109,86 @@ async def stream_node_llm_messages(goal_id: str, node_id: str):
                     "timestamp": datetime.now().isoformat()
                 }
                 yield f"data: {json.dumps(error_data)}\n\n"
+                cancelled = True
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
+        }
+    )
+
+
+@router.get("/goals/{goal_id}/nodes/{node_id}/workflow-events/stream")
+async def stream_node_workflow_events(goal_id: str, node_id: str):
+    """Stream workflow telemetry events for a node via Server-Sent Events."""
+
+    async def event_generator():
+        last_index = 0
+        cancelled = False
+
+        while not cancelled:
+            try:
+                node = _get_node(goal_id, node_id)
+                if not node:
+                    raise HTTPException(status_code=404, detail=f"Node {node_id} not found")
+
+                events = node.debug_info.get("workflow_events", [])
+                total = len(events)
+
+                if total > last_index:
+                    new_events = events[last_index:]
+                    for idx, event in enumerate(new_events, start=last_index):
+                        payload = {
+                            "goal_id": goal_id,
+                            "node_id": node_id,
+                            "event_index": idx,
+                            "event": _clean_data_for_serialization(event),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+                    last_index = total
+
+                heartbeat = {
+                    "type": "heartbeat",
+                    "goal_id": goal_id,
+                    "node_id": node_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "event_count": total
+                }
+                yield f"data: {json.dumps(heartbeat)}\n\n"
+
+                await asyncio.sleep(2)
+
+            except asyncio.CancelledError:
+                logger.info(f"Workflow SSE stream cancelled for node {node_id}")
+                cancelled = True
+            except HTTPException as http_exc:
+                error_payload = {
+                    "type": "error",
+                    "goal_id": goal_id,
+                    "node_id": node_id,
+                    "status": http_exc.status_code,
+                    "detail": http_exc.detail,
+                    "timestamp": datetime.now().isoformat()
+                }
+                yield f"data: {json.dumps(error_payload)}\n\n"
+                cancelled = True
+            except Exception as exc:
+                logger.error(f"Error in workflow SSE stream for node {node_id}: {exc}")
+                error_payload = {
+                    "type": "error",
+                    "goal_id": goal_id,
+                    "node_id": node_id,
+                    "error": str(exc),
+                    "timestamp": datetime.now().isoformat()
+                }
+                yield f"data: {json.dumps(error_payload)}\n\n"
                 cancelled = True
 
     return StreamingResponse(
