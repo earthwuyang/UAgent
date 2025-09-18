@@ -17,3 +17,11 @@ numpy>=1.25.2
 scipy>=1.11.4
 shutup
 humanize
+
+# Memory Management Dependencies
+openai>=1.3.0  # For embeddings generation
+sentence-transformers>=2.2.2  # Alternative embedding model
+chromadb>=0.4.0  # Optional vector database
+
+# LLM Dependencies
+dashscope>=1.10.0  # For Qwen LLM integration

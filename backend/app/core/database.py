@@ -186,6 +186,102 @@ class ResearchDatabase:
                 )
             """)
 
+            # Memory management tables
+            # Append-only event log per node (observations, tool calls, decisions)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    source TEXT NOT NULL,              -- 'llm', 'tool:<name>', 'system', 'user'
+                    kind TEXT NOT NULL,                -- 'observation', 'decision', 'error', 'note'
+                    body_json TEXT NOT NULL,           -- JSON content
+                    token_cost INTEGER DEFAULT 0,
+                    importance REAL DEFAULT 0.0,       -- writer assigns (0..1)
+                    artifact_uri TEXT,                 -- URI to large artifacts if offloaded
+                    content_hash TEXT,                 -- SHA256 hash for deduplication
+                    FOREIGN KEY (run_id) REFERENCES research_goals (id) ON DELETE CASCADE,
+                    FOREIGN KEY (node_id) REFERENCES research_nodes (id) ON DELETE CASCADE
+                )
+            """)
+
+            # Rolling summaries (for context compaction)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_snapshots (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    window_seq INTEGER NOT NULL,       -- 0..N (monotonic)
+                    summary_type TEXT NOT NULL,        -- 'rolling', 'milestone', 'postmortem'
+                    summary_text TEXT NOT NULL,
+                    stats_json TEXT,                   -- JSON: {events_covered, compression_ratio, salient_keys[]}
+                    token_count INTEGER DEFAULT 0,
+                    context_window_start INTEGER,      -- event_id range this covers
+                    context_window_end INTEGER,
+                    FOREIGN KEY (run_id) REFERENCES research_goals (id) ON DELETE CASCADE,
+                    FOREIGN KEY (node_id) REFERENCES research_nodes (id) ON DELETE CASCADE
+                )
+            """)
+
+            # Semantic memory index (facts/snippets reusable across runs)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS semantic_chunks (
+                    chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    org_scope TEXT NOT NULL DEFAULT 'default',
+                    title TEXT,
+                    text TEXT NOT NULL,
+                    meta_json TEXT,                    -- JSON: {tags[], source, run_id?, node_id?, repo?, tool?}
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    usage_count INTEGER DEFAULT 0,
+                    avg_relevance REAL DEFAULT 0.0,
+                    content_hash TEXT,                 -- SHA256 for deduplication
+                    embedding_vector TEXT             -- JSON array for vector if using text embeddings
+                )
+            """)
+
+            # Key-value memory (configs, preferences, small artifacts)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS kv_memory (
+                    key TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,               -- 'global', 'user:<id>', 'project:<id>'
+                    value_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ttl_sec INTEGER,                   -- optional expiry
+                    expires_at TIMESTAMP              -- computed expiry time
+                )
+            """)
+
+            # Lightweight knowledge graph (optional, start minimal)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS kg_triples (
+                    triple_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    h TEXT NOT NULL,                   -- head entity
+                    r TEXT NOT NULL,                   -- relation
+                    t TEXT NOT NULL,                   -- tail entity
+                    confidence REAL DEFAULT 0.7,
+                    provenance TEXT,                   -- JSON: {run_id?, node_id?, url?, method?}
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Memory usage statistics
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_stats (
+                    stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    node_id TEXT,
+                    stat_type TEXT NOT NULL,           -- 'context_assembly', 'summarization', 'retrieval'
+                    stat_data TEXT NOT NULL,           -- JSON with metrics
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (run_id) REFERENCES research_goals (id) ON DELETE CASCADE
+                )
+            """)
+
             # Create indexes for better performance
             conn.execute("CREATE INDEX IF NOT EXISTS idx_goals_status ON research_goals (status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_goals_created ON research_goals (created_at)")
@@ -200,6 +296,25 @@ class ResearchDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_success ON research_patterns (success_rate)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_applications_pattern ON pattern_applications (pattern_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_applications_goal ON pattern_applications (goal_id)")
+
+            # Memory-specific indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_run_node ON memory_events (run_id, node_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_ts ON memory_events (ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_importance ON memory_events (importance)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_source ON memory_events (source)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_hash ON memory_events (content_hash)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_snapshots_run_node ON memory_snapshots (run_id, node_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_snapshots_window ON memory_snapshots (window_seq)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_semantic_chunks_scope ON semantic_chunks (org_scope)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_semantic_chunks_hash ON semantic_chunks (content_hash)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_semantic_chunks_usage ON semantic_chunks (usage_count)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kv_memory_scope ON kv_memory (scope)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kv_memory_expires ON kv_memory (expires_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_triples_h ON kg_triples (h)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_triples_r ON kg_triples (r)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_triples_t ON kg_triples (t)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_stats_run ON memory_stats (run_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_stats_type ON memory_stats (stat_type)")
 
             conn.commit()
 

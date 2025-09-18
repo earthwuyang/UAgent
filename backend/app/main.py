@@ -13,6 +13,7 @@ from .routers import (
     ai_generation,
     llm_monitor,
     repomaster,
+    memory,
 )
 
 
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_generation.router, prefix="/api")
     app.include_router(llm_monitor.router, prefix="/api")
     app.include_router(repomaster.router, prefix="/api")
+    app.include_router(memory.router)
     return app
 
 

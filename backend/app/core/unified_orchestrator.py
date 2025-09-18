@@ -914,7 +914,8 @@ class UnifiedOrchestrator:
                     "active_projects": len(self.ai_scientist.active_projects)
                 },
                 "repo_master": {
-                    "analyzed_repositories": len(self.repo_master.analyzed_repositories)
+                    "cache_dir": str(self.repo_master.cache_dir),
+                    "status": "available"
                 }
             },
             "workflows": {
