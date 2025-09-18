@@ -16,7 +16,7 @@ import json
 from .meta_agent import MetaAgent, Task, TaskType, TaskStatus, Agent, AgentRole
 from .agent_laboratory import AgentLaboratory, CollaborationPattern, CollaborationSession
 from .ai_scientist import AIScientist, ResearchProject, ResearchPhase
-from .repo_master import RepoMaster, Repository, AnalysisDepth
+from .repo_master import RepoMaster, AnalysisDepth
 from .hierarchical_agents import HierarchicalAgentCoordinator, AgentRole as HierarchicalAgentRole
 from ..utils.multi_modal_search import MultiModalSearchEngine
 

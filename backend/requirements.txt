@@ -15,3 +15,5 @@ beautifulsoup4>=4.12.2
 lxml>=4.9.3
 numpy>=1.25.2
 scipy>=1.11.4
+shutup
+humanize

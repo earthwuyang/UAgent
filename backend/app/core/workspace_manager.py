@@ -4,12 +4,13 @@ Handles workspace creation, virtual environments, and Docker containers
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import uuid
 import logging
 
@@ -143,43 +144,43 @@ Use this directory for all code generation and execution related to this task.
                 else:
                     files_found.append((f"generated_code_{i+1}.py", code.strip()))
 
+        written_paths = set()
+
         # Save files to appropriate directories
         for filename, content in files_found:
             try:
-                # Determine the appropriate directory
-                if filename.endswith(('.sh', '.bash')):
-                    target_dir = workspace / "scripts"
-                    target_dir.mkdir(exist_ok=True)
-                    saved_files["scripts"].append(filename)
-                elif filename.endswith(('.py', '.dockerfile', 'Dockerfile')):
-                    target_dir = workspace / "src"
-                    saved_files["code_files"].append(filename)
-                elif filename.endswith(('.yml', '.yaml', '.json', '.env', '.conf')):
-                    target_dir = workspace / "src"
-                    saved_files["configs"].append(filename)
-                elif filename.endswith(('.md', '.txt')):
-                    target_dir = workspace / "docs"
-                    saved_files["docs"].append(filename)
-                else:
-                    target_dir = workspace / "src"
-                    saved_files["code_files"].append(filename)
+                destination = self._determine_file_destination(workspace, filename, content)
+                if not destination:
+                    continue
 
-                # Clean filename
-                clean_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                target_dir = destination["directory"]
+                target_dir.mkdir(exist_ok=True)
+                clean_filename = destination["filename"]
+                category = destination["category"]
+
                 file_path = target_dir / clean_filename
+                if file_path in written_paths:
+                    base, ext = os.path.splitext(clean_filename)
+                    suffix = 2
+                    while (target_dir / f"{base}_{suffix}{ext}") in written_paths:
+                        suffix += 1
+                    file_path = target_dir / f"{base}_{suffix}{ext}"
+                    clean_filename = file_path.name
 
                 cleaned_content = self._clean_file_content(clean_filename, content)
 
-                # Write file with proper permissions
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(cleaned_content)
 
-                # Make shell scripts executable
-                if filename.endswith(('.sh', '.bash')):
+                if file_path.suffix in {'.sh', '.bash'} or clean_filename.endswith('.sh'):
                     import stat
                     file_path.chmod(file_path.stat().st_mode | stat.S_IEXEC)
 
                 logger.info(f"Saved file: {file_path}")
+                written_paths.add(file_path)
+
+                saved_files.setdefault(category, [])
+                saved_files[category].append(clean_filename)
 
             except Exception as e:
                 logger.error(f"Failed to save file {filename}: {e}")
@@ -187,6 +188,81 @@ Use this directory for all code generation and execution related to this task.
         # Generate comprehensive deployment instructions
         self._generate_deployment_instructions(workspace, saved_files, llm_output)
         return saved_files
+
+    def _determine_file_destination(self, workspace: Path, filename: str, content: str) -> Optional[Dict[str, Any]]:
+        normalized = content.strip()
+        if not normalized:
+            return None
+
+        lower_name = filename.lower()
+
+        def root_file(name: str, category: str) -> Dict[str, Any]:
+            return {"directory": workspace, "filename": name, "category": category}
+
+        def scripts_file(name: str) -> Dict[str, Any]:
+            return {"directory": workspace / "scripts", "filename": name, "category": "scripts"}
+
+        def src_file(name: str, category: str = "code_files") -> Dict[str, Any]:
+            return {"directory": workspace / "src", "filename": name, "category": category}
+
+        if lower_name.endswith(('.md', '.txt')) and normalized.startswith('#'):
+            return {"directory": workspace / "docs", "filename": re.sub(r'[<>:"/\\|?*]', '_', filename), "category": "docs"}
+
+        if normalized.lower().startswith('from '):
+            return root_file('Dockerfile', 'code_files')
+
+        if normalized.startswith('[mysqld]'):
+            return root_file('my.cnf', 'configs')
+
+        if normalized.lower().startswith('version:'):
+            return root_file('docker-compose.yml', 'configs')
+
+        if normalized.startswith('#!/bin/bash') or lower_name.endswith(('.sh', '.bash')):
+            script_name = self._infer_script_name(normalized, filename)
+            return scripts_file(script_name)
+
+        lowered = normalized.lower()
+        if lowered.startswith('sudo ') or lowered.startswith('docker ') or lowered.startswith('chmod '):
+            return None
+
+        if lower_name.endswith('.ini'):
+            return root_file('my.cnf', 'configs')
+
+        if lower_name.endswith('.sql') or 'create database' in lowered:
+            return src_file('init.sql', 'code_files')
+
+        if lower_name.endswith('.yml') or lower_name.endswith('.yaml'):
+            return root_file('docker-compose.yml', 'configs')
+
+        return src_file(re.sub(r'[<>:"/\\|?*]', '_', filename))
+
+    def _infer_script_name(self, content: str, original_name: str) -> str:
+        sanitized_original = re.sub(r'[<>:"/\\|?*]', '_', Path(original_name).name)
+        if sanitized_original.lower().endswith(('.sh', '.bash')) and not sanitized_original.lower().startswith('generated_code'):
+            return sanitized_original
+
+        meaningful_line = None
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith('#!'):
+                continue
+            meaningful_line = stripped.lstrip('#').strip()
+            if meaningful_line:
+                break
+
+        if meaningful_line:
+            slug = re.sub(r'[^a-zA-Z0-9]+', '-', meaningful_line.lower()).strip('-')
+            if not slug:
+                slug = 'script'
+            return f"{slug}.sh"
+
+        base = Path(original_name).stem
+        slug = re.sub(r'[^a-zA-Z0-9]+', '-', base.lower()).strip('-')
+        if not slug or slug == 'generated_code':
+            slug = 'script'
+        return f"{slug}.sh"
 
     def _clean_file_content(self, filename: str, raw_content: str) -> str:
         """Strip markdown fences and extraneous prose from generated files."""
@@ -205,6 +281,11 @@ Use this directory for all code generation and execution related to this task.
         if content.startswith('```') and content.endswith('```'):
             content = content.strip('`').strip()
 
+        lines = content.splitlines()
+        if lines and lines[0].strip().lower() in {"dockerfile", "yaml", "ini", "bash", "sh"}:
+            lines = lines[1:]
+            content = "\n".join(lines)
+
         # For shell scripts ensure shebang present
         if filename.endswith(('.sh', '.bash')) and not content.startswith('#!'):
             content = f"#!/bin/bash\n{content}"
@@ -215,82 +296,87 @@ Use this directory for all code generation and execution related to this task.
     def _generate_deployment_instructions(self, workspace: Path, saved_files: Dict[str, List[str]], llm_output: str):
         """Generate comprehensive deployment instructions"""
 
-        instructions = f"""# Deployment Instructions
+        timestamp = datetime.now().isoformat()
+        scripts = saved_files.get("scripts", [])
+        configs = saved_files.get("configs", [])
+        code_files = saved_files.get("code_files", [])
 
-Generated at: {datetime.now().isoformat()}
+        def has_script(name: str) -> bool:
+            return name in scripts
 
-## Files Generated
-"""
+        def script_cmd(name: str) -> str:
+            return f"./scripts/{name}" if has_script(name) else ""
 
-        for category, files in saved_files.items():
-            if files:
-                instructions += f"\n### {category.replace('_', ' ').title()}\n"
-                for file in files:
-                    instructions += f"- {file}\n"
+        instructions = ["# Deployment Guide", "", f"Generated at: {timestamp}"]
 
-        instructions += f"""
+        instructions.append("\n## Workspace Overview")
+        if code_files:
+            instructions.append("### Code & Configuration")
+            for file_name in sorted(set(code_files + configs)):
+                instructions.append(f"- `{file_name}`")
+        if scripts:
+            instructions.append("### Automation Scripts")
+            for script_name in sorted(set(scripts)):
+                instructions.append(f"- `{script_name}`")
 
-## Quick Start
+        instructions.append("\n## Prerequisites")
+        prerequisites = [
+            "Docker (Engine) installed and running",
+            "Docker Compose installed",
+            "Internet access to pull the `mysql:8.0` image",
+        ]
+        for item in prerequisites:
+            instructions.append(f"- {item}")
 
-### Prerequisites
-- Docker and Docker Compose installed
-- Python 3.8+ (if running locally)
-- Git (for version control)
+        instructions.append("\n## Setup Steps")
+        instructions.append("```bash")
+        instructions.append(f"cd {workspace.name}")
+        if scripts:
+            instructions.append("chmod +x scripts/*.sh")
 
-### Build and Deploy
-```bash
-# Navigate to the workspace
-cd {workspace.name}
+        if has_script('build.sh'):
+            instructions.append(script_cmd('build.sh'))
+        elif 'Dockerfile' in code_files:
+            instructions.append("docker build -t custom-mysql .")
 
-# Make scripts executable
-chmod +x scripts/*.sh
+        if has_script('run.sh'):
+            instructions.append(script_cmd('run.sh'))
+        elif 'docker-compose.yml' in configs:
+            instructions.append("docker-compose up -d")
 
-# Build the application
-./scripts/build.sh
+        if has_script('test.sh'):
+            instructions.append(script_cmd('test.sh'))
+        if has_script('deploy.sh'):
+            instructions.append(script_cmd('deploy.sh'))
 
-# Run tests (if available)
-./scripts/test.sh
+        instructions.append("```")
 
-# Deploy the application
-./scripts/deploy.sh
+        instructions.append("\n## Verification")
+        verify_steps = [
+            "docker ps --filter name=mysql",  # list running mysql
+            "docker logs -f mysql-container",  # tail logs
+            "docker exec -it mysql-container mysql -u root -prootpassword -e \"SHOW DATABASES;\"",
+        ]
+        instructions.append("```bash")
+        instructions.extend(verify_steps)
+        instructions.append("```")
 
-# Run locally for development
-./scripts/run.sh
-```
+        instructions.append("\n## Troubleshooting")
+        trouble = [
+            "If `docker-compose build` fails with missing `my.cnf`, ensure the file exists and rerun the validation node.",
+            "If the container exits immediately, check logs: `docker logs mysql-container`.",
+            "For port conflicts, update the port mapping in `docker-compose.yml`."
+        ]
+        for item in trouble:
+            instructions.append(f"- {item}")
 
-### Verification Steps
-1. Check that all containers are running: `docker ps`
-2. Check application logs: `docker logs <container_name>`
-3. Test endpoints: `curl http://localhost:<port>/health`
-4. Monitor resource usage: `docker stats`
+        instructions.append("\n---\n")
+        instructions.append("<details><summary>Complete LLM Output</summary>")
+        instructions.append("\n\n```")
+        instructions.append(llm_output)
+        instructions.append("```\n</details>")
 
-### Troubleshooting
-- If port conflicts occur, check running services: `netstat -tulpn`
-- For permission errors, ensure user is in docker group: `sudo usermod -aG docker $USER`
-- For build failures, check Dockerfile syntax and dependencies
-- For network issues, verify Docker network configuration
-
-### Generated Content Analysis
-"""
-
-        # Add analysis of what was generated
-        if "Dockerfile" in str(saved_files):
-            instructions += "✅ Docker containerization detected\n"
-        if any("compose" in f for f in saved_files.get("configs", [])):
-            instructions += "✅ Docker Compose orchestration detected\n"
-        if saved_files.get("scripts"):
-            instructions += "✅ Automated deployment scripts generated\n"
-
-        instructions += f"""
-### Complete LLM Output
-```
-{llm_output}
-```
-"""
-
-        # Save instructions
-        with open(workspace / "DEPLOYMENT.md", 'w') as f:
-            f.write(instructions)
+        (workspace / "DEPLOYMENT.md").write_text("\n".join(instructions), encoding="utf-8")
 
     def create_python_venv(self, workspace_path: str, python_version: str = "python3") -> Dict[str, str]:
         """Create a Python virtual environment in the workspace"""

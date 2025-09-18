@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 from .unified_orchestrator import (
@@ -20,6 +21,7 @@ from .unified_orchestrator import (
 )
 from .code_executor import CodeExecutor
 from .workspace_manager import WorkspaceManager
+from .llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,8 @@ class NodeExecutionEngine:
 
         if node.experiment_type == ExperimentType.COMPUTATIONAL:
             return await self._execute_computational(goal_id, node, telemetry_callback)
+        if node.experiment_type == ExperimentType.CODE_EXECUTION_TEST:
+            return await self._execute_code_validation(goal_id, node, telemetry_callback)
 
         config, inputs = self._build_workflow_payload(goal_id, node)
         if not config:
@@ -206,6 +210,285 @@ class NodeExecutionEngine:
             execution_time=code_result.execution_time,
             resources_used={"components": ["code_executor"]},
         )
+
+    async def _execute_code_validation(
+        self,
+        goal_id: str,
+        node: "ResearchNode",
+        telemetry_callback: Optional[Callable[[Dict[str, Any]], Union[None, Awaitable[None]]]] = None,
+    ) -> "ExperimentResult":
+        from .research_tree import ExperimentResult  # type: ignore
+        from .research_tree import ExperimentType  # type: ignore
+
+        workspace_path = None
+        if isinstance(node.experiment_config, dict):
+            workspace_path = node.experiment_config.get("workspace_path")
+        if not workspace_path or not Path(workspace_path).exists():
+            raise ValueError("workspace_path is required for CODE_EXECUTION_TEST nodes")
+
+        scripts_dir = Path(workspace_path) / "scripts"
+
+        async def emit(event: Dict[str, Any]):
+            if telemetry_callback:
+                try:
+                    result = telemetry_callback(event)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:  # pragma: no cover
+                    logger.debug(f"Telemetry callback failed for code validation {node.id}: {exc}")
+
+        await emit({
+            "event": "code_validation_started",
+            "goal_id": goal_id,
+            "node_id": node.id,
+            "workspace_path": workspace_path,
+        })
+
+        commands = []
+        for script_name in ["build.sh", "run.sh", "test.sh"]:
+            script_path = scripts_dir / script_name
+            if script_path.exists():
+                commands.append((script_name, script_path))
+
+        execution_outputs = []
+        success = True
+
+        for name, script in commands:
+            attempt = 0
+            while True:
+                result = await self._run_script(script, Path(workspace_path))
+                execution_outputs.append({
+                    "script": name,
+                    "attempt": attempt + 1,
+                    "return_code": result["return_code"],
+                    "stdout": result["stdout"],
+                    "stderr": result["stderr"],
+                })
+                await emit({
+                    "event": "code_validation_step",
+                    "goal_id": goal_id,
+                    "node_id": node.id,
+                    "script": name,
+                    "attempt": attempt + 1,
+                    "return_code": result["return_code"],
+                })
+
+                if result["return_code"] == 0:
+                    break
+
+                fix_applied = await self._attempt_auto_fix(
+                    name,
+                    result,
+                    Path(workspace_path),
+                    emit,
+                    goal_id,
+                    node.id,
+                )
+                if not fix_applied or attempt >= node.experiment_config.get("retries", 0):
+                    success = False
+                    break
+
+                attempt += 1
+
+            if not success:
+                break
+
+        confidence = 0.9 if success else 0.2
+        insights = []
+        if success:
+            insights.append("Docker image built and container validated successfully.")
+        else:
+            insights.append("Validation scripts reported failures; inspect stdout/stderr for details.")
+
+        metrics = {
+            "workspace_path": workspace_path,
+            "steps_executed": len(execution_outputs),
+            "success": success,
+        }
+
+        if success:
+            await self._cleanup_containers(Path(workspace_path))
+
+        await emit({
+            "event": "code_validation_completed",
+            "goal_id": goal_id,
+            "node_id": node.id,
+            "success": success,
+        })
+
+        return ExperimentResult(
+            experiment_id=node.id,
+            success=success,
+            confidence=confidence,
+            metrics=metrics,
+            data={"execution_outputs": execution_outputs},
+            insights=insights,
+            execution_time=sum(max(0.0, step.get("execution_time", 0.0)) for step in execution_outputs),
+            resources_used={"components": ["code_executor", "shell"]},
+        )
+
+    async def _run_script(self, script_path: Path, cwd: Path) -> Dict[str, Any]:
+        if not script_path.exists():
+            return {
+                "stdout": "",
+                "stderr": f"Script {script_path.name} not found",
+                "return_code": 1,
+                "execution_time": 0.0,
+            }
+
+        start = asyncio.get_running_loop().time()
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            str(script_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd),
+        )
+        stdout, stderr = await process.communicate()
+        end = asyncio.get_running_loop().time()
+        return {
+            "stdout": stdout.decode(),
+            "stderr": stderr.decode(),
+            "return_code": process.returncode,
+            "execution_time": max(0.0, end - start),
+        }
+
+    async def _attempt_auto_fix(
+        self,
+        script_name: str,
+        result: Dict[str, Any],
+        workspace: Path,
+        emit: Callable[[Dict[str, Any]], Awaitable[None]],
+        goal_id: str,
+        node_id: str,
+    ) -> bool:
+        stdout = result.get("stdout") or ""
+        stderr = result.get("stderr") or ""
+
+        workspace_listing = []
+        for path in workspace.rglob('*'):
+            if path.is_file():
+                try:
+                    rel = path.relative_to(workspace)
+                    workspace_listing.append(str(rel))
+                except Exception:
+                    continue
+            if len(workspace_listing) >= 50:
+                break
+
+        important_files = [
+            workspace / "docker-compose.yml",
+            workspace / "Dockerfile",
+            workspace / "my.cnf",
+            workspace / "init.sql",
+        ]
+        file_snippets = []
+        for file_path in important_files:
+            if file_path.exists() and file_path.is_file():
+                try:
+                    content = file_path.read_text(encoding="utf-8")
+                    snippet = content if len(content) < 1500 else content[:1500] + "\n..."
+                    file_snippets.append(f"```{file_path.name}\n{snippet}\n```")
+                except Exception:
+                    continue
+
+        prompt = f"""You are an expert DevOps engineer. A validation script failed while deploying a Dockerized MySQL setup.
+
+Script name: {script_name}
+Exit code: {result.get('return_code')}
+
+STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n\nWorkspace files (partial): {workspace_listing}
+
+Key file contents:\n{''.join(file_snippets) if file_snippets else 'N/A'}
+
+Analyze the failure and output JSON with:
+  "reason": short explanation
+  "files": list of {{"path": relative_path, "content": new_content}}
+  "commands": optional shell commands to run after updating files (e.g., clean up containers).
+  "notes": optional extra guidance for the next attempt.
+Ensure that any port conflicts or missing files are fixed by modifying the files accordingly.
+"""
+
+        try:
+            llm_response = await llm_client.generate_response(
+                prompt=prompt,
+                system_prompt="You are a precise DevOps fixer. Output ONLY JSON.",
+                temperature=0.1,
+                max_tokens=800,
+            )
+            if not llm_response.get("success"):
+                return False
+
+            import json
+            import re
+
+            content = llm_response.get("content", "")
+            json_match = re.search(r"\{[\s\S]*\}", content)
+            if not json_match:
+                return False
+
+            fix_spec = json.loads(json_match.group())
+        except Exception as exc:
+            logger.debug(f"LLM fix generation failed: {exc}")
+            return False
+
+        files = fix_spec.get("files", []) or []
+        commands = fix_spec.get("commands", []) or []
+        reason = fix_spec.get("reason", "auto_fix")
+        applied = False
+
+        for file_entry in files:
+            rel_path = file_entry.get("path")
+            content = file_entry.get("content")
+            if not rel_path or content is None:
+                continue
+            target_path = workspace / rel_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(content, encoding="utf-8")
+            applied = True
+
+        for command in commands:
+            if isinstance(command, str) and command.strip():
+                await self._run_command(command, workspace)
+                applied = True
+
+        if applied:
+            await emit({
+                "event": "code_validation_fix_applied",
+                "goal_id": goal_id,
+                "node_id": node_id,
+                "fix": reason,
+                "details": {"files": [f.get("path") for f in files], "commands": commands},
+            })
+
+        return applied
+
+    async def _cleanup_containers(self, workspace: Path) -> None:
+        compose_file = workspace / "docker-compose.yml"
+        if compose_file.exists():
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "docker-compose",
+                    "down",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(workspace),
+                )
+                await process.communicate()
+            except Exception:
+                pass
+
+    async def _run_command(self, command: str, workspace: Path) -> None:
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        except Exception as exc:
+            logger.debug(f"Command '{command}' failed during auto-fix: {exc}")
 
     def _build_workflow_payload(
         self,

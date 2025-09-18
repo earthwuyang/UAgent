@@ -46,6 +46,7 @@ except ImportError as e:
 
 from .llm_client import llm_client
 from .workspace_manager import WorkspaceManager
+from ..utils.multi_modal_search import MultiModalSearchEngine
 
 
 @dataclass
@@ -71,6 +72,7 @@ class CodeExecutor:
         self.max_debug_attempts = max_debug_attempts
         self.timeout = timeout
         self.workspace_manager = WorkspaceManager()
+        self.search_engine = MultiModalSearchEngine()
 
     async def execute_computational_task(self, task_description: str, config: Dict[str, Any], node_id: str = None) -> CodeExecutionResult:
         """
@@ -78,27 +80,55 @@ class CodeExecutor:
         """
         start_time = time.time()
 
-        # Create dedicated workspace for this task
-        workspace_metadata = self.workspace_manager.create_workspace(
-            task_name=task_description[:100],  # Limit length for filename
-            task_type="computational"
-        )
-        workspace_path = workspace_metadata["workspace_path"]
-        workspace = Path(workspace_path)
+        existing_workspace = config.get("workspace_path") if isinstance(config, dict) else None
+
+        if existing_workspace and Path(existing_workspace).exists():
+            workspace_path = existing_workspace
+            workspace = Path(existing_workspace)
+            workspace_metadata = {
+                "workspace_name": workspace.name,
+                "workspace_path": str(workspace.resolve()),
+            }
+            for subdir in ["src", "scripts", "tests", "docs", "data", "output", "logs"]:
+                (workspace / subdir).mkdir(exist_ok=True)
+        else:
+            # Create dedicated workspace for this task
+            workspace_metadata = self.workspace_manager.create_workspace(
+                task_name=task_description[:100],  # Limit length for filename
+                task_type="computational"
+            )
+            workspace_path = workspace_metadata["workspace_path"]
+            workspace = Path(workspace_path)
 
         logger.info(f"Created workspace for task: {workspace_path}")
+
+        assessment = await self._assess_task_feasibility(task_description, config)
+        supporting_materials = None
+        knowledge_metrics: Dict[str, Any] = {
+            "llm_confident": assessment.get("confident"),
+            "confidence_notes": assessment.get("notes"),
+        }
+
+        if not assessment.get("confident") or assessment.get("recommend_web_research"):
+            supporting_materials = await self._gather_supporting_materials(task_description, workspace)
+            knowledge_metrics["supporting_materials"] = supporting_materials.get("sources", []) if supporting_materials else []
+            knowledge_metrics["used_supporting_materials"] = True
+        else:
+            knowledge_metrics["used_supporting_materials"] = False
 
         if not INTERPRETER_AVAILABLE:
             # Fallback to LLM-only code generation without execution
             logger.warning("Interpreter not available, falling back to comprehensive LLM generation")
-            return await self._fallback_comprehensive_generation(task_description, config, start_time, node_id, workspace_path)
+            result = await self._fallback_comprehensive_generation(task_description, config, start_time, node_id, workspace_path, supporting_materials)
+            result.metrics.setdefault("knowledge_assessment", knowledge_metrics)
+            return result
 
         # Create interpreter in the workspace
         interpreter = Interpreter(working_dir=workspace, timeout=self.timeout)
 
         try:
             # Generate initial code and parse comprehensive output
-            llm_output = await self._generate_comprehensive_solution(task_description, config, node_id)
+            llm_output = await self._generate_comprehensive_solution(task_description, config, node_id, supporting_materials)
 
             # Parse and save all generated files
             saved_files = self.workspace_manager.parse_and_save_comprehensive_output(workspace_path, llm_output)
@@ -160,6 +190,7 @@ class CodeExecutor:
                 workspace_path=str(workspace),
                 saved_files=saved_files if isinstance(saved_files, dict) else {}
             )
+            metrics["knowledge_assessment"] = knowledge_metrics
 
             return CodeExecutionResult(
                 success=success,
@@ -363,11 +394,16 @@ class CodeExecutor:
         """Generate an improved version of the code"""
         return await self._debug_and_fix_code(code, execution_result, task_description)
 
-    async def _generate_comprehensive_solution(self, task_description: str, config: Dict[str, Any], node_id: str = None) -> str:
+    async def _generate_comprehensive_solution(self, task_description: str, config: Dict[str, Any], node_id: str = None, supporting_materials: Optional[Dict[str, Any]] = None) -> str:
         """Generate comprehensive solution with all files and instructions"""
+        supplemental = ""
+        if supporting_materials and supporting_materials.get("summary"):
+            supplemental = f"\n\n## Supporting References\n{supporting_materials['summary']}\n"
+
         llm_response = await llm_client.generate_response(
             prompt=f"""Task: {task_description}
 Configuration: {config}
+Supporting Context:{supplemental}
 
 Generate a COMPLETE solution including:
 
@@ -415,11 +451,11 @@ Generate production-ready, complete solutions, not just basic examples.""",
         else:
             return f"# Failed to generate comprehensive solution\n# Error: {llm_response.get('error', 'Unknown error')}"
 
-    async def _fallback_comprehensive_generation(self, task_description: str, config: Dict[str, Any], start_time: float, node_id: str = None, workspace_path: str = None) -> CodeExecutionResult:
+    async def _fallback_comprehensive_generation(self, task_description: str, config: Dict[str, Any], start_time: float, node_id: str = None, workspace_path: str = None, supporting_materials: Optional[Dict[str, Any]] = None) -> CodeExecutionResult:
         """Enhanced fallback method that generates comprehensive deployment setup"""
         try:
             # Generate comprehensive solution
-            llm_output = await self._generate_comprehensive_solution(task_description, config, node_id)
+            llm_output = await self._generate_comprehensive_solution(task_description, config, node_id, supporting_materials)
 
             # Parse and save all generated files
             if workspace_path:
@@ -475,6 +511,72 @@ Generate production-ready, complete solutions, not just basic examples.""",
                 insights=[f"Comprehensive generation failed: {str(e)}"],
                 metrics={'error': str(e), 'execution_time': execution_time}
             )
+
+    async def _assess_task_feasibility(self, task_description: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = f"""You are an experienced DevOps engineer.
+Task: {task_description}
+Configuration: {config}
+
+Assess whether your current knowledge is sufficient to implement this task accurately without consulting external sources.
+Respond in JSON with keys:
+  confident: boolean
+  confidence_reason: short string
+  recommend_web_research: boolean (true if additional references or updated docs are needed)
+"""
+        try:
+            response = await llm_client.generate_response(
+                prompt=prompt,
+                system_prompt="You provide concise JSON assessments.",
+                temperature=0.0,
+                max_tokens=200,
+            )
+            if response.get("success"):
+                import json
+                import re
+                content = response.get("content", "")
+                json_match = re.search(r"\{[\s\S]*\}", content)
+                if json_match:
+                    data = json.loads(json_match.group())
+                    return {
+                        "confident": bool(data.get("confident", False)),
+                        "notes": data.get("confidence_reason"),
+                        "recommend_web_research": bool(data.get("recommend_web_research", False)),
+                    }
+        except Exception as exc:
+            logger.debug(f"LLM knowledge assessment failed: {exc}")
+        return {"confident": False, "notes": "Assessment unavailable", "recommend_web_research": True}
+
+    async def _gather_supporting_materials(self, task_description: str, workspace: Path) -> Optional[Dict[str, Any]]:
+        try:
+            search_results = await self.search_engine.unified_search(
+                query=f"{task_description} Docker deployment",
+                search_types=["web", "code"],
+                limit=5,
+            )
+            sources = []
+            summary_lines = []
+            for category, items in search_results.items():
+                if not isinstance(items, list):
+                    continue
+                for item in items[:3]:
+                    title = item.get("title") or item.get("headline")
+                    url = item.get("url") or item.get("link")
+                    snippet = item.get("snippet") or item.get("summary")
+                    if title and url:
+                        sources.append({"title": title, "url": url, "snippet": snippet})
+                        summary_lines.append(f"- [{title}]({url}) — {snippet}")
+
+            if sources:
+                docs_dir = workspace / "docs"
+                docs_dir.mkdir(exist_ok=True)
+                support_file = docs_dir / "SUPPORTING_REFERENCES.md"
+                support_file.write_text(
+                    "# Supporting References\n\n" + "\n".join(summary_lines), encoding="utf-8"
+                )
+                return {"sources": sources, "summary": "\n".join(summary_lines)}
+        except Exception as exc:
+            logger.debug(f"Failed gathering supporting materials: {exc}")
+        return None
 
     def _extract_code_blocks(self, content: str) -> List[str]:
         """Extract Python code blocks from markdown-formatted content"""

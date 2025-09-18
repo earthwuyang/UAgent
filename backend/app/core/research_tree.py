@@ -475,6 +475,8 @@ class HierarchicalResearchSystem:
                 max_children = 3 if n.node_type != ResearchNodeType.ROOT else 5
             if len(n.children) >= max_children:
                 return False
+            if n.context.get("fully_expanded"):
+                return False
             # For node types whose follow-ups depend on results, require results
             needs_result = n.node_type in {
                 ResearchNodeType.EXPERIMENT,
@@ -556,6 +558,9 @@ class HierarchicalResearchSystem:
                 tree[child_id] = child_node
                 node.children.append(child_id)
                 new_node_ids.append(child_id)
+
+            if not new_node_ids and node.node_type == ResearchNodeType.SYNTHESIS:
+                node.context["fully_expanded"] = True
 
             return new_node_ids
 
@@ -1137,6 +1142,13 @@ Return JSON format:
 
         experiments = []
         best_result = max(node.results, key=lambda r: r.confidence)
+        workspace_path = None
+        repo_path_hint = None
+        if hasattr(best_result, 'metrics') and isinstance(best_result.metrics, dict):
+            workspace_path = best_result.metrics.get('workspace_path')
+            repo_path_hint = best_result.metrics.get('repository_path') or workspace_path
+        if hasattr(best_result, 'data') and isinstance(best_result.data, dict):
+            repo_path_hint = best_result.data.get('repository_path') or best_result.data.get('repo_path') or repo_path_hint
 
         if best_result.success and best_result.confidence > 0.7:
             # Validation experiment
@@ -1148,7 +1160,8 @@ Return JSON format:
                 "experiment_config": {
                     "baseline_results": best_result.data,
                     "validation_method": "cross_validation",
-                    "replication_count": 5
+                    "replication_count": 5,
+                    "workspace_path": workspace_path,
                 },
                 "priority": 0.9
             })
@@ -1165,14 +1178,13 @@ Return JSON format:
                     "search_space": "hyperparameter_grid",
                     "max_iterations": 8,
                     "max_debug_attempts": 5,
-                    "timeout": 120
+                    "timeout": 120,
+                    "workspace_path": workspace_path,
                 },
                 "priority": 0.8
             })
 
-            repo_path = None
-            if isinstance(best_result.data, dict):
-                repo_path = best_result.data.get('repository_path') or best_result.data.get('repo_path')
+            repo_path = repo_path_hint
             if not repo_path and isinstance(node.experiment_config, dict):
                 repo_path = node.experiment_config.get('repository_path') or node.experiment_config.get('repo_path')
 
@@ -1186,7 +1198,8 @@ Return JSON format:
                         "repository_path": repo_path,
                         "timeout": 300,
                         "retries": 2,
-                        "reasoning": "Validate results through automated execution"
+                        "reasoning": "Validate results through automated execution",
+                        "workspace_path": workspace_path,
                     },
                     "priority": 0.75
                 })
@@ -1200,7 +1213,8 @@ Return JSON format:
                     "requirements": best_result.insights if isinstance(best_result.insights, list) else [],
                     "team_size": 4,
                     "specialization_level": "high",
-                    "reasoning": "Leverage AgentLab to expand on promising findings"
+                    "reasoning": "Leverage AgentLab to expand on promising findings",
+                    "workspace_path": workspace_path,
                 },
                 "priority": 0.78
             })
@@ -1220,7 +1234,8 @@ Return JSON format:
                     "domain": "AI/ML Research",
                     "comprehensive": True,
                     "agent_coordination": "hierarchical",
-                    "build_on_parent": True
+                    "build_on_parent": True,
+                    "workspace_path": workspace_path,
                 },
                 "priority": 0.95
             })
@@ -1361,8 +1376,9 @@ Return JSON format:
             execution_time = result.execution_time or (datetime.now() - start_time).total_seconds()
             result.execution_time = execution_time
 
-            # Log success
-            self._log_execution(node, "INFO", f"Experiment completed successfully in {execution_time:.2f}s", {
+            message = "Experiment completed successfully" if result.success else "Experiment failed"
+            level = "INFO" if result.success else "WARNING"
+            self._log_execution(node, level, f"{message} in {execution_time:.2f}s", {
                 "success": result.success,
                 "confidence": result.confidence,
                 "metrics": result.metrics,
