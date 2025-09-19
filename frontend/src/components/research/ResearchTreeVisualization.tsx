@@ -298,6 +298,40 @@ const DetailedSidebar: React.FC<{
           </div>
         )}
 
+        {/* Execution Details */}
+        {selectedNode.metadata?.details?.code_blocks?.length ? (
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-gray-600">Execution Details</label>
+            <div className="space-y-3">
+              {selectedNode.metadata.details.code_blocks.map((block: any, idx: number) => (
+                <div key={idx} className="border rounded bg-white shadow-sm">
+                  <div className="flex items-center justify-between px-3 py-2 bg-gray-100 border-b">
+                    <span className="text-xs font-semibold text-gray-600">
+                      Code Block {idx + 1} ({block.language || 'unknown'})
+                    </span>
+                  </div>
+                  <pre className="text-xs p-3 overflow-auto max-h-48 bg-gray-900 text-gray-100">
+{block.code}
+                  </pre>
+                </div>
+              ))}
+              {selectedNode.metadata.details.exit_code !== undefined && (
+                <div className="text-xs text-gray-600">
+                  Exit Code: {selectedNode.metadata.details.exit_code}
+                </div>
+              )}
+              {selectedNode.metadata.details.output && (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-600 mb-1">Execution Output</label>
+                  <pre className="text-xs p-3 bg-gray-50 border rounded max-h-48 overflow-auto">
+{selectedNode.metadata.details.output}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+
         {/* Related Events */}
         <div>
           <label className="text-sm font-medium text-gray-600">Recent Events ({nodeEvents.length})</label>
@@ -417,40 +451,48 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
     const nodeId = metadata.node_id || `${sessionKey}-${engine}-${event.data.phase || 'step'}-${index}`
     const parentId = metadata.parent_id || sessionRoots.get(engineKey)!
     const nodeType = metadata.node_type === 'result' ? 'result' : 'step'
-    const status = event.event_type === 'research_completed'
-      ? 'completed'
-      : event.event_type === 'research_error'
-      ? 'error'
-      : 'running'
+    const completedByProgress = (event.progress_percentage ?? 0) >= 100
+    let status: ResearchNode['status'] = (metadata.status as ResearchNode['status']) || (
+      event.event_type === 'research_completed'
+        ? 'completed'
+        : event.event_type === 'research_error'
+        ? 'error'
+        : completedByProgress
+        ? 'completed'
+        : 'running'
+    )
 
     const existingNode = nodeMap.get(nodeId)
     if (existingNode) {
-      existingNode.status = status
-      existingNode.progress = event.progress_percentage ?? existingNode.progress
-      existingNode.timestamp = event.timestamp
-      existingNode.metadata = { ...existingNode.metadata, ...metadata }
-      if (status === 'completed' && existingNode.type !== 'engine') {
-        existingNode.status = 'completed'
-      }
+        existingNode.status = status
+        existingNode.progress = event.progress_percentage ?? existingNode.progress
+        existingNode.timestamp = event.timestamp
+        existingNode.metadata = { ...existingNode.metadata, ...metadata }
+        if (status === 'completed') {
+          existingNode.progress = existingNode.progress ?? 100
+        }
+        if (status === 'completed' && existingNode.type !== 'engine') {
+            existingNode.status = 'completed'
+        }
     } else {
-      const parentNode = nodeMap.get(parentId)
-      const title = metadata.title || event.message || event.event_type.replace('_', ' ').toUpperCase()
-      const description = metadata.description || (event.data.phase ? `Phase: ${event.data.phase}` : undefined)
+        const parentNode = nodeMap.get(parentId)
+        const title = metadata.title || event.message || event.event_type.replace('_', ' ').toUpperCase()
+        const description = metadata.description || (event.data.phase ? `Phase: ${event.data.phase}` : undefined)
 
-      const node: ResearchNode = {
-        id: nodeId,
-        type: nodeType,
-        engine,
-        phase: metadata.phase || event.data.phase || 'processing',
-        status,
-        title,
-        description,
-        timestamp: event.timestamp,
-        progress: event.progress_percentage,
-        metadata,
-        parent_id: parentId,
-        children: [],
-      }
+        const node: ResearchNode = {
+            id: nodeId,
+            type: nodeType,
+            engine,
+            phase: metadata.phase || event.data.phase || 'processing',
+            status: nodeType === 'result' && status === 'running' ? 'completed' : status,
+            title,
+            description,
+            timestamp: event.timestamp,
+            progress: event.progress_percentage,
+            metadata,
+            parent_id: parentId,
+            children: [],
+        }
 
       nodeMap.set(nodeId, node)
 
@@ -463,12 +505,20 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
     }
 
     if (event.event_type === 'research_completed') {
-      const rootNode = nodeMap.get(sessionRoots.get(engineKey)!)
+      const rootNode = sessionRoots.get(engineKey) ? nodeMap.get(sessionRoots.get(engineKey)!) : undefined
       if (rootNode) {
         rootNode.status = 'completed'
         rootNode.progress = 100
         rootNode.timestamp = event.timestamp
       }
+      Array.from(nodeMap.values())
+        .filter((n) => n.engine === engine)
+        .forEach((node) => {
+          if (node.id !== rootNode?.id && node.status === 'running') {
+            node.status = 'completed'
+            node.progress = node.progress ?? 100
+          }
+        })
     }
   })
 
@@ -583,6 +633,12 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
 
   // Use provided events or fetch from sessionId
   const events = propEvents || internalEvents;
+
+  useEffect(() => {
+    if (!propEvents) {
+      setInternalEvents([])
+    }
+  }, [sessionId, propEvents])
 
   // Fetch events from WebSocket if sessionId is provided and no events are passed
   useEffect(() => {

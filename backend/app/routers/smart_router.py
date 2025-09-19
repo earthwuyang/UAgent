@@ -162,16 +162,25 @@ async def route_and_execute(request: RouterRequest):
             await progress_tracker.log_research_completed(
                 session_id=session_id,
                 engine="deep_research",
-                result_summary=(
-                    execution_result.summary[:200] + "..."
-                    if len(execution_result.summary) > 200
-                    else execution_result.summary
-                ),
+                result_summary=execution_result.summary,
                 metadata={
                     "sources_count": len(execution_result.sources),
                     "confidence_score": execution_result.confidence_score
                 }
             )
+
+            report_markdown = """# Deep Research Report\n\n"""
+            report_markdown += f"## Summary\n{execution_result.summary}\n\n"
+            if execution_result.key_findings:
+                report_markdown += "## Key Findings\n" + "\n".join(
+                    f"- {finding}" for finding in execution_result.key_findings
+                ) + "\n\n"
+            if execution_result.analysis:
+                report_markdown += f"## Analysis\n{execution_result.analysis}\n\n"
+            if execution_result.recommendations:
+                report_markdown += "## Recommendations\n" + "\n".join(
+                    f"- {rec}" for rec in execution_result.recommendations
+                ) + "\n\n"
 
             return {
                 "engine_used": "deep_research",
@@ -179,11 +188,10 @@ async def route_and_execute(request: RouterRequest):
                 "sources_count": len(execution_result.sources),
                 "key_findings": execution_result.key_findings,
                 "confidence_score": execution_result.confidence_score,
-                "summary": (
-                    execution_result.summary[:500] + "..."
-                    if len(execution_result.summary) > 500
-                    else execution_result.summary
-                )
+                "summary": execution_result.summary,
+                "analysis": execution_result.analysis,
+                "recommendations": execution_result.recommendations,
+                "report_markdown": report_markdown
             }
 
         async def execute_code() -> Dict[str, Any]:
@@ -195,7 +203,8 @@ async def route_and_execute(request: RouterRequest):
             try:
                 execution_result = await engine.research_code(
                     request.user_request,
-                    session_id=session_id
+                    session_id=session_id,
+                    workflow_plan=classification_result.workflow_plan
                 )
             finally:
                 engine.llm_client = original_llm_client
@@ -214,6 +223,24 @@ async def route_and_execute(request: RouterRequest):
                 }
             )
 
+            report_markdown = getattr(execution_result, "report_markdown", "") or """# Code Research Report\n\n"""
+            if not getattr(execution_result, "report_markdown", None):
+                report_markdown += f"## Summary\nIdentified {len(execution_result.repositories)} repositories with {len(execution_result.best_practices)} best practices.\n\n"
+                if execution_result.repositories:
+                    report_markdown += "## Repositories\n" + "\n".join(
+                        f"- **{repo.name}** ({repo.language}) — {repo.description}" for repo in execution_result.repositories[:10]
+                    ) + "\n\n"
+                if execution_result.best_practices:
+                    report_markdown += "## Best Practices\n" + "\n".join(
+                        f"- {pattern.name}: {pattern.description}" for pattern in execution_result.best_practices[:10]
+                    ) + "\n\n"
+                if execution_result.integration_guide:
+                    report_markdown += "## Integration Guide\n" + execution_result.integration_guide + "\n\n"
+                if execution_result.recommendations:
+                    report_markdown += "## Recommendations\n" + "\n".join(
+                        f"- {rec}" for rec in execution_result.recommendations
+                    ) + "\n\n"
+
             return {
                 "engine_used": "code_research",
                 "query": execution_result.query,
@@ -221,12 +248,11 @@ async def route_and_execute(request: RouterRequest):
                 "languages_found": list({repo.language for repo in execution_result.repositories}),
                 "best_practices_count": len(execution_result.best_practices),
                 "confidence_score": execution_result.confidence_score,
-                "integration_guide_preview": (
-                    execution_result.integration_guide[:500] + "..."
-                    if len(execution_result.integration_guide) > 500
-                    else execution_result.integration_guide
-                ),
-                "recommendations_count": len(execution_result.recommendations)
+                "integration_guide": execution_result.integration_guide,
+                "analysis": [analysis.summary for analysis in execution_result.analysis],
+                "recommendations": execution_result.recommendations,
+                "report_markdown": report_markdown,
+                "repomaster_metadata": getattr(execution_result, "repomaster_metadata", None)
             }
 
         async def execute_scientific() -> Dict[str, Any]:
@@ -270,6 +296,29 @@ async def route_and_execute(request: RouterRequest):
                 else str(execution_result.synthesis)
             )
 
+            report_markdown = """# Scientific Research Report\n\n"""
+            report_markdown += f"## Research Question\n{execution_result.query}\n\n"
+            if execution_result.hypotheses:
+                report_markdown += "## Hypotheses\n" + "\n".join(
+                    f"- {hyp.statement}" for hyp in execution_result.hypotheses[:10]
+                ) + "\n\n"
+            if execution_result.experiments:
+                report_markdown += "## Experiments\n" + "\n".join(
+                    f"- {exp.name}: {exp.description}" for exp in execution_result.experiments[:10]
+                ) + "\n\n"
+            if summary_value:
+                report_markdown += f"## Synthesis\n{summary_value}\n\n"
+            if isinstance(execution_result.synthesis, dict):
+                conclusions = execution_result.synthesis.get("conclusions")
+                if conclusions:
+                    report_markdown += "## Conclusions\n" + "\n".join(
+                        f"- {conclusion}" for conclusion in conclusions
+                    ) + "\n\n"
+            if execution_result.recommendations:
+                report_markdown += "## Recommendations\n" + "\n".join(
+                    f"- {rec}" for rec in execution_result.recommendations
+                ) + "\n\n"
+
             return {
                 "engine_used": "scientific_research",
                 "query": execution_result.query,
@@ -279,7 +328,10 @@ async def route_and_execute(request: RouterRequest):
                 "confidence_score": execution_result.confidence_score,
                 "has_literature_review": execution_result.literature_review is not None,
                 "has_code_analysis": execution_result.code_analysis is not None,
-                "summary": summary_value[:500] + "..." if len(summary_value) > 500 else summary_value
+                "summary": summary_value,
+                "synthesis": execution_result.synthesis,
+                "recommendations": execution_result.recommendations,
+                "report_markdown": report_markdown
             }
 
         async def execute_research() -> None:

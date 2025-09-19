@@ -186,6 +186,9 @@ Brief description and purpose
 - **Format Code**: `black app/`
 - **Start Backend**: `uvicorn app.main:app --reload --port 8000`
 - **Start Frontend**: `cd frontend && npm run dev`
+- **Headless Research Monitor**: `python -m backend.scripts.cli_research --query "<prompt>"`
+- **Attach to Existing Session**: `python -m backend.scripts.cli_research --session <session_id>`
+- **Install Playwright Chromium (RepoMaster search)**: `playwright install --with-deps chromium`
 
 ## Emergency Protocols
 

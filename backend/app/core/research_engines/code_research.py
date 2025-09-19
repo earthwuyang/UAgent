@@ -1,15 +1,19 @@
 """Code Research Engine - Repository analysis and code understanding"""
 
 import asyncio
+import json
 import logging
+import os
 import re
 import uuid
-from typing import Dict, List, Any, Optional
+from pathlib import Path
+from typing import Any, Awaitable, Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
 from ..llm_client import LLMClient
-from ..websocket_manager import progress_tracker
+from ..websocket_manager import progress_tracker, websocket_manager
+from ...integrations.repomaster_bridge import RepoMasterBridge, RepoMasterBridgeResult
 
 
 @dataclass
@@ -302,6 +306,8 @@ class CodeResearchEngine:
         self.pattern_engine = CodePatternEngine(llm_client)
         self._session_phase_nodes: Dict[str, Dict[str, str]] = {}
         self._session_root_nodes: Dict[str, str] = {}
+        self._repomaster_bridge: Optional[RepoMasterBridge] = None
+        self._use_repo_master_default = bool(self.config.get("use_repo_master", True))
 
     def _get_root_node_id(self, session_id: Optional[str]) -> str:
         if not session_id:
@@ -362,12 +368,341 @@ class CodeResearchEngine:
 
         return node_id
 
+    def _get_repomaster_bridge(self) -> RepoMasterBridge:
+        if self._repomaster_bridge is None:
+            self._repomaster_bridge = RepoMasterBridge()
+        return self._repomaster_bridge
+
+    def _should_use_repomaster(self, workflow_plan: Optional[Dict[str, Any]]) -> bool:
+        if workflow_plan and "use_repo_master" in workflow_plan:
+            return bool(workflow_plan["use_repo_master"])
+        return self._use_repo_master_default
+
+    async def _handle_repomaster_progress(self, session_id: str, event: Dict[str, Any]) -> None:
+        if not session_id:
+            return
+
+        event_type = event.get("event")
+        metadata = {k: v for k, v in event.items() if k not in {"event", "session_id"}}
+
+        if event_type == "task_started":
+            await self._log_progress(
+                session_id,
+                phase="repomaster_initializing",
+                progress=5.0,
+                message="RepoMaster initializing repository workflow",
+                metadata=metadata,
+            )
+        elif event_type == "repo_search_results":
+            repositories = metadata.get("repositories", [])
+            repo_count = len(repositories)
+            node_id = await self._log_progress(
+                session_id,
+                phase="discovering_repositories",
+                progress=35.0,
+                message=f"RepoMaster identified {repo_count} candidate repositories",
+                metadata={"repositories": repositories},
+                parent_phase="repomaster_initializing",
+            )
+            await self._log_repomaster_repositories(session_id, repositories, node_id)
+        elif event_type == "repository_task_started":
+            await self._log_progress(
+                session_id,
+                phase="repomaster_execution",
+                progress=65.0,
+                message="RepoMaster executing selected repository",
+                metadata=metadata,
+                parent_phase="discovering_repositories",
+            )
+        elif event_type == "repository_task_completed":
+            await self._log_progress(
+                session_id,
+                phase="repomaster_execution_complete",
+                progress=90.0,
+                message="RepoMaster repository execution completed",
+                metadata=metadata,
+                parent_phase="repomaster_execution",
+            )
+        elif event_type == "final_answer_extracted":
+            await self._log_progress(
+                session_id,
+                phase="synthesizing_guidance",
+                progress=96.0,
+                message="RepoMaster synthesizing final findings",
+                metadata=metadata,
+            )
+        elif event_type == "task_completed":
+            await self._log_progress(
+                session_id,
+                phase="repomaster_completed",
+                progress=100.0,
+                message="RepoMaster workflow completed",
+                metadata=metadata,
+            )
+        elif event_type == "repo_execution_step":
+            phase_nodes = self._session_phase_nodes.get(session_id, {})
+            parent_id = metadata.get("parent_id")
+            if not parent_id:
+                parent_id = phase_nodes.get("repomaster_execution")
+            code_blocks = metadata.get("details", {}).get("code_blocks", [])
+            code_preview = code_blocks[0]["code"].strip() if code_blocks else "Repository execution step"
+            node_id = metadata.get("node_id") or f"{session_id}-code-repomaster_exec_step-{uuid.uuid4().hex[:6]}"
+            exec_details = metadata.get("details", {}) or {}
+            exec_metadata = {
+                "title": code_preview.split("\n", 1)[0][:120],
+                "code_blocks": code_blocks,
+                "exit_code": exec_details.get("exit_code"),
+                "output": exec_details.get("output"),
+                "parent_id": parent_id,
+                "node_id": node_id,
+                "node_type": "result",
+                "phase": "repomaster_execution_step",
+                "details": exec_details,
+            }
+            await self._log_progress(
+                session_id,
+                phase=f"repomaster_execution_step_{uuid.uuid4().hex[:4]}",
+                progress=78.0,
+                message=exec_metadata["title"],
+                metadata=exec_metadata,
+                parent_phase="repomaster_execution",
+                node_type="result",
+            )
+        elif event_type in {"repo_tool_call", "repo_tool_result"}:
+            phase_nodes = self._session_phase_nodes.get(session_id, {})
+            parent_id = phase_nodes.get("repomaster_execution") or self._get_root_node_id(session_id)
+            tool_name = metadata.get("tool") or "tool"
+            query = metadata.get("query") or ""
+            result_preview = metadata.get("result")
+            if isinstance(result_preview, (list, dict)):
+                try:
+                    result_preview = json.dumps(result_preview)[:200]
+                except Exception:
+                    result_preview = str(result_preview)[:200]
+            elif result_preview:
+                result_preview = str(result_preview)[:200]
+            message = f"{tool_name} | {query[:80]}" if query else tool_name
+            node_id = f"{session_id}-code-repomaster_{tool_name}_{uuid.uuid4().hex[:6]}"
+            await self._log_progress(
+                session_id,
+                phase=f"repomaster_{tool_name}_{event_type}",
+                progress=50.0 if event_type == "repo_tool_call" else 60.0,
+                message=message,
+                metadata={
+                    "node_id": node_id,
+                    "parent_id": parent_id,
+                    "node_type": "step" if event_type == "repo_tool_call" else "result",
+                    "phase": f"repomaster_{tool_name}",
+                    "tool": tool_name,
+                    "query": query,
+                    "result": metadata.get("result"),
+                },
+                parent_phase="repomaster_execution",
+                node_type="step" if event_type == "repo_tool_call" else "result",
+            )
+
+    async def _log_repomaster_repositories(
+        self,
+        session_id: str,
+        repositories: List[Dict[str, Any]],
+        parent_node_id: Optional[str],
+    ) -> None:
+        if not session_id or not repositories:
+            return
+
+        for idx, repo in enumerate(repositories[:10]):
+            name = repo.get("repo_name") or repo.get("name") or f"repository_{idx + 1}"
+            description = repo.get("repo_description") or repo.get("description") or "Candidate repository"
+            url = repo.get("repo_url") or repo.get("url")
+            metadata = {
+                "title": name,
+                "description": description,
+                "url": url,
+                "rank": idx + 1,
+                "parent_id": parent_node_id,
+                "node_type": "result",
+            }
+            await self._log_progress(
+                session_id,
+                phase=f"repomaster_repo_{idx + 1}",
+                progress=40.0,
+                message=name,
+                metadata=metadata,
+                parent_phase="discovering_repositories",
+                node_type="result",
+            )
+
+    async def _handle_repomaster_llm(self, session_id: str, payload: Dict[str, Any]) -> None:
+        if not session_id:
+            return
+
+        message = payload.get("message") or {}
+        content = message.get("content")
+        if not content:
+            return
+
+        role = message.get("role", "assistant")
+        timestamp = datetime.utcnow().isoformat()
+        event_type = "llm_prompt_complete" if role == "assistant" else "llm_prompt_start"
+        event_payload: Dict[str, Any] = {
+            "type": event_type,
+            "session_id": session_id,
+            "timestamp": timestamp,
+            "engine": payload.get("llm_config", {}).get("model", "repomaster"),
+        }
+        if event_type == "llm_prompt_complete":
+            event_payload["response"] = content
+        else:
+            event_payload["prompt"] = content
+
+        websocket_manager.store_llm_event(session_id, event_payload)
+
+        connections = websocket_manager.llm_stream_connections.get(session_id)
+        if connections:
+            await websocket_manager._broadcast_to_connections(connections, event_payload)
+
+    def _extract_repositories_from_events(self, events: List[Dict[str, Any]]) -> List[CodeRepository]:
+        repo_map: Dict[str, CodeRepository] = {}
+        for event in events:
+            if event.get("event") != "repo_search_results":
+                continue
+            for repo_data in event.get("repositories", []) or []:
+                name = repo_data.get("repo_name") or repo_data.get("name")
+                if not name:
+                    continue
+                url = repo_data.get("repo_url") or repo_data.get("url", "")
+                description = repo_data.get("repo_description") or repo_data.get("description", "Candidate repository")
+                language = (
+                    repo_data.get("language")
+                    or repo_data.get("repo_language")
+                    or repo_data.get("primary_language")
+                    or "Unknown"
+                )
+                try:
+                    stars = int(repo_data.get("stars") or repo_data.get("stargazers_count") or 0)
+                except (TypeError, ValueError):
+                    stars = 0
+                try:
+                    forks = int(repo_data.get("forks") or repo_data.get("forks_count") or 0)
+                except (TypeError, ValueError):
+                    forks = 0
+                topics_raw = repo_data.get("topics") or []
+                if isinstance(topics_raw, str):
+                    topics = [topic.strip() for topic in topics_raw.split(",") if topic.strip()]
+                elif isinstance(topics_raw, list):
+                    topics = [str(topic) for topic in topics_raw]
+                else:
+                    topics = []
+                last_updated = repo_data.get("updated_at") or repo_data.get("last_updated") or ""
+                repo_map[name] = CodeRepository(
+                    name=name,
+                    url=url,
+                    description=description,
+                    language=language,
+                    stars=stars,
+                    forks=forks,
+                    last_updated=last_updated or datetime.utcnow().strftime("%Y-%m-%d"),
+                    topics=topics,
+                    license=repo_data.get("license"),
+                )
+
+        return list(repo_map.values())
+
+    def _convert_repomaster_result(
+        self,
+        query: str,
+        bridge_result: RepoMasterBridgeResult,
+    ) -> CodeResearchResult:
+        repositories = self._extract_repositories_from_events(
+            bridge_result.metadata.get("progress_events", [])
+        )
+        confidence = 0.5 + min(0.1 * len(repositories), 0.3)
+
+        code_result = CodeResearchResult(
+            query=query,
+            repositories=repositories,
+            analysis=[],
+            best_practices=[],
+            integration_guide="",
+            recommendations=[],
+            confidence_score=round(confidence, 2),
+        )
+        setattr(code_result, "report_markdown", bridge_result.report_markdown or bridge_result.final_answer)
+        setattr(code_result, "repomaster_metadata", bridge_result.metadata)
+        return code_result
+
+    async def _execute_repomaster(
+        self,
+        query: str,
+        session_id: str,
+        workflow_plan: Optional[Dict[str, Any]],
+    ) -> RepoMasterBridgeResult:
+        bridge = self._get_repomaster_bridge()
+        workspace_root = Path(os.getenv("WORKSPACE_DIR", "/tmp/uagent_workspaces"))
+        workspace = workspace_root / session_id / "repomaster"
+
+        repository_hint = None
+        input_data = None
+        if workflow_plan:
+            repository_hint = (
+                workflow_plan.get("repository_url")
+                or workflow_plan.get("repository")
+                or workflow_plan.get("repo_url")
+            )
+            input_data = workflow_plan.get("input_data")
+
+        async def progress_handler(event: Dict[str, Any]) -> None:
+            await self._handle_repomaster_progress(session_id, event)
+
+        async def llm_handler(message: Dict[str, Any]) -> None:
+            await self._handle_repomaster_llm(session_id, message)
+
+        await self._log_progress(
+            session_id,
+            phase="repomaster_invocation",
+            progress=20.0,
+            message="Invoking RepoMaster repository pipeline",
+            metadata={"title": "RepoMaster Invocation"},
+            parent_phase="initializing",
+        )
+
+        bridge_result = await bridge.run_task(
+            session_id=session_id,
+            query=query,
+            workspace=workspace,
+            repository_hint=repository_hint,
+            input_data=input_data,
+            progress_handler=progress_handler,
+            llm_handler=llm_handler,
+        )
+
+        await self._log_progress(
+            session_id,
+            phase="repomaster_finalizing",
+            progress=98.0,
+            message="RepoMaster execution finalized",
+            metadata={"content_preview": bridge_result.final_answer[:200]},
+            parent_phase="repomaster_invocation",
+        )
+
+        await self._log_progress(
+            session_id,
+            phase="repomaster_summary_ready",
+            progress=100.0,
+            message="RepoMaster results ready",
+            metadata={"title": "RepoMaster run completed"},
+            parent_phase="repomaster_finalizing",
+        )
+
+        return bridge_result
+
     async def research_code(
         self,
         query: str,
         language: Optional[str] = None,
         include_analysis: bool = True,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        workflow_plan: Optional[Dict[str, Any]] = None,
     ) -> CodeResearchResult:
         """Conduct comprehensive code research
 
@@ -392,86 +727,92 @@ class CodeResearchEngine:
             metadata={"query": query, "language": language, "parent_id": root_id}
         )
 
-        # Search for relevant repositories
-        repositories = await self.github_engine.search_repositories(query, language, limit=10)
+        use_repomaster = bool(session_id and self._should_use_repomaster(workflow_plan))
 
-        repo_phase_node = await self._log_progress(
-            session_id,
-            phase="discovering_repositories",
-            progress=30.0,
-            message=f"Found {len(repositories)} candidate repositories",
-            metadata={"repositories": [repo.name for repo in repositories[:5]]},
-            parent_phase="initializing"
-        )
+        try:
+            if use_repomaster:
+                bridge_result = await self._execute_repomaster(query, session_id, workflow_plan)
+                return self._convert_repomaster_result(query, bridge_result)
 
-        # Analyze repositories if requested
-        analyses = []
-        if include_analysis and repositories:
-            # Analyze top repositories concurrently
-            analysis_tasks = [
-                self.github_engine.analyze_repository(repo)
-                for repo in repositories[:5]  # Limit to top 5 for detailed analysis
-            ]
-            analyses = await asyncio.gather(*analysis_tasks)
+            # Search for relevant repositories (fallback path)
+            repositories = await self.github_engine.search_repositories(query, language, limit=10)
+
+            repo_phase_node = await self._log_progress(
+                session_id,
+                phase="discovering_repositories",
+                progress=30.0,
+                message=f"Found {len(repositories)} candidate repositories",
+                metadata={"repositories": [repo.name for repo in repositories[:5]]},
+                parent_phase="initializing"
+            )
+
+            # Analyze repositories if requested
+            analyses = []
+            if include_analysis and repositories:
+                # Analyze top repositories concurrently
+                analysis_tasks = [
+                    self.github_engine.analyze_repository(repo)
+                    for repo in repositories[:5]  # Limit to top 5 for detailed analysis
+                ]
+                analyses = await asyncio.gather(*analysis_tasks)
+
+                await self._log_progress(
+                    session_id,
+                    phase="analyzing_repositories",
+                    progress=55.0,
+                    message="Completed deep analysis on top repositories",
+                    metadata={"analyzed": [analysis.repository for analysis in analyses]},
+                    parent_phase="discovering_repositories"
+                )
+
+            # Extract best practices and patterns
+            best_practices = await self.pattern_engine.extract_best_practices(repositories)
 
             await self._log_progress(
                 session_id,
-                phase="analyzing_repositories",
-                progress=55.0,
-                message="Completed deep analysis on top repositories",
-                metadata={"analyzed": [analysis.repository for analysis in analyses]},
-                parent_phase="discovering_repositories"
+                phase="extracting_patterns",
+                progress=70.0,
+                message=f"Identified {len(best_practices)} reusable patterns",
+                metadata={"pattern_count": len(best_practices)},
+                parent_phase="analyzing_repositories"
             )
 
-        # Extract best practices and patterns
-        best_practices = await self.pattern_engine.extract_best_practices(repositories)
+            if session_id and repositories:
+                for idx, repo in enumerate(repositories[:5]):
+                    await self._log_progress(
+                        session_id,
+                        phase=f"repository_{idx + 1}",
+                        progress=45.0,
+                        message=f"Repository: {repo.name}",
+                        metadata={
+                            "title": repo.name,
+                            "description": repo.description,
+                            "url": repo.url,
+                            "language": repo.language,
+                            "stars": repo.stars,
+                            "parent_id": repo_phase_node,
+                        },
+                        parent_phase="discovering_repositories",
+                        node_type="result"
+                    )
 
-        await self._log_progress(
-            session_id,
-            phase="extracting_patterns",
-            progress=70.0,
-            message=f"Identified {len(best_practices)} reusable patterns",
-            metadata={"pattern_count": len(best_practices)},
-            parent_phase="analyzing_repositories"
-        )
+            # Generate integration guide
+            integration_guide = await self._generate_integration_guide(query, repositories, analyses)
 
-        if session_id and repositories:
-            for idx, repo in enumerate(repositories[:5]):
-                await self._log_progress(
-                    session_id,
-                    phase=f"repository_{idx + 1}",
-                    progress=45.0,
-                    message=f"Repository: {repo.name}",
-                    metadata={
-                        "title": repo.name,
-                        "description": repo.description,
-                        "url": repo.url,
-                        "language": repo.language,
-                        "stars": repo.stars,
-                        "parent_id": repo_phase_node,
-                    },
-                    parent_phase="discovering_repositories",
-                    node_type="result"
-                )
+            await self._log_progress(
+                session_id,
+                phase="synthesizing_guidance",
+                progress=82.0,
+                message="Prepared integration guidance and recommendations",
+                metadata={"guide_length": len(integration_guide)}
+            )
 
-        # Generate integration guide
-        integration_guide = await self._generate_integration_guide(query, repositories, analyses)
+            # Generate recommendations
+            recommendations = await self._generate_recommendations(query, repositories, analyses, best_practices)
 
-        await self._log_progress(
-            session_id,
-            phase="synthesizing_guidance",
-            progress=82.0,
-            message="Prepared integration guidance and recommendations",
-            metadata={"guide_length": len(integration_guide)}
-        )
+            # Calculate confidence score
+            confidence_score = self._calculate_confidence_score(repositories, analyses)
 
-        # Generate recommendations
-        recommendations = await self._generate_recommendations(query, repositories, analyses, best_practices)
-
-        # Calculate confidence score
-        confidence_score = self._calculate_confidence_score(repositories, analyses)
-
-        try:
             return CodeResearchResult(
                 query=query,
                 repositories=repositories,

@@ -35,6 +35,7 @@ interface LLMStreamEvent {
   token?: string;
   error?: string;
   engine?: string;
+  response?: string;
   conversation?: LLMMessage[];
 }
 
@@ -56,9 +57,50 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
   const [currentPrompt, setCurrentPrompt] = useState('');
   const [currentResponse, setCurrentResponse] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [expandedMessageId, setExpandedMessageId] = useState<string | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const currentResponseRef = useRef('');
+
+  const transformEventToMessage = useCallback(
+    (event: any): LLMMessage | null => {
+      const baseTimestamp = event.timestamp || new Date().toISOString();
+      switch (event.type) {
+        case 'llm_prompt_start':
+          return {
+            id: event.id ?? `prompt-${baseTimestamp}`,
+            session_id: event.session_id,
+            type: 'prompt',
+            timestamp: baseTimestamp,
+            content: event.prompt || '',
+            engine: event.engine || engine,
+          };
+        case 'llm_token':
+          return null; // tokens are aggregated into the final response
+        case 'llm_prompt_complete':
+          return {
+            id: event.id ?? `response-${baseTimestamp}`,
+            session_id: event.session_id,
+            type: 'response',
+            timestamp: baseTimestamp,
+            content: event.response || '',
+            engine,
+          };
+        case 'llm_error':
+          return {
+            id: event.id ?? `error-${baseTimestamp}`,
+            session_id: event.session_id,
+            type: 'error',
+            timestamp: baseTimestamp,
+            content: event.error || 'Unknown error',
+            engine,
+          };
+        default:
+          return null;
+      }
+    },
+    [engine]
+  );
 
   // Auto-scroll to bottom
   const scrollToBottom = useCallback(() => {
@@ -114,16 +156,17 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
               break;
             }
 
-            case 'llm_token':
+            case 'llm_token': {
               setCurrentResponse(prev => {
                 const updated = prev + (data.token || '');
                 currentResponseRef.current = updated;
                 return updated;
               });
               break;
+            }
 
             case 'llm_prompt_complete': {
-              const finalResponse = currentResponseRef.current;
+              const finalResponse = currentResponseRef.current || data.response || '';
               if (finalResponse) {
                 const responseMessage: LLMMessage = {
                   id: `response-${Date.now()}`,
@@ -158,13 +201,12 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
             }
 
             case 'conversation_history': {
-              const historyPayload = (data as unknown as { conversation?: LLMMessage[] }).conversation;
+              const historyPayload = (data as unknown as { conversation?: any[] }).conversation;
               if (Array.isArray(historyPayload)) {
-                setMessages(historyPayload.map((message) => ({
-                  ...message,
-                  engine: message.engine ?? engine,
-                  id: message.id ?? `${message.type}-${message.timestamp ?? Date.now()}`
-                })));
+                const transformed = historyPayload
+                  .map(event => transformEventToMessage(event))
+                  .filter((msg): msg is LLMMessage => Boolean(msg && msg.content));
+                setMessages(transformed);
               }
               break;
             }
@@ -286,44 +328,57 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
           )}
 
           {messages.map((message) => (
-            <Card key={message.id} className={`p-3 ${getMessageColor(message.type)}`}>
-              <div className="flex items-start justify-between mb-2">
-                <div className="flex items-center space-x-2">
-                  <span className="text-lg">{getMessageIcon(message.type)}</span>
-                  <Badge variant="outline" className="text-xs">
-                    {message.type.toUpperCase()}
-                  </Badge>
-                  <span className="text-xs text-gray-500">
-                    {formatTimestamp(message.timestamp)}
-                  </span>
-                </div>
-                <div className="text-xs text-gray-400">
-                  {message.engine}
-                </div>
-              </div>
-
-              <div className="text-sm whitespace-pre-wrap break-words">
-                {message.content}
-              </div>
-
-              {message.metadata && (
-                <div className="mt-2 pt-2 border-t border-gray-200">
-                  <div className="text-xs text-gray-500 space-x-3">
-                    {message.metadata.prompt_length && (
-                      <span>Prompt: {message.metadata.prompt_length} chars</span>
-                    )}
-                    {message.metadata.response_length && (
-                      <span>Response: {message.metadata.response_length} chars</span>
-                    )}
-                    {message.metadata.processing_time && (
-                      <span>Time: {message.metadata.processing_time}ms</span>
-                    )}
-                    {message.metadata.token_count && (
-                      <span>Tokens: {message.metadata.token_count}</span>
-                    )}
+            <Card
+              key={message.id}
+              className={`p-3 ${getMessageColor(message.type)} cursor-pointer`}
+            >
+              <div
+                onDoubleClick={() =>
+                  setExpandedMessageId(prev => (prev === message.id ? null : message.id))
+                }
+              >
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-lg">{getMessageIcon(message.type)}</span>
+                    <Badge variant="outline" className="text-xs">
+                      {message.type.toUpperCase()}
+                    </Badge>
+                    <span className="text-xs text-gray-500">
+                      {formatTimestamp(message.timestamp)}
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-400">
+                    {message.engine}
                   </div>
                 </div>
-              )}
+
+                <div className="text-sm whitespace-pre-wrap break-words">
+                  {expandedMessageId === message.id
+                    ? message.content
+                    : message.content.length > 280
+                    ? `${message.content.slice(0, 280)}…`
+                    : message.content}
+                </div>
+
+                {message.metadata && (
+                  <div className="mt-2 pt-2 border-t border-gray-200">
+                    <div className="text-xs text-gray-500 space-x-3">
+                      {message.metadata.prompt_length && (
+                        <span>Prompt: {message.metadata.prompt_length} chars</span>
+                      )}
+                      {message.metadata.response_length && (
+                        <span>Response: {message.metadata.response_length} chars</span>
+                      )}
+                      {message.metadata.processing_time && (
+                        <span>Time: {message.metadata.processing_time}ms</span>
+                      )}
+                      {message.metadata.token_count && (
+                        <span>Tokens: {message.metadata.token_count}</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </Card>
           ))}
 

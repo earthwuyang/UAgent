@@ -47,7 +47,7 @@ class StreamingLLMClient:
         logger.info(f"[DEBUG] StreamingLLMClient.generate called for session {self.session_id}")
         if self.session_id:
             logger.info(f"[DEBUG] Broadcasting prompt start for session {self.session_id}")
-            await self._broadcast_prompt_start(prompt[:200] + "..." if len(prompt) > 200 else prompt)
+            await self._broadcast_prompt_start(prompt)
 
         try:
             logger.info(f"[DEBUG] Calling underlying LLM client for session {self.session_id}")
@@ -56,7 +56,7 @@ class StreamingLLMClient:
 
             if self.session_id:
                 logger.info(f"[DEBUG] Broadcasting prompt complete for session {self.session_id}")
-                await self._broadcast_prompt_complete(result[:200] + "..." if len(result) > 200 else result)
+                await self._broadcast_prompt_complete(result)
 
             return result
         except Exception as e:
@@ -68,7 +68,7 @@ class StreamingLLMClient:
     async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
         """Stream generate text and broadcast to WebSocket if session_id is set"""
         if self.session_id:
-            await self._broadcast_prompt_start(prompt[:200] + "..." if len(prompt) > 200 else prompt)
+            await self._broadcast_prompt_start(prompt)
 
         try:
             response_text = ""
@@ -79,7 +79,7 @@ class StreamingLLMClient:
                 yield chunk
 
             if self.session_id:
-                await self._broadcast_prompt_complete(response_text[:200] + "..." if len(response_text) > 200 else response_text)
+                await self._broadcast_prompt_complete(response_text)
 
         except Exception as e:
             if self.session_id:

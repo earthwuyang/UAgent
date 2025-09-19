@@ -978,10 +978,10 @@ const TreeVisualizer: React.FC<{tree: TreeNode}> = ({tree}) => {
 
 ### Phase 2: Core Research Engines (Weeks 3-5) ✅ **COMPLETED**
 - ✅ Implement deep research engine (web + academic search)
-- ✅ Implement code research engine (GitHub + repository analysis)
+- ✅ Implement code research engine (GitHub + repository analysis powered by RepoMaster)
 - ✅ **Scientific research engine foundation** (basic workflow without iteration)
 - ✅ Create research tree visualization with engine-specific workflows
-- ✅ Add real-time progress tracking and engine status monitoring
+- ✅ Add real-time progress tracking and engine status monitoring (web UI + CLI)
 
 ### **Recent Critical Fixes (2025-09-19)** ✅ **COMPLETED**
 #### Real-Time Research Visualization System Fixes
@@ -1020,8 +1020,8 @@ const TreeVisualizer: React.FC<{tree: TreeNode}> = ({tree}) => {
 - **System-wide performance optimization**: Optimize for complex scientific workflows
 - **Security hardening and audit**: Secure handling of research data and code execution
 - **Production deployment setup**: Scalable infrastructure for scientific computing
-- **Comprehensive documentation**: User guides for scientific research workflows
-- **Integration testing**: End-to-end testing of complex multi-engine workflows
+- **Comprehensive documentation**: User guides for scientific research workflows (web + CLI monitor)
+- **Integration testing**: End-to-end testing of complex multi-engine workflows across UI and headless flows
 
 ## 10. SUCCESS METRICS
 
@@ -1038,5 +1038,13 @@ const TreeVisualizer: React.FC<{tree: TreeNode}> = ({tree}) => {
 - **Timeliness**: Fast research completion times
 - **Reproducibility**: Consistent results across runs
 - **User Satisfaction**: Positive user feedback and adoption
+
+## 11. OPERATIONAL COMMANDS
+
+- **Run Backend**: `uvicorn app.main:app --reload --host 127.0.0.1 --port 8012`
+- **Run Frontend**: `cd frontend && npm run dev`
+- **Start Headless Research Monitor**: `python -m backend.scripts.cli_research --query "<prompt>"`
+- **Attach to Existing Session**: `python -m backend.scripts.cli_research --session <session_id>`
+- **Install Playwright Browsers (once)**: `playwright install --with-deps chromium`
 
 This comprehensive plan provides a solid foundation for building a reliable, scalable, and user-friendly universal agent system that leverages the proven strengths of OpenHands while learning from the lessons of the previous implementation. 

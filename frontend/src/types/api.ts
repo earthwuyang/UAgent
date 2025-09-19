@@ -100,6 +100,10 @@ export interface RouteAndExecuteResponse {
     engine_used: string;
     query: string;
     [key: string]: any; // Dynamic fields based on engine type
+    report_markdown?: string;
+    summary?: string;
+    analysis?: string | string[];
+    recommendations?: string[];
   };
 }
 

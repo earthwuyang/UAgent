@@ -373,7 +373,8 @@ class SmartRouter:
             ],
             "iteration_enabled": False,
             "feedback_loops": False,
-            "includes_openhands": True
+            "includes_openhands": True,
+            "use_repo_master": True
         }
 
     def _generate_cache_key(self, request: str) -> str:

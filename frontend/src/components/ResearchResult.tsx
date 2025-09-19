@@ -1,5 +1,7 @@
 import React from 'react'
 import { CheckCircle, Search, Code, FlaskConical, ExternalLink, Copy, Download } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { RouteAndExecuteResponse } from '../types/api'
 import { clsx } from 'clsx'
 
@@ -60,6 +62,16 @@ const ResearchResult: React.FC<ResearchResultProps> = ({ result }) => {
   }
 
   const renderExecutionDetails = () => {
+    if ((execution as any).report_markdown) {
+      return (
+        <div className="prose prose-sm max-w-none">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {(execution as any).report_markdown}
+          </ReactMarkdown>
+        </div>
+      )
+    }
+
     switch (execution.engine_used) {
       case 'deep_research':
         return (
@@ -100,8 +112,8 @@ const ResearchResult: React.FC<ResearchResultProps> = ({ result }) => {
             {execution.summary && (
               <div>
                 <h4 className="font-semibold text-gray-900 mb-3">Research Summary</h4>
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <p className="text-sm text-gray-700 leading-relaxed">{execution.summary}</p>
+                <div className="bg-gray-50 rounded-lg p-4 prose prose-sm max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{execution.summary}</ReactMarkdown>
                 </div>
               </div>
             )}
@@ -143,13 +155,30 @@ const ResearchResult: React.FC<ResearchResultProps> = ({ result }) => {
               </div>
             )}
 
-            {execution.integration_guide_preview && (
+            {execution.analysis && (
+              <div>
+                <h4 className="font-semibold text-gray-900 mb-3">Repository Analysis</h4>
+                <div className="bg-gray-50 rounded-lg p-4 prose prose-sm max-w-none">
+                  {Array.isArray(execution.analysis) ? (
+                    <ul>
+                      {execution.analysis.map((item: string, index: number) => (
+                        <li key={index}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{execution.analysis}</ReactMarkdown>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {(execution.integration_guide || execution.integration_guide_preview) && (
               <div>
                 <h4 className="font-semibold text-gray-900 mb-3">Integration Guide</h4>
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <pre className="text-sm text-gray-700 whitespace-pre-wrap font-mono">
-                    {execution.integration_guide_preview}
-                  </pre>
+                <div className="bg-gray-50 rounded-lg p-4 prose prose-sm max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {execution.integration_guide || execution.integration_guide_preview}
+                  </ReactMarkdown>
                 </div>
               </div>
             )}
@@ -198,8 +227,10 @@ const ResearchResult: React.FC<ResearchResultProps> = ({ result }) => {
             {execution.summary && (
               <div>
                 <h4 className="font-semibold text-gray-900 mb-3">Research Synthesis</h4>
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <p className="text-sm text-gray-700 leading-relaxed">{execution.summary}</p>
+                <div className="bg-gray-50 rounded-lg p-4 prose prose-sm max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {typeof execution.summary === 'string' ? execution.summary : JSON.stringify(execution.summary, null, 2)}
+                  </ReactMarkdown>
                 </div>
               </div>
             )}
