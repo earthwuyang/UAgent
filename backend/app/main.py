@@ -1,46 +1,175 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+"""Main FastAPI application for UAgent system"""
 
-from .routers import (
-    search,
-    experiments,
-    github,
-    jobs,
-    ai_scientist,
-    agent_lab,
-    unified_workflow,
-    research_tree,
-    ai_generation,
-    llm_monitor,
-    repomaster,
-    memory,
+import os
+import logging
+from contextlib import asynccontextmanager
+from typing import Dict, Any
+
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .core.llm_client import create_llm_client
+from .core.cache import create_cache
+from .core.smart_router import SmartRouter
+from .core.research_engines import (
+    DeepResearchEngine,
+    CodeResearchEngine,
+    ScientificResearchEngine
+)
+from .core.openhands import OpenHandsClient
+from .core.app_state import set_app_state, clear_app_state
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan events"""
+    # Startup
+    logger.info("Starting UAgent system...")
+
+    # Initialize LLM client
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+    if not dashscope_key:
+        logger.warning("DASHSCOPE_API_KEY not found - some features may not work")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="DASHSCOPE_API_KEY environment variable is required"
+        )
+
+    llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+
+    # Initialize cache
+    cache = create_cache("memory")
+
+    # Initialize OpenHands client
+    workspace_dir = os.getenv("WORKSPACE_DIR", "/tmp/uagent_workspaces")
+    openhands_client = OpenHandsClient(base_workspace_dir=workspace_dir)
+
+    # Initialize research engines
+    deep_engine = DeepResearchEngine(llm_client)
+    code_engine = CodeResearchEngine(llm_client)
+    scientific_engine = ScientificResearchEngine(
+        llm_client=llm_client,
+        deep_research_engine=deep_engine,
+        code_research_engine=code_engine,
+        openhands_client=openhands_client,
+        config={
+            "max_iterations": int(os.getenv("MAX_ITERATIONS", "3")),
+            "confidence_threshold": float(os.getenv("CONFIDENCE_THRESHOLD", "0.8"))
+        }
+    )
+
+    # Initialize smart router
+    smart_router = SmartRouter(llm_client=llm_client, cache=cache)
+
+    # Store in global state
+    set_app_state({
+        "llm_client": llm_client,
+        "cache": cache,
+        "engines": {
+            "deep": deep_engine,
+            "code": code_engine,
+            "scientific": scientific_engine
+        },
+        "smart_router": smart_router
+    })
+
+    logger.info("UAgent system started successfully")
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down UAgent system...")
+    if cache:
+        await cache.clear()
+    clear_app_state()
+    logger.info("UAgent system shutdown complete")
+
+
+# Create FastAPI application
+app = FastAPI(
+    title="Universal Agent (UAgent) API",
+    description="Intelligent research system with multi-engine orchestration",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:5173", "http://101.6.5.211:3000", "http://101.6.5.211:3001"],  # Frontend origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="uagent API", version="0.1.0")
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Global exception handler"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error occurred"}
     )
 
-    app.include_router(search.router, prefix="/api")
-    app.include_router(experiments.router, prefix="/api")
-    app.include_router(github.router, prefix="/api")
-    app.include_router(jobs.router, prefix="/api")
-    app.include_router(ai_scientist.router, prefix="/api")
-    app.include_router(agent_lab.router, prefix="/api")
-    app.include_router(unified_workflow.router, prefix="/api")
-    app.include_router(research_tree.router, prefix="/api")
-    app.include_router(ai_generation.router, prefix="/api")
-    app.include_router(llm_monitor.router, prefix="/api")
-    app.include_router(repomaster.router, prefix="/api")
-    app.include_router(memory.router)
-    return app
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "engines": {
+            "deep_research": "active",
+            "code_research": "active",
+            "scientific_research": "active"
+        },
+        "smart_router": "active"
+    }
 
 
-app = create_app()
+# Root endpoint
+@app.get("/")
+async def root():
+    """Root endpoint with system information"""
+    return {
+        "message": "Universal Agent (UAgent) API",
+        "version": "1.0.0",
+        "documentation": "/docs",
+        "health": "/health",
+        "endpoints": {
+            "research": "/api/research/",
+            "router": "/api/router/",
+            "engines": "/api/engines/"
+        }
+    }
+
+
+# Import and include routers after app creation to avoid circular imports
+from .routers import research, smart_router as router_endpoints, websocket
+
+app.include_router(research.router, prefix="/api/research", tags=["research"])
+app.include_router(router_endpoints.router, prefix="/api/router", tags=["smart_router"])
+app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )

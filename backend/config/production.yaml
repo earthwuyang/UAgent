@@ -1,0 +1,36 @@
+app:
+  name: "UAgent Production"
+  debug: false
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+
+database:
+  url: "postgresql://user:password@localhost:5432/uagent"
+  echo: false
+
+llm:
+  default_provider: "dashscope"
+  dashscope_model: "qwen-max-latest"
+  anthropic_model: "claude-3-sonnet-20240229"
+  openai_model: "gpt-4-turbo-preview"
+
+redis:
+  url: "redis://localhost:6379/0"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+smart_router:
+  classification_threshold: 0.8
+  max_retries: 3
+
+research_engines:
+  max_concurrent_tasks: 10
+  task_timeout: 600
+
+openhands:
+  workspace_dir: "/app/workspaces"
+  session_timeout: 7200
+  max_iterations: 15

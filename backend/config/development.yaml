@@ -1,0 +1,36 @@
+app:
+  name: "UAgent Development"
+  debug: true
+  host: "127.0.0.1"
+  port: 8000
+  reload: true
+
+database:
+  url: "sqlite:///./uagent_dev.db"
+  echo: true
+
+llm:
+  default_provider: "dashscope"
+  dashscope_model: "qwen-max-latest"
+  anthropic_model: "claude-3-sonnet-20240229"
+  openai_model: "gpt-4-turbo-preview"
+
+redis:
+  url: "redis://localhost:6379/0"
+
+logging:
+  level: "DEBUG"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+smart_router:
+  classification_threshold: 0.7
+  max_retries: 3
+
+research_engines:
+  max_concurrent_tasks: 5
+  task_timeout: 300
+
+openhands:
+  workspace_dir: "./workspaces"
+  session_timeout: 3600
+  max_iterations: 10

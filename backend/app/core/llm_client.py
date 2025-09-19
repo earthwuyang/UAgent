@@ -1,256 +1,379 @@
-"""
-LLM Client for qwen3-max-review via DashScope
-"""
+"""LLM client for classification and other AI tasks"""
 
-import os
 import json
-import asyncio
 import logging
-from datetime import datetime
-from typing import Dict, Any, Optional, List, Callable
-from dashscope import Generation
-from dashscope.api_entities.dashscope_response import Role
+from typing import Dict, Any, Optional
+from abc import ABC, abstractmethod
 
-logger = logging.getLogger(__name__)
-
-# Import the node tracker
 try:
-    from .node_llm_tracker import llm_message_listener, node_llm_tracker
-    NODE_TRACKER_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"Node tracker not available: {e}")
-    NODE_TRACKER_AVAILABLE = False
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
 
-    async def llm_message_listener(event_type: str, data: dict):
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+try:
+    import dashscope
+    from dashscope import Generation
+    DASHSCOPE_AVAILABLE = True
+except ImportError:
+    DASHSCOPE_AVAILABLE = False
+
+
+class LLMClient(ABC):
+    """Abstract base class for LLM clients"""
+
+    @abstractmethod
+    async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
+        """Classify a request using the LLM"""
+        pass
+
+    @abstractmethod
+    async def generate(self, prompt: str, **kwargs) -> str:
+        """Generate text using the LLM"""
         pass
 
 
-class QwenLLMClient:
-    """Client for qwen3-max-review model via DashScope"""
+class AnthropicClient(LLMClient):
+    """Anthropic Claude client for LLM operations"""
 
-    def __init__(self):
-        self.model_name = "qwen-max-latest"
-        self.api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.api_available = bool(self.api_key)
-        self.message_listeners: List[Callable] = []  # For real-time monitoring
+    def __init__(self, api_key: str, model: str = "claude-3-sonnet-20240229"):
+        """Initialize Anthropic client
 
-        # Set up node tracker listener
-        self._setup_node_tracker()
+        Args:
+            api_key: Anthropic API key
+            model: Model name to use
+        """
+        if not ANTHROPIC_AVAILABLE:
+            raise ImportError("anthropic package is required for AnthropicClient")
 
-    def _setup_node_tracker(self):
-        """Set up the node-specific LLM tracker"""
-        self.add_message_listener(llm_message_listener)
+        self.client = anthropic.AsyncAnthropic(api_key=api_key)
+        self.model = model
+        self.logger = logging.getLogger(__name__)
 
-    def add_message_listener(self, listener: Callable):
-        """Add a listener for real-time LLM communication monitoring"""
-        self.message_listeners.append(listener)
+    async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
+        """Classify a request using Claude
 
-    def remove_message_listener(self, listener: Callable):
-        """Remove a message listener"""
-        if listener in self.message_listeners:
-            self.message_listeners.remove(listener)
+        Args:
+            request: User request to classify
+            prompt: Classification prompt
 
-    async def _emit_message_event(self, event_type: str, data: Dict[str, Any]):
-        """Emit message event to all listeners"""
-        for listener in self.message_listeners:
-            try:
-                if asyncio.iscoroutinefunction(listener):
-                    await listener(event_type, data)
-                else:
-                    listener(event_type, data)
-            except Exception as e:
-                logger.error(f"Message listener error: {e}")
-
-    async def generate_response(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: int = 2000,
-        node_id: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Generate response using qwen3-max-review"""
-
-        if not self.api_available:
-            error_response = {
-                "success": False,
-                "error": "DASHSCOPE_API_KEY not configured. Please set the environment variable.",
-                "model": self.model_name
-            }
-            await self._emit_message_event("error", {
-                "timestamp": datetime.now().isoformat(),
-                "error": error_response["error"],
-                "model": self.model_name
-            })
-            return error_response
-
-        messages = []
-        if system_prompt:
-            messages.append({
-                'role': Role.SYSTEM,
-                'content': system_prompt
-            })
-
-        messages.append({
-            'role': Role.USER,
-            'content': prompt
-        })
-
-        # Emit request event
-        await self._emit_message_event("request", {
-            "timestamp": datetime.now().isoformat(),
-            "model": self.model_name,
-            "node_id": node_id,
-            "context": context,
-            "messages": [{"role": msg['role'], "content": msg['content']} for msg in messages],
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        })
-
+        Returns:
+            Classification result as dictionary
+        """
         try:
-            # Run the synchronous dashscope call in thread pool
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: Generation.call(
-                    model=self.model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    result_format='message'
-                )
+            full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification:"
+
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=1000,
+                temperature=0.1,
+                messages=[{
+                    "role": "user",
+                    "content": full_prompt
+                }]
             )
 
-            if response.status_code == 200:
-                content = response.output.choices[0].message.content
-                success_response = {
-                    "success": True,
-                    "content": content,
-                    "model": self.model_name,
-                    "usage": response.usage if hasattr(response, 'usage') else None
-                }
+            # Extract JSON from response
+            content = response.content[0].text
 
-                # Emit successful response event
-                await self._emit_message_event("response", {
-                    "timestamp": datetime.now().isoformat(),
-                    "model": self.model_name,
-                    "node_id": node_id,
-                    "context": context,
-                    "content": content,
-                    "usage": response.usage if hasattr(response, 'usage') else None,
-                    "success": True
-                })
-
-                return success_response
-            else:
-                error_response = {
-                    "success": False,
-                    "error": f"API error: {response.code} - {response.message}",
-                    "model": self.model_name
-                }
-
-                # Emit error response event
-                await self._emit_message_event("response", {
-                    "timestamp": datetime.now().isoformat(),
-                    "model": self.model_name,
-                    "node_id": node_id,
-                    "context": context,
-                    "error": error_response["error"],
-                    "success": False
-                })
-
-                return error_response
+            # Try to parse JSON response
+            try:
+                result = json.loads(content)
+                return result
+            except json.JSONDecodeError:
+                # Fallback: extract JSON from text
+                import re
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                else:
+                    raise ValueError(f"Could not parse JSON from response: {content}")
 
         except Exception as e:
-            exception_response = {
-                "success": False,
-                "error": f"Exception: {str(e)}",
-                "model": self.model_name
-            }
+            self.logger.error(f"Anthropic classification error: {e}")
+            raise
 
-            # Emit exception event
-            await self._emit_message_event("response", {
-                "timestamp": datetime.now().isoformat(),
-                "model": self.model_name,
-                "node_id": node_id,
-                "context": context,
-                "error": str(e),
-                "success": False
-            })
+    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+        """Generate text using Claude
 
-            return exception_response
+        Args:
+            prompt: Generation prompt
+            max_tokens: Maximum tokens to generate
+            **kwargs: Additional parameters
 
-    async def analyze_literature(self, goal: str, papers: List[Dict]) -> Dict[str, Any]:
-        """Analyze literature for research goal"""
-        system_prompt = """You are a research assistant specializing in literature analysis.
-        Analyze the provided papers and extract key insights relevant to the research goal."""
+        Returns:
+            Generated text
+        """
+        try:
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=kwargs.get("temperature", 0.7),
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }]
+            )
 
-        papers_text = "\n".join([
-            f"Title: {paper.get('title', 'N/A')}\nAbstract: {paper.get('abstract', 'N/A')}\n"
-            for paper in papers[:5]  # Limit to avoid token limits
-        ])
+            return response.content[0].text
 
-        prompt = f"""Research Goal: {goal}
-
-Papers to analyze:
-{papers_text}
-
-Please provide:
-1. Key findings relevant to the research goal
-2. Research gaps identified
-3. Methodological insights
-4. Potential research directions
-
-Format your response as a structured analysis."""
-
-        return await self.generate_response(prompt, system_prompt)
-
-    async def generate_hypothesis(self, goal: str, context: str = "") -> Dict[str, Any]:
-        """Generate research hypothesis"""
-        system_prompt = """You are a research scientist who generates testable hypotheses.
-        Create specific, measurable hypotheses that advance scientific understanding."""
-
-        prompt = f"""Research Goal: {goal}
-
-Context: {context}
-
-Generate 3-5 specific, testable hypotheses that could advance this research goal.
-For each hypothesis, provide:
-1. The hypothesis statement
-2. Rationale/background
-3. Suggested methodology to test it
-4. Expected outcomes
-
-Format as a structured list."""
-
-        return await self.generate_response(prompt, system_prompt)
-
-    async def analyze_code(self, goal: str, code_snippets: List[Dict]) -> Dict[str, Any]:
-        """Analyze code repositories for research insights"""
-        system_prompt = """You are a research engineer who analyzes code to extract scientific insights.
-        Focus on methodologies, algorithms, and experimental approaches."""
-
-        code_text = "\n".join([
-            f"Repository: {snippet.get('repo', 'N/A')}\nCode: {snippet.get('content', 'N/A')}\n"
-            for snippet in code_snippets[:3]  # Limit to avoid token limits
-        ])
-
-        prompt = f"""Research Goal: {goal}
-
-Code to analyze:
-{code_text}
-
-Please extract:
-1. Key algorithms and methodologies
-2. Experimental approaches used
-3. Implementation insights
-4. Potential improvements or extensions
-5. Relevance to the research goal
-
-Provide a technical analysis focused on research applications."""
-
-        return await self.generate_response(prompt, system_prompt)
+        except Exception as e:
+            self.logger.error(f"Anthropic generation error: {e}")
+            raise
 
 
-# Global client instance
-llm_client = QwenLLMClient()
+class OpenAIClient(LLMClient):
+    """OpenAI GPT client for LLM operations"""
+
+    def __init__(self, api_key: str, model: str = "gpt-4-turbo-preview"):
+        """Initialize OpenAI client
+
+        Args:
+            api_key: OpenAI API key
+            model: Model name to use
+        """
+        if not OPENAI_AVAILABLE:
+            raise ImportError("openai package is required for OpenAIClient")
+
+        self.client = openai.AsyncOpenAI(api_key=api_key)
+        self.model = model
+        self.logger = logging.getLogger(__name__)
+
+    async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
+        """Classify a request using GPT
+
+        Args:
+            request: User request to classify
+            prompt: Classification prompt
+
+        Returns:
+            Classification result as dictionary
+        """
+        try:
+            full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification:"
+
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{
+                    "role": "user",
+                    "content": full_prompt
+                }],
+                temperature=0.1,
+                max_tokens=1000
+            )
+
+            content = response.choices[0].message.content
+
+            # Try to parse JSON response
+            try:
+                result = json.loads(content)
+                return result
+            except json.JSONDecodeError:
+                # Fallback: extract JSON from text
+                import re
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                else:
+                    raise ValueError(f"Could not parse JSON from response: {content}")
+
+        except Exception as e:
+            self.logger.error(f"OpenAI classification error: {e}")
+            raise
+
+    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+        """Generate text using GPT
+
+        Args:
+            prompt: Generation prompt
+            max_tokens: Maximum tokens to generate
+            **kwargs: Additional parameters
+
+        Returns:
+            Generated text
+        """
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }],
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=max_tokens
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            self.logger.error(f"OpenAI generation error: {e}")
+            raise
+
+
+class DashScopeClient(LLMClient):
+    """DashScope Qwen client for LLM operations"""
+
+    def __init__(self, api_key: str, model: str = "qwen-max-latest"):
+        """Initialize DashScope client
+
+        Args:
+            api_key: DashScope API key
+            model: Model name to use (default: qwen-max-latest)
+        """
+        if not DASHSCOPE_AVAILABLE:
+            raise ImportError("dashscope package is required for DashScopeClient")
+
+        dashscope.api_key = api_key
+        self.model = model
+        self.logger = logging.getLogger(__name__)
+
+    async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
+        """Classify a request using Qwen
+
+        Args:
+            request: User request to classify
+            prompt: Classification prompt
+
+        Returns:
+            Classification result as dictionary
+        """
+        try:
+            full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification (respond with valid JSON only):"
+
+            # Use async generation if available, otherwise use sync
+            try:
+                # Try async first
+                response = await self._async_generate(full_prompt)
+            except (AttributeError, NotImplementedError):
+                # Fall back to sync if async not available
+                response = self._sync_generate(full_prompt)
+
+            content = response
+
+            # Try to parse JSON response
+            try:
+                result = json.loads(content)
+                # Validate required fields
+                required_fields = ["engine", "confidence_score", "reasoning", "sub_components"]
+                if all(field in result for field in required_fields):
+                    return result
+                else:
+                    raise ValueError(f"Missing required fields in response: {result}")
+            except json.JSONDecodeError:
+                # Fallback: extract JSON from text
+                import re
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    return result
+                else:
+                    self.logger.error(f"Could not parse JSON from DashScope response: {content}")
+                    raise ValueError(f"Could not parse JSON from response: {content}")
+
+        except Exception as e:
+            self.logger.error(f"DashScope classification error: {e}")
+            raise
+
+    async def _async_generate(self, prompt: str) -> str:
+        """Async generation (if supported by dashscope)"""
+        # Check if async is available
+        import asyncio
+
+        # Use asyncio.to_thread to run sync function in thread pool
+        return await asyncio.to_thread(self._sync_generate, prompt)
+
+    def _sync_generate(self, prompt: str) -> str:
+        """Synchronous generation with DashScope"""
+        response = Generation.call(
+            model=self.model,
+            prompt=prompt,
+            temperature=0.1,
+            max_tokens=1000,
+            top_p=0.1,
+        )
+
+        if response.status_code == 200:
+            return response.output.text
+        else:
+            raise Exception(f"DashScope API error: {response.status_code} - {response.message}")
+
+    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+        """Generate text using Qwen
+
+        Args:
+            prompt: Generation prompt
+            max_tokens: Maximum tokens to generate
+            **kwargs: Additional parameters
+
+        Returns:
+            Generated text
+        """
+        try:
+            # Use async generation if available, otherwise use sync
+            try:
+                return await self._async_generate_full(prompt, max_tokens, **kwargs)
+            except (AttributeError, NotImplementedError):
+                return self._sync_generate_full(prompt, max_tokens, **kwargs)
+
+        except Exception as e:
+            self.logger.error(f"DashScope generation error: {e}")
+            raise
+
+    async def _async_generate_full(self, prompt: str, max_tokens: int, **kwargs) -> str:
+        """Async generation for full text"""
+        import asyncio
+        return await asyncio.to_thread(self._sync_generate_full, prompt, max_tokens, **kwargs)
+
+    def _sync_generate_full(self, prompt: str, max_tokens: int, **kwargs) -> str:
+        """Synchronous generation for full text"""
+        response = Generation.call(
+            model=self.model,
+            prompt=prompt,
+            temperature=kwargs.get("temperature", 0.7),
+            max_tokens=max_tokens,
+            top_p=kwargs.get("top_p", 0.8),
+        )
+
+        if response.status_code == 200:
+            return response.output.text
+        else:
+            raise Exception(f"DashScope API error: {response.status_code} - {response.message}")
+
+
+
+
+
+def create_llm_client(provider: str, api_key: Optional[str] = None, model: Optional[str] = None) -> LLMClient:
+    """Factory function to create LLM client
+
+    Args:
+        provider: LLM provider ('anthropic', 'openai', 'dashscope', 'mock')
+        api_key: API key for the provider
+        model: Model name to use
+
+    Returns:
+        LLM client instance
+    """
+    if provider == "anthropic":
+        if not api_key:
+            raise ValueError("API key required for Anthropic client")
+        return AnthropicClient(api_key, model or "claude-3-sonnet-20240229")
+
+    elif provider == "openai":
+        if not api_key:
+            raise ValueError("API key required for OpenAI client")
+        return OpenAIClient(api_key, model or "gpt-4-turbo-preview")
+
+    elif provider == "dashscope":
+        if not api_key:
+            raise ValueError("API key required for DashScope client")
+        return DashScopeClient(api_key, model or "qwen-max-latest")
+
+    else:
+        raise ValueError(f"Unknown LLM provider: {provider}. Available providers: anthropic, openai, dashscope")
