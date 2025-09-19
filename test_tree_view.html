@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tree View Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .success {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background-color: #d1ecf1;
+            border-color: #bee5eb;
+            color: #0c5460;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .node-display {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .node-card {
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            min-width: 250px;
+            max-width: 300px;
+        }
+        .node-pending { border-color: #6c757d; background: #f8f9fa; }
+        .node-running { border-color: #fd7e14; background: #fff3cd; }
+        .node-done { border-color: #28a745; background: #d4edda; }
+        .node-failed { border-color: #dc3545; background: #f8d7da; }
+        .node-header {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .node-status {
+            font-weight: bold;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .node-title {
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        .node-details {
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌳 UAgent Tree View Functionality Test</h1>
+        
+        <div class="test-section info">
+            <h2>Test Overview</h2>
+            <p>This test verifies the tree view functionality when a user performs a research task.</p>
+            <p><strong>Research Goal ID:</strong> <code>cf55a5d2-5e4d-4eef-84c3-c63d48554d44</code></p>
+            <p><strong>Goal:</strong> AI and ML Research</p>
+        </div>
+
+        <div class="test-section">
+            <h2>1. Backend API Connectivity Test</h2>
+            <button onclick="testBackendConnection()">Test Backend Connection</button>
+            <div id="backend-result"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>2. Research Goal Status Test</h2>
+            <button onclick="testResearchGoalStatus()">Get Research Goal Status</button>
+            <div id="status-result"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>3. Tree Visualization Data Test</h2>
+            <button onclick="testTreeVisualization()">Get Tree Visualization Data</button>
+            <div id="tree-result"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>4. Tree Node Display Test</h2>
+            <button onclick="displayTreeNodes()">Display Tree Nodes</button>
+            <div id="nodes-display"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>5. Frontend Integration Test</h2>
+            <button onclick="testFrontendIntegration()">Test Frontend Access</button>
+            <div id="frontend-result"></div>
+        </div>
+    </div>
+
+    <script>
+        const BACKEND_URL = 'http://localhost:12000';
+        const FRONTEND_URL = 'http://localhost:12001';
+        const GOAL_ID = 'cf55a5d2-5e4d-4eef-84c3-c63d48554d44';
+
+        async function testBackendConnection() {
+            const resultDiv = document.getElementById('backend-result');
+            resultDiv.innerHTML = '<p>Testing backend connection...</p>';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h4>✅ Backend Connection Successful</h4>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        </div>
+                    `;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Backend Connection Failed</h4>
+                        <p>Error: ${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function testResearchGoalStatus() {
+            const resultDiv = document.getElementById('status-result');
+            resultDiv.innerHTML = '<p>Getting research goal status...</p>';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/research-tree/goals/${GOAL_ID}/status`);
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h4>✅ Research Goal Status Retrieved</h4>
+                            <p><strong>Goal:</strong> ${data.goal.title}</p>
+                            <p><strong>Total Nodes:</strong> ${data.tree_stats.total_nodes}</p>
+                            <p><strong>Completed Nodes:</strong> ${data.tree_stats.completed_nodes}</p>
+                            <p><strong>Success Rate:</strong> ${(data.tree_stats.success_rate * 100).toFixed(1)}%</p>
+                            <details>
+                                <summary>Full Response</summary>
+                                <pre>${JSON.stringify(data, null, 2)}</pre>
+                            </details>
+                        </div>
+                    `;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Research Goal Status Failed</h4>
+                        <p>Error: ${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function testTreeVisualization() {
+            const resultDiv = document.getElementById('tree-result');
+            resultDiv.innerHTML = '<p>Getting tree visualization data...</p>';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/research-tree/goals/${GOAL_ID}/visualization`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const nodeCount = Object.keys(data.all_nodes).length;
+                    const edgeCount = data.graphs.main_graph?.edges?.length || 0;
+                    
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h4>✅ Tree Visualization Data Retrieved</h4>
+                            <p><strong>Project Goal:</strong> ${data.overall_project_goal}</p>
+                            <p><strong>Nodes:</strong> ${nodeCount}</p>
+                            <p><strong>Edges:</strong> ${edgeCount}</p>
+                            <details>
+                                <summary>Full Response</summary>
+                                <pre>${JSON.stringify(data, null, 2)}</pre>
+                            </details>
+                        </div>
+                    `;
+                    
+                    // Store data for node display test
+                    window.treeData = data;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Tree Visualization Data Failed</h4>
+                        <p>Error: ${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        function displayTreeNodes() {
+            const resultDiv = document.getElementById('nodes-display');
+            
+            if (!window.treeData) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <p>❌ No tree data available. Please run "Get Tree Visualization Data" first.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const nodes = Object.values(window.treeData.all_nodes);
+            const edges = window.treeData.graphs.main_graph?.edges || [];
+            
+            let nodesHtml = '<div class="success"><h4>✅ Tree Nodes Display</h4>';
+            nodesHtml += `<p>Found ${nodes.length} nodes and ${edges.length} edges</p>`;
+            nodesHtml += '<div class="node-display">';
+            
+            nodes.forEach(node => {
+                const statusClass = `node-${node.status.toLowerCase()}`;
+                const statusIcon = getStatusIcon(node.status);
+                const nodeIcon = getNodeIcon(node.node_type);
+                
+                nodesHtml += `
+                    <div class="node-card ${statusClass}">
+                        <div class="node-header">
+                            <span>${nodeIcon}</span>
+                            <span class="node-status">${statusIcon} ${node.status}</span>
+                        </div>
+                        <div class="node-title">${node.goal}</div>
+                        <div class="node-details">
+                            <div><strong>Type:</strong> ${node.node_type}</div>
+                            <div><strong>Layer:</strong> ${node.layer}</div>
+                            <div><strong>Agent:</strong> ${node.agent_name || 'N/A'}</div>
+                            ${node.output_summary ? `<div><strong>Summary:</strong> ${node.output_summary.substring(0, 100)}...</div>` : ''}
+                            ${node.timestamp_created ? `<div><strong>Created:</strong> ${new Date(node.timestamp_created).toLocaleTimeString()}</div>` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            nodesHtml += '</div></div>';
+            resultDiv.innerHTML = nodesHtml;
+        }
+
+        function getStatusIcon(status) {
+            switch (status) {
+                case 'DONE': return '✅';
+                case 'RUNNING': return '🔄';
+                case 'FAILED': return '❌';
+                case 'READY': return '▶️';
+                case 'PENDING': return '⏳';
+                default: return '⚪';
+            }
+        }
+
+        function getNodeIcon(nodeType) {
+            switch (nodeType) {
+                case 'PLAN': return '🧠';
+                case 'EXECUTE': return '⚙️';
+                default: return '⚙️';
+            }
+        }
+
+        async function testFrontendIntegration() {
+            const resultDiv = document.getElementById('frontend-result');
+            resultDiv.innerHTML = '<p>Testing frontend integration...</p>';
+            
+            try {
+                const response = await fetch(`${FRONTEND_URL}/`);
+                if (response.ok) {
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h4>✅ Frontend Accessible</h4>
+                            <p>Frontend is running and accessible at: <a href="${FRONTEND_URL}" target="_blank">${FRONTEND_URL}</a></p>
+                            <p>External URL: <a href="https://work-2-ublzrjaecycmnmth.prod-runtime.all-hands.dev" target="_blank">https://work-2-ublzrjaecycmnmth.prod-runtime.all-hands.dev</a></p>
+                        </div>
+                    `;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Frontend Integration Failed</h4>
+                        <p>Error: ${error.message}</p>
+                        <p>This may be due to CORS restrictions or frontend not running.</p>
+                    </div>
+                `;
+            }
+        }
+
+        // Auto-run basic tests on page load
+        window.onload = function() {
+            setTimeout(() => {
+                testBackendConnection();
+                setTimeout(() => {
+                    testResearchGoalStatus();
+                    setTimeout(() => {
+                        testTreeVisualization();
+                        setTimeout(() => {
+                            displayTreeNodes();
+                        }, 1000);
+                    }, 1000);
+                }, 1000);
+            }, 500);
+        };
+    </script>
+</body>
+</html>
