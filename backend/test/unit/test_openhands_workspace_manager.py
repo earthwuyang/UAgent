@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import shutil
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from app.core.openhands.workspace_manager import (
@@ -220,8 +220,10 @@ class TestWorkspaceManager:
         assert research_id in workspace_manager.workspaces
 
         # Mock active processes for testing
-        mock_process = MagicMock()
+        mock_process = AsyncMock()
         mock_process.returncode = None  # Still running
+        mock_process.terminate.return_value = None
+        mock_process.wait.return_value = None
         workspace_manager.active_processes[research_id] = [mock_process]
 
         # Cleanup workspace

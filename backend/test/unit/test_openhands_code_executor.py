@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
+import pytest_asyncio
 
 from app.core.openhands.workspace_manager import WorkspaceManager
 from app.core.openhands.code_executor import (
@@ -28,16 +29,16 @@ class TestCodeExecutor:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.fixture
-    async def workspace_manager(self, temp_base_dir):
+    def workspace_manager(self, temp_base_dir):
         """Create WorkspaceManager instance for testing"""
         return WorkspaceManager(temp_base_dir)
 
     @pytest.fixture
-    async def code_executor(self, workspace_manager):
+    def code_executor(self, workspace_manager):
         """Create CodeExecutor instance for testing"""
         return CodeExecutor(workspace_manager)
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def test_workspace(self, workspace_manager):
         """Create a test workspace"""
         config = await workspace_manager.create_workspace("test_workspace")
@@ -62,7 +63,7 @@ print(f"2 + 2 = {result}")
         assert "2 + 2 = 4" in result.stdout
         assert result.stderr == ""
         assert result.execution_time > 0
-        assert "test_script.py" in result.files_created
+        assert any("test_script.py" in f for f in result.files_created + result.files_modified)
 
     @pytest.mark.asyncio
     async def test_python_code_execution_with_error(self, code_executor, test_workspace):

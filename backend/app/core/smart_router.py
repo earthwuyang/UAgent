@@ -8,7 +8,7 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, List, Tuple
 from enum import Enum
 
-from app.core.exceptions import ClassificationError, InvalidRequestError, ThresholdError
+# Exceptions defined at end of file
 
 
 class EngineType(str, Enum):
@@ -129,10 +129,14 @@ class SmartRouter:
         # Check cache
         cache_key = self._generate_cache_key(request.user_request)
         if self.cache:
-            cached_result = await self.cache.get(cache_key)
-            if cached_result:
-                self.logger.info(f"Cache hit for request: {request.user_request[:50]}...")
-                return ClassificationResult(**cached_result)
+            try:
+                cached_result = await self.cache.get(cache_key)
+                if cached_result:
+                    self.logger.info(f"Cache hit for request: {request.user_request[:50]}...")
+                    return ClassificationResult(**cached_result)
+            except Exception as e:
+                self.logger.warning(f"Cache get error: {e}")
+                # Continue without cache
 
         # Perform classification
         classification_data = await self._classify_with_retry(request)
@@ -162,7 +166,11 @@ class SmartRouter:
 
         # Cache result
         if self.cache:
-            await self.cache.set(cache_key, asdict(result), ttl=self.cache_ttl)
+            try:
+                await self.cache.set(cache_key, asdict(result), ttl=self.cache_ttl)
+            except Exception as e:
+                self.logger.warning(f"Cache set error: {e}")
+                # Continue without caching
 
         self.logger.info(
             f"Classified request as {result.primary_engine} "

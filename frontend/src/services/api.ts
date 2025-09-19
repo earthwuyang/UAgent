@@ -4,6 +4,7 @@ import axios from 'axios';
 import type {
   ClassificationRequest,
   ClassificationResult,
+  RouteAndExecuteAck,
   RouteAndExecuteResponse,
   EnginesResponse,
   SystemStatus,
@@ -58,7 +59,7 @@ export class UAgentAPI {
     return response.data;
   }
 
-  static async routeAndExecute(request: ClassificationRequest): Promise<RouteAndExecuteResponse> {
+  static async routeAndExecute(request: ClassificationRequest): Promise<RouteAndExecuteAck> {
     const response = await api.post('/router/route-and-execute', request);
     return response.data;
   }
@@ -90,9 +91,17 @@ export class UAgentAPI {
     return response.data;
   }
 
-  static async getFullResearchResult(researchId: string): Promise<any> {
+  static async getFullResearchResult(researchId: string): Promise<RouteAndExecuteResponse | null> {
     const response = await api.get(`/research/sessions/${researchId}/full`);
-    return response.data;
+    const data = response.data;
+    if (!data || !data.result) {
+      return null;
+    }
+    return data.result as RouteAndExecuteResponse;
+  }
+
+  static async getSessionReport(researchId: string): Promise<RouteAndExecuteResponse | null> {
+    return this.getFullResearchResult(researchId);
   }
 
   static async deleteResearchSession(researchId: string): Promise<{ message: string }> {

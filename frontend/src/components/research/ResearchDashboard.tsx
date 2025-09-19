@@ -13,6 +13,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { Alert, AlertDescription } from '../ui/alert';
 import { ResearchProgressStream } from './ResearchProgressStream';
 import ResearchTreeVisualization from './ResearchTreeVisualization';
+import { HTTP_BASE_URL } from '../../config';
+import type { RouteAndExecuteAck } from '../../types/api';
 
 interface ResearchRequest {
   user_request: string;
@@ -20,20 +22,11 @@ interface ResearchRequest {
   context?: any;
 }
 
-interface ResearchResponse {
-  classification: {
-    primary_engine: string;
-    confidence_score: number;
-    reasoning: string;
-  };
-  execution: any;
-  session_id?: string;
-}
-
 export const ResearchDashboard: React.FC = () => {
+  const SESSION_STORAGE_PREFIX = 'uagent:session:';
   const [request, setRequest] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [results, setResults] = useState<ResearchResponse | null>(null);
+  const [acknowledgement, setAcknowledgement] = useState<RouteAndExecuteAck | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -63,11 +56,30 @@ export const ResearchDashboard: React.FC = () => {
 
     setIsLoading(true);
     setError(null);
-    setResults(null);
+    setAcknowledgement(null);
 
     // Generate new session ID for this research
     const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     setSessionId(newSessionId);
+
+    const storageKey = `${SESSION_STORAGE_PREFIX}${newSessionId}`;
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify({
+        request,
+        classification: null,
+        result: null,
+        createdAt: new Date().toISOString()
+      }));
+    } catch (storageError) {
+      console.error('Failed to seed session storage', storageError);
+    }
+
+    try {
+      const sessionUrl = `${window.location.origin}/${newSessionId}`;
+      window.open(sessionUrl, '_blank');
+    } catch (openError) {
+      console.error('Failed to open session window', openError);
+    }
 
     try {
       const requestData: ResearchRequest = {
@@ -79,7 +91,7 @@ export const ResearchDashboard: React.FC = () => {
         }
       };
 
-      const response = await fetch('http://localhost:8012/api/router/route-and-execute', {
+      const response = await fetch(`${HTTP_BASE_URL}/api/router/route-and-execute`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -91,8 +103,19 @@ export const ResearchDashboard: React.FC = () => {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      const data = await response.json();
-      setResults(data);
+      const data: RouteAndExecuteAck = await response.json();
+      setAcknowledgement(data);
+
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify({
+          request,
+          classification: data.classification,
+          result: null,
+          updatedAt: new Date().toISOString()
+        }));
+      } catch (storageError) {
+        console.error('Failed to persist session results', storageError);
+      }
 
     } catch (err) {
       console.error('Research request failed:', err);
@@ -169,10 +192,10 @@ export const ResearchDashboard: React.FC = () => {
                 )}
               </Button>
 
-              {results && (
-                <Badge className={`${getEngineColor(results.classification.primary_engine)} text-white`}>
-                  {getEngineIcon(results.classification.primary_engine)} {results.classification.primary_engine}
-                  <span className="ml-1">({Math.round(results.classification.confidence_score * 100)}%)</span>
+              {acknowledgement && (
+                <Badge className={`${getEngineColor(acknowledgement.classification.primary_engine)} text-white`}>
+                  {getEngineIcon(acknowledgement.classification.primary_engine)} {acknowledgement.classification.primary_engine}
+                  <span className="ml-1">({Math.round(acknowledgement.classification.confidence_score * 100)}%)</span>
                 </Badge>
               )}
             </div>
@@ -214,7 +237,7 @@ export const ResearchDashboard: React.FC = () => {
       )}
 
       {/* Results and Progress */}
-      {(sessionId || results) && (
+      {(sessionId || acknowledgement) && (
         <Tabs defaultValue="progress" className="w-full">
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="progress">🔄 Live Progress</TabsTrigger>
@@ -242,86 +265,35 @@ export const ResearchDashboard: React.FC = () => {
           </TabsContent>
 
           <TabsContent value="results" className="space-y-4">
-            {results ? (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Classification Results */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      🎯 Classification Results
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="font-medium">Selected Engine:</span>
-                        <Badge className={`${getEngineColor(results.classification.primary_engine)} text-white`}>
-                          {getEngineIcon(results.classification.primary_engine)} {results.classification.primary_engine}
-                        </Badge>
-                      </div>
-                    </div>
-
-                    <div>
-                      <span className="font-medium">Confidence Score:</span>
-                      <div className="flex items-center gap-2 mt-1">
-                        <div className="flex-1 bg-gray-200 rounded-full h-2">
-                          <div
-                            className="bg-blue-600 h-2 rounded-full"
-                            style={{ width: `${results.classification.confidence_score * 100}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-sm">
-                          {Math.round(results.classification.confidence_score * 100)}%
-                        </span>
-                      </div>
-                    </div>
-
-                    <div>
-                      <span className="font-medium">Reasoning:</span>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        {results.classification.reasoning}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                {/* Execution Results */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      ⚡ Execution Results
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-3">
-                      {results.execution && (
-                        <div className="p-4 bg-muted rounded-lg">
-                          <h4 className="font-medium mb-2">Engine Output:</h4>
-                          <pre className="text-xs overflow-auto max-h-40">
-                            {JSON.stringify(results.execution, null, 2)}
-                          </pre>
-                        </div>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            ) : (
-              <Card>
-                <CardContent className="text-center py-8">
-                  <div className="text-4xl mb-2">⏳</div>
+            <Card>
+              <CardContent className="text-center py-8 space-y-3">
+                <div className="text-4xl">🪄</div>
+                {acknowledgement ? (
+                  <>
+                    <p className="text-muted-foreground">
+                      Detailed reports are generated in the dedicated session window.
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      If the window did not open automatically, visit
+                      <br />
+                      <span className="font-mono text-xs bg-gray-100 px-2 py-1 rounded inline-block mt-1">
+                        {window.location.origin}/{sessionId}
+                      </span>
+                    </p>
+                  </>
+                ) : (
                   <p className="text-muted-foreground">
-                    Research results will appear here once processing is complete
+                    Start a research task to see the live report link here.
                   </p>
-                </CardContent>
-              </Card>
-            )}
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       )}
 
       {/* Instructions */}
-      {!sessionId && !results && (
+      {!sessionId && !acknowledgement && (
         <Card>
           <CardContent className="text-center py-8 space-y-4">
             <div className="text-6xl">🔬</div>

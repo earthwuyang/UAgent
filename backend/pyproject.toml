@@ -58,5 +58,6 @@ markers = [
     "integration: Integration tests",
     "e2e: End-to-end tests",
     "slow: Slow tests",
-    "performance: Performance tests"
+    "performance: Performance tests",
+    "asyncio: Async test marker"
 ]

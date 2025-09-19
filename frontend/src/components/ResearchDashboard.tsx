@@ -38,8 +38,10 @@ const ResearchDashboard: React.FC = () => {
       case 'completed':
         return 'text-green-600'
       case 'in_progress':
+      case 'running':
         return 'text-yellow-600'
       case 'failed':
+      case 'error':
         return 'text-red-600'
       default:
         return 'text-gray-600'
@@ -51,6 +53,9 @@ const ResearchDashboard: React.FC = () => {
       case 'completed':
         return CheckCircle
       case 'in_progress':
+      case 'running':
+        return Clock
+      case 'error':
         return Clock
       default:
         return Clock
@@ -98,8 +103,8 @@ const ResearchDashboard: React.FC = () => {
                 <Search className="h-5 w-5 text-blue-600" />
               </div>
               <div>
-                <div className="text-2xl font-bold text-gray-900">
-                  {sessions.sessions.filter(s => s.type === 'deep_research').length}
+              <div className="text-2xl font-bold text-gray-900">
+                  {sessions.sessions.filter(s => (s.type ?? '').toLowerCase() === 'deep_research').length}
                 </div>
                 <div className="text-sm text-gray-600">Deep Research</div>
               </div>
@@ -112,8 +117,8 @@ const ResearchDashboard: React.FC = () => {
                 <Search className="h-5 w-5 text-green-600" />
               </div>
               <div>
-                <div className="text-2xl font-bold text-gray-900">
-                  {sessions.sessions.filter(s => s.type === 'code_research').length}
+              <div className="text-2xl font-bold text-gray-900">
+                  {sessions.sessions.filter(s => (s.type ?? '').toLowerCase() === 'code_research').length}
                 </div>
                 <div className="text-sm text-gray-600">Code Research</div>
               </div>
@@ -126,8 +131,8 @@ const ResearchDashboard: React.FC = () => {
                 <Search className="h-5 w-5 text-purple-600" />
               </div>
               <div>
-                <div className="text-2xl font-bold text-gray-900">
-                  {sessions.sessions.filter(s => s.type === 'scientific_research').length}
+              <div className="text-2xl font-bold text-gray-900">
+                  {sessions.sessions.filter(s => (s.type ?? '').toLowerCase() === 'scientific_research').length}
                 </div>
                 <div className="text-sm text-gray-600">Scientific Research</div>
               </div>
@@ -150,16 +155,18 @@ const ResearchDashboard: React.FC = () => {
           <div className="divide-y divide-gray-200">
             {sessions.sessions.map((session) => {
               const StatusIcon = getStatusIcon(session.status)
+              const sessionIdentifier = session.session_id ?? session.research_id ?? 'unknown'
+              const sessionType = (session.type ?? 'unknown').toLowerCase()
 
               return (
-                <div key={session.research_id} className="p-6 hover:bg-gray-50 transition-colors">
+                <div key={sessionIdentifier} className="p-6 hover:bg-gray-50 transition-colors">
                   <div className="flex items-start justify-between">
                     <div className="flex-1 space-y-3">
                       {/* Header */}
                       <div className="flex items-center space-x-3">
                         <StatusIcon className={clsx('h-5 w-5', getStatusColor(session.status))} />
-                        <span className={clsx('badge', getEngineColor(session.type))}>
-                          {session.type.replace('_', ' ')}
+                        <span className={clsx('badge', getEngineColor(sessionType))}>
+                          {sessionType.replace('_', ' ')}
                         </span>
                         <span className="text-sm text-gray-500">
                           {session.created_at || 'Unknown time'}
@@ -172,7 +179,7 @@ const ResearchDashboard: React.FC = () => {
                           {session.query}
                         </h3>
                         <p className="text-sm text-gray-600">
-                          Research ID: {session.research_id}
+                          Session ID: {sessionIdentifier}
                         </p>
                       </div>
 
@@ -186,19 +193,19 @@ const ResearchDashboard: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex items-center space-x-2 ml-4">
-                      <button
-                        onClick={() => {
-                          // Navigate to session details
-                          window.open(`/research/sessions/${session.research_id}`, '_blank')
-                        }}
+                      <a
+                        href={`/${sessionIdentifier}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="btn btn-outline btn-sm flex items-center space-x-1"
                       >
                         <ExternalLink className="h-3 w-3" />
-                        <span>View</span>
-                      </button>
+                        <span>Open</span>
+                      </a>
                       <button
-                        onClick={() => handleDeleteSession(session.research_id)}
+                        onClick={() => session.research_id && handleDeleteSession(session.research_id)}
                         className="btn btn-outline btn-sm text-red-600 border-red-300 hover:bg-red-50 flex items-center space-x-1"
+                        disabled={!session.research_id}
                       >
                         <Trash2 className="h-3 w-3" />
                         <span>Delete</span>
@@ -228,27 +235,30 @@ const ResearchDashboard: React.FC = () => {
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Activity</h2>
           <div className="space-y-3">
-            {sessions.sessions.slice(0, 5).map((session) => (
-              <div key={session.research_id} className="flex items-center space-x-3 text-sm">
-                <div className={clsx('w-2 h-2 rounded-full', {
-                  'bg-green-500': session.status === 'completed',
-                  'bg-yellow-500': session.status === 'in_progress',
-                  'bg-red-500': session.status === 'failed',
-                  'bg-gray-500': !['completed', 'in_progress', 'failed'].includes(session.status),
-                })} />
-                <span className="text-gray-600">
-                  {session.status === 'completed' ? 'Completed' :
-                   session.status === 'in_progress' ? 'Started' :
-                   'Attempted'} research:
-                </span>
-                <span className="font-medium text-gray-900 truncate max-w-md">
-                  "{session.query}"
-                </span>
-                <span className="text-gray-500 ml-auto">
-                  {session.created_at || 'Recently'}
-                </span>
-              </div>
-            ))}
+            {sessions.sessions.slice(0, 5).map((session) => {
+              const sessionIdentifier = session.session_id ?? session.research_id ?? Math.random().toString(36)
+              return (
+                <div key={sessionIdentifier} className="flex items-center space-x-3 text-sm">
+                  <div className={clsx('w-2 h-2 rounded-full', {
+                    'bg-green-500': session.status === 'completed',
+                    'bg-yellow-500': ['in_progress', 'running'].includes(session.status),
+                    'bg-red-500': ['failed', 'error'].includes(session.status),
+                    'bg-gray-500': !['completed', 'in_progress', 'running', 'failed', 'error'].includes(session.status),
+                  })} />
+                  <span className="text-gray-600">
+                    {session.status === 'completed' ? 'Completed'
+                      : ['in_progress', 'running'].includes(session.status) ? 'Started'
+                      : 'Attempted'} research:
+                  </span>
+                  <span className="font-medium text-gray-900 truncate max-w-md">
+                    "{session.query}"
+                  </span>
+                  <span className="text-gray-500 ml-auto">
+                    {session.created_at || 'Recently'}
+                  </span>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

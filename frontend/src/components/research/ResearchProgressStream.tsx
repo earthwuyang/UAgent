@@ -9,6 +9,7 @@ import { Badge } from '../ui/badge';
 import { Progress } from '../ui/progress';
 import { ScrollArea } from '../ui/scroll-area';
 import { Separator } from '../ui/separator';
+import { WS_BASE_URL } from '../../config';
 
 interface ProgressEvent {
   event_type: string;
@@ -77,9 +78,15 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
   useEffect(() => {
     if (!sessionId) return;
 
+    let isCleanup = false;
+    let progressReconnectTimeout: number | null = null;
+    let engineReconnectTimeout: number | null = null;
+
     // Connect to research progress WebSocket
     const connectProgressWS = () => {
-      const wsUrl = `ws://localhost:8012/ws/research/${sessionId}`;
+      if (isCleanup) return;
+
+      const wsUrl = `${WS_BASE_URL}/ws/research/${sessionId}`;
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -111,13 +118,15 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         console.log('Research progress WebSocket disconnected');
         setConnected(false);
         onConnectionChange?.(false);
 
-        // Reconnect after 3 seconds
-        setTimeout(connectProgressWS, 3000);
+        // Only reconnect if not a clean close and component hasn't unmounted
+        if (!isCleanup && event.code !== 1000) {
+          progressReconnectTimeout = setTimeout(connectProgressWS, 3000);
+        }
       };
 
       ws.onerror = (error) => {
@@ -129,7 +138,9 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
 
     // Connect to engine status WebSocket
     const connectEngineWS = () => {
-      const wsUrl = `ws://localhost:8012/ws/engines/status`;
+      if (isCleanup) return;
+
+      const wsUrl = `${WS_BASE_URL}/ws/engines/status`;
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -151,9 +162,13 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         console.log('Engine status WebSocket disconnected');
-        setTimeout(connectEngineWS, 3000);
+
+        // Only reconnect if not a clean close and component hasn't unmounted
+        if (!isCleanup && event.code !== 1000) {
+          engineReconnectTimeout = setTimeout(connectEngineWS, 3000);
+        }
       };
 
       engineWsRef.current = ws;
@@ -163,11 +178,28 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
     connectEngineWS();
 
     return () => {
-      wsRef.current?.close();
-      journalWsRef.current?.close();
-      engineWsRef.current?.close();
+      isCleanup = true;
+
+      // Clear any pending reconnection timeouts
+      if (progressReconnectTimeout) {
+        clearTimeout(progressReconnectTimeout);
+      }
+      if (engineReconnectTimeout) {
+        clearTimeout(engineReconnectTimeout);
+      }
+
+      // Close WebSocket connections with clean close code
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.close(1000, 'Component unmounting');
+      }
+      if (engineWsRef.current?.readyState === WebSocket.OPEN) {
+        engineWsRef.current.close(1000, 'Component unmounting');
+      }
+      if (journalWsRef.current?.readyState === WebSocket.OPEN) {
+        journalWsRef.current.close(1000, 'Component unmounting');
+      }
     };
-  }, [sessionId, onConnectionChange]);
+  }, [sessionId, onConnectionChange, onEventsUpdate]);
 
   const getEventIcon = (eventType: string) => {
     switch (eventType) {

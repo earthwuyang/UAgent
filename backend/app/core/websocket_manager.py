@@ -86,10 +86,12 @@ class WebSocketConnectionManager:
         self.engine_status_connections: Set[WebSocket] = set()
         self.metrics_connections: Set[WebSocket] = set()
         self.openhands_connections: Dict[str, Set[WebSocket]] = {}
+        self.llm_stream_connections: Dict[str, Set[WebSocket]] = {}
 
         # Event storage for replay
         self.event_history: Dict[str, List[ProgressEvent]] = {}
         self.journal_entries: Dict[str, List[ResearchJournalEntry]] = {}
+        self.llm_conversations: Dict[str, List[Dict[str, Any]]] = {}
 
         # Current engine statuses
         self.engine_statuses: Dict[str, EngineStatus] = {}
@@ -105,9 +107,12 @@ class WebSocketConnectionManager:
         # Send event history for this session
         if session_id in self.event_history:
             for event in self.event_history[session_id]:
+                # Serialize event manually to handle enum properly
+                event_dict = asdict(event)
+                event_dict["event_type"] = event.event_type.value  # Use enum value instead of name
                 await self._send_to_websocket(websocket, {
                     "type": "event_replay",
-                    "event": asdict(event)
+                    "event": event_dict
                 })
 
         logger.info(f"WebSocket connected for research session: {session_id}")
@@ -142,6 +147,21 @@ class WebSocketConnectionManager:
 
         logger.info(f"WebSocket connected for OpenHands session: {session_id}")
 
+    async def connect_llm_stream(self, websocket: WebSocket, session_id: str):
+        """Connect to LLM interaction streaming"""
+        await websocket.accept()
+
+        if session_id not in self.llm_stream_connections:
+            self.llm_stream_connections[session_id] = set()
+        self.llm_stream_connections[session_id].add(websocket)
+
+        # Replay stored conversation events
+        if session_id in self.llm_conversations:
+            for event in self.llm_conversations[session_id]:
+                await self._send_to_websocket(websocket, event)
+
+        logger.info(f"WebSocket connected for LLM stream session: {session_id}")
+
     async def disconnect(self, websocket: WebSocket):
         """Handle WebSocket disconnection"""
         # Remove from all connection sets
@@ -154,7 +174,21 @@ class WebSocketConnectionManager:
         for connections in self.openhands_connections.values():
             connections.discard(websocket)
 
+        for connections in self.llm_stream_connections.values():
+            connections.discard(websocket)
+
         logger.info("WebSocket disconnected")
+
+    def store_llm_event(self, session_id: str, message: Dict[str, Any]):
+        """Persist LLM stream event for later replay"""
+        if session_id not in self.llm_conversations:
+            self.llm_conversations[session_id] = []
+
+        self.llm_conversations[session_id].append(message)
+
+        # Prevent unbounded growth
+        if len(self.llm_conversations[session_id]) > 2000:
+            self.llm_conversations[session_id] = self.llm_conversations[session_id][-1000:]
 
     async def broadcast_research_event(self, session_id: str, event: ProgressEvent):
         """Broadcast research progress event to connected clients"""
@@ -169,9 +203,12 @@ class WebSocketConnectionManager:
 
         # Broadcast to connected clients
         if session_id in self.research_connections:
+            # Serialize event manually to handle enum properly
+            event_dict = asdict(event)
+            event_dict["event_type"] = event.event_type.value  # Use enum value instead of name
             message = {
                 "type": "research_event",
-                "event": asdict(event)
+                "event": event_dict
             }
             await self._broadcast_to_connections(
                 self.research_connections[session_id],
@@ -294,6 +331,38 @@ class ResearchProgressTracker:
             message=f"Research session started: {request}",
             metadata={"request": request},
             level="info"
+        )
+
+        await self.websocket_manager.broadcast_journal_entry(session_id, journal_entry)
+
+    async def log_research_completed(self, session_id: str, engine: str, result_summary: str, metadata: Dict[str, Any] = None):
+        """Log research completion event"""
+        event = ProgressEvent(
+            event_type=EventType.RESEARCH_COMPLETED,
+            session_id=session_id,
+            timestamp=datetime.now(),
+            data={
+                "engine": engine,
+                "result_summary": result_summary,
+                "metadata": metadata or {},
+                "status": "completed"
+            },
+            source=engine,
+            progress_percentage=100.0,
+            message=f"Research completed successfully using {engine} engine"
+        )
+
+        await self.websocket_manager.broadcast_research_event(session_id, event)
+
+        # Add journal entry
+        journal_entry = ResearchJournalEntry(
+            timestamp=datetime.now(),
+            session_id=session_id,
+            engine=engine,
+            phase="completion",
+            message=f"Research completed: {result_summary}",
+            metadata=metadata or {},
+            level="success"
         )
 
         await self.websocket_manager.broadcast_journal_entry(session_id, journal_entry)

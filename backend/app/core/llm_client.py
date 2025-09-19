@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
+from typing import AsyncIterator
 
 try:
     import anthropic
@@ -36,6 +37,11 @@ class LLMClient(ABC):
     @abstractmethod
     async def generate(self, prompt: str, **kwargs) -> str:
         """Generate text using the LLM"""
+        pass
+
+    @abstractmethod
+    async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        """Stream generate text using the LLM"""
         pass
 
 
@@ -127,6 +133,12 @@ class AnthropicClient(LLMClient):
             self.logger.error(f"Anthropic generation error: {e}")
             raise
 
+    async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        """Stream generate text using Claude (placeholder - not implemented)"""
+        # For now, fall back to non-streaming
+        result = await self.generate(prompt, **kwargs)
+        yield result
+
 
 class OpenAIClient(LLMClient):
     """OpenAI GPT client for LLM operations"""
@@ -214,6 +226,12 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             self.logger.error(f"OpenAI generation error: {e}")
             raise
+
+    async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        """Stream generate text using GPT (placeholder - not implemented)"""
+        # For now, fall back to non-streaming
+        result = await self.generate(prompt, **kwargs)
+        yield result
 
 
 class DashScopeClient(LLMClient):
@@ -344,6 +362,94 @@ class DashScopeClient(LLMClient):
             return response.output.text
         else:
             raise Exception(f"DashScope API error: {response.status_code} - {response.message}")
+
+    async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        """Stream generate text using Qwen with live token streaming
+
+        Args:
+            prompt: Generation prompt
+            **kwargs: Additional parameters
+
+        Yields:
+            Generated text tokens as they are produced
+        """
+        try:
+            import asyncio
+
+            # Use async streaming generation
+            async for chunk in self._async_stream_generate(prompt, **kwargs):
+                yield chunk
+
+        except Exception as e:
+            self.logger.error(f"DashScope streaming error: {e}")
+            raise
+
+    async def _async_stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        """Async streaming generation for DashScope"""
+        import asyncio
+        import threading
+        from queue import Queue
+
+        def _sync_stream():
+            """Synchronous streaming generator"""
+            try:
+                response = Generation.call(
+                    model=self.model,
+                    prompt=prompt,
+                    temperature=kwargs.get("temperature", 0.7),
+                    max_tokens=kwargs.get("max_tokens", 1000),
+                    top_p=kwargs.get("top_p", 0.8),
+                    stream=True,  # Enable streaming
+                )
+
+                for chunk in response:
+                    if chunk.status_code == 200:
+                        if hasattr(chunk.output, 'text') and chunk.output.text:
+                            yield chunk.output.text
+                    else:
+                        raise Exception(f"DashScope streaming error: {chunk.status_code} - {chunk.message}")
+
+            except Exception as e:
+                self.logger.error(f"DashScope sync streaming error: {e}")
+                raise
+
+        # Create a queue for thread communication
+        queue = Queue()
+
+        def worker():
+            try:
+                for chunk in _sync_stream():
+                    queue.put(('data', chunk))
+                queue.put(('done', None))
+            except Exception as e:
+                queue.put(('error', e))
+
+        # Start the worker thread
+        thread = threading.Thread(target=worker)
+        thread.start()
+
+        try:
+            while True:
+                # Wait for data with timeout
+                try:
+                    item_type, item_data = queue.get(timeout=30)  # 30 second timeout
+
+                    if item_type == 'data':
+                        yield item_data
+                    elif item_type == 'done':
+                        break
+                    elif item_type == 'error':
+                        raise item_data
+
+                except:
+                    # Check if thread is still alive
+                    if not thread.is_alive():
+                        break
+                    raise
+
+        finally:
+            # Ensure thread is cleaned up
+            thread.join(timeout=1)
 
 
 

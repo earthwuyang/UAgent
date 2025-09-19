@@ -103,6 +103,12 @@ export interface RouteAndExecuteResponse {
   };
 }
 
+export interface RouteAndExecuteAck {
+  session_id: string;
+  status: string;
+  classification: ClassificationResult;
+}
+
 export interface EngineInfo {
   name: string;
   description: string;
@@ -143,9 +149,13 @@ export interface HealthResponse {
 export type EngineType = 'DEEP_RESEARCH' | 'CODE_RESEARCH' | 'SCIENTIFIC_RESEARCH';
 
 export interface ResearchSession {
-  research_id: string;
-  type: string;
+  session_id?: string;
+  research_id?: string;
+  type?: string;
   query: string;
   status: string;
   created_at?: string;
+  updated_at?: string;
+  has_result?: boolean;
+  error?: string | null;
 }

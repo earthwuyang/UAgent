@@ -2,11 +2,11 @@ import React, { useState } from 'react'
 import { Send, Sparkles, AlertCircle, CheckCircle } from 'lucide-react'
 import { useQuery, useMutation } from 'react-query'
 import UAgentAPI from '../services/api'
-import type { ClassificationRequest, ClassificationResult, RouteAndExecuteResponse } from '../types/api'
+import type { ClassificationRequest, ClassificationResult, RouteAndExecuteAck } from '../types/api'
 import { clsx } from 'clsx'
 
 interface SmartResearchInputProps {
-  onResultReceived?: (result: RouteAndExecuteResponse) => void
+  onResultReceived?: (ack: RouteAndExecuteAck) => void
 }
 
 const SmartResearchInput: React.FC<SmartResearchInputProps> = ({ onResultReceived }) => {

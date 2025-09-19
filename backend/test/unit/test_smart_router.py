@@ -9,9 +9,7 @@ from app.core.smart_router import (
     SmartRouter,
     EngineType,
     ClassificationRequest,
-    ClassificationResult
-)
-from app.core.exceptions import (
+    ClassificationResult,
     ClassificationError,
     InvalidRequestError,
     ThresholdError

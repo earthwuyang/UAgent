@@ -190,6 +190,38 @@ async def websocket_live_metrics(websocket: WebSocket):
         await websocket_manager.disconnect(websocket)
 
 
+@router.websocket("/llm/{session_id}")
+async def websocket_llm_stream(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for real-time LLM interaction streaming
+    Streams live LLM conversation messages, prompts, responses, and token generation
+    """
+    try:
+        await websocket_manager.connect_llm_stream(websocket, session_id)
+        logger.info(f"LLM stream WebSocket connected for session: {session_id}")
+
+        # Keep connection alive and handle client commands
+        while True:
+            try:
+                message = await websocket.receive_text()
+                logger.debug(f"Received LLM stream message from client {session_id}: {message}")
+
+                # Handle client commands for LLM interaction
+                await handle_llm_command(session_id, message, websocket)
+
+            except WebSocketDisconnect:
+                logger.info(f"LLM stream WebSocket disconnected for session: {session_id}")
+                break
+            except Exception as e:
+                logger.error(f"Error in LLM stream WebSocket for session {session_id}: {e}")
+                break
+
+    except Exception as e:
+        logger.error(f"Failed to establish LLM stream WebSocket for session {session_id}: {e}")
+    finally:
+        await websocket_manager.disconnect(websocket)
+
+
 async def handle_client_command(session_id: str, message: str):
     """Handle client commands for research session control"""
     try:
@@ -228,6 +260,72 @@ async def handle_openhands_command(session_id: str, message: str):
 
     except Exception as e:
         logger.error(f"Failed to handle OpenHands command: {e}")
+
+
+async def handle_llm_command(session_id: str, message: str, websocket: WebSocket):
+    """Handle client commands for LLM interaction control"""
+    try:
+        import json
+        command = json.loads(message)
+
+        if command.get("action") == "stream_prompt":
+            # Stream LLM response for a prompt
+            prompt = command.get("prompt", "")
+            engine_type = command.get("engine", "qwen")
+
+            logger.info(f"Stream prompt command received for session {session_id}: {prompt[:100]}...")
+
+            # Get LLM client
+            from app.core.app_state import get_app_state
+            app_state = get_app_state()
+            llm_client = app_state.get("llm_client")
+
+            if llm_client:
+                # Send prompt start event
+                await websocket.send_text(json.dumps({
+                    "type": "llm_prompt_start",
+                    "session_id": session_id,
+                    "prompt": prompt,
+                    "engine": engine_type,
+                    "timestamp": "2024-01-01T00:00:00Z"
+                }))
+
+                # Stream LLM response
+                try:
+                    async for chunk in llm_client.stream_generate(prompt):
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "session_id": session_id,
+                            "token": chunk,
+                            "timestamp": "2024-01-01T00:00:00Z"
+                        }))
+
+                    # Send completion event
+                    await websocket.send_text(json.dumps({
+                        "type": "llm_prompt_complete",
+                        "session_id": session_id,
+                        "timestamp": "2024-01-01T00:00:00Z"
+                    }))
+
+                except Exception as e:
+                    await websocket.send_text(json.dumps({
+                        "type": "llm_error",
+                        "session_id": session_id,
+                        "error": str(e),
+                        "timestamp": "2024-01-01T00:00:00Z"
+                    }))
+
+        elif command.get("action") == "get_conversation":
+            # Send current conversation history
+            conversation = await get_llm_conversation(session_id)
+            await websocket.send_text(json.dumps({
+                "type": "conversation_history",
+                "session_id": session_id,
+                "conversation": conversation
+            }))
+
+    except Exception as e:
+        logger.error(f"Failed to handle LLM command: {e}")
 
 
 async def handle_journal_command(session_id: str, message: str, websocket: WebSocket):
@@ -303,6 +401,13 @@ async def search_journal_entries(session_id: str, search_term: str) -> list:
             results.append(entry.__dict__)
 
     return results
+
+
+async def get_llm_conversation(session_id: str) -> list:
+    """Get LLM conversation history for a session"""
+    if session_id in websocket_manager.llm_conversations:
+        return websocket_manager.llm_conversations[session_id]
+    return []
 
 
 async def get_current_metrics() -> Dict[str, Any]:

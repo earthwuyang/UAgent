@@ -10,6 +10,7 @@ from enum import Enum
 
 from ..llm_client import LLMClient
 from ..openhands import OpenHandsClient, CodeGenerationRequest
+from ..websocket_manager import progress_tracker
 from .deep_research import DeepResearchEngine, ResearchResult as DeepResearchResult
 from .code_research import CodeResearchEngine, CodeResearchResult
 
@@ -686,12 +687,75 @@ class ScientificResearchEngine:
         self.max_iterations = self.config.get("max_iterations", 3)
         self.confidence_threshold = self.config.get("confidence_threshold", 0.8)
 
+        self._session_phase_nodes: Dict[str, Dict[str, str]] = {}
+        self._session_root_nodes: Dict[str, str] = {}
+
+    def _get_root_node_id(self, session_id: Optional[str]) -> str:
+        if not session_id:
+            return "scientific_research-root"
+        if session_id not in self._session_root_nodes:
+            self._session_root_nodes[session_id] = f"{session_id}-scientific_research-root"
+        return self._session_root_nodes[session_id]
+
+    async def _log_progress(
+        self,
+        session_id: Optional[str],
+        phase: str,
+        progress: float,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        parent_phase: Optional[str] = None,
+        node_type: str = "step"
+    ) -> str:
+        if not session_id:
+            return ""
+
+        metadata = dict(metadata or {})
+        node_id = metadata.get("node_id")
+
+        phase_nodes = self._session_phase_nodes.setdefault(session_id, {})
+        if node_id is None:
+            node_id = phase_nodes.get(phase) or f"{session_id}-scientific-{phase}-{uuid.uuid4().hex[:6]}"
+        parent_id = metadata.get("parent_id")
+        if not parent_id:
+            if parent_phase and parent_phase in phase_nodes:
+                parent_id = phase_nodes[parent_phase]
+            else:
+                parent_id = self._get_root_node_id(session_id)
+        metadata["parent_id"] = parent_id
+        phase_nodes[phase] = node_id
+
+        metadata["node_id"] = node_id
+        metadata.setdefault("node_type", node_type)
+        metadata.setdefault("title", message)
+        metadata.setdefault("phase", phase)
+
+        try:
+            await progress_tracker.log_research_progress(
+                session_id=session_id or "unknown",
+                engine="scientific_research",
+                phase=phase,
+                progress=progress,
+                message=message,
+                metadata=metadata
+            )
+        except Exception as exc:  # pragma: no cover - best effort logging
+            self.logger.debug(
+                "Failed to log scientific research progress for %s (phase=%s): %s",
+                session_id,
+                phase,
+                exc
+            )
+
+        return metadata["node_id"]
+
     async def conduct_research(
         self,
         research_question: str,
         include_literature_review: bool = True,
         include_code_analysis: bool = True,
-        enable_iteration: bool = True
+        enable_iteration: bool = True,
+        session_id: Optional[str] = None
     ) -> ScientificResearchResult:
         """Conduct comprehensive scientific research
 
@@ -714,6 +778,16 @@ class ScientificResearchEngine:
         """
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
+
+        root_id = self._get_root_node_id(session_id)
+
+        await self._log_progress(
+            session_id,
+            phase="initializing",
+            progress=5.0,
+            message="Planning multi-engine scientific workflow",
+            metadata={"query": research_question, "parent_id": root_id}
+        )
 
         # Initialize result structure
         result = ScientificResearchResult(
@@ -756,6 +830,15 @@ class ScientificResearchEngine:
 
             # Execute background research concurrently
             if background_tasks:
+                await self._log_progress(
+                    session_id,
+                    phase="background_research",
+                    progress=18.0,
+                    message="Running background research across engines",
+                    metadata={"include_literature": include_literature_review, "include_code": include_code_analysis},
+                    parent_phase="initializing"
+                )
+
                 background_results = await asyncio.gather(*[task for _, task in background_tasks])
 
                 for i, (task_type, _) in enumerate(background_tasks):
@@ -763,6 +846,18 @@ class ScientificResearchEngine:
                         result.literature_review = background_results[i]
                     elif task_type == "code":
                         result.code_analysis = background_results[i]
+
+                await self._log_progress(
+                    session_id,
+                    phase="background_research",
+                    progress=32.0,
+                    message="Background research completed",
+                    metadata={
+                        "literature": bool(result.literature_review),
+                        "code_analysis": bool(result.code_analysis)
+                    },
+                    parent_phase="initializing"
+                )
 
             # Phase 2: Hypothesis Generation
             self.logger.info("Phase 2: Generating research hypotheses")
@@ -782,9 +877,39 @@ class ScientificResearchEngine:
                 code_context
             )
 
+            await self._log_progress(
+                session_id,
+                phase="hypothesis_generation",
+                progress=48.0,
+                message=f"Generated {len(result.hypotheses)} hypotheses",
+                metadata={"hypotheses": [hyp.statement for hyp in result.hypotheses[:3]]},
+                parent_phase="background_research"
+            )
+
+            hypothesis_nodes: Dict[str, str] = {}
+            if session_id:
+                for idx, hypothesis in enumerate(result.hypotheses):
+                    node_id = await self._log_progress(
+                        session_id,
+                        phase=f"hypothesis_{idx + 1}",
+                        progress=50.0,
+                        message=f"Hypothesis {idx + 1}",
+                        metadata={
+                            "title": hypothesis.statement,
+                            "description": hypothesis.reasoning,
+                            "parent_id": self._session_phase_nodes.get(session_id, {}).get("hypothesis_generation"),
+                        },
+                        parent_phase="hypothesis_generation",
+                        node_type="result"
+                    )
+                    hypothesis_nodes[hypothesis.id] = node_id
+
             # Phase 3: Iterative Experimentation
             iteration = 0
             max_confidence_achieved = 0.0
+            iteration_progress_start = 55.0
+            iteration_progress_window = 25.0
+            per_iteration_increment = iteration_progress_window / max(1, self.max_iterations)
 
             while iteration < self.max_iterations and enable_iteration:
                 iteration += 1
@@ -795,15 +920,52 @@ class ScientificResearchEngine:
                 # Design and execute experiments for each hypothesis
                 iteration_results = []
 
+                await self._log_progress(
+                    session_id,
+                    phase="experimentation",
+                    progress=iteration_progress_start + per_iteration_increment * (iteration - 1),
+                    message=f"Running experiments for iteration {iteration}",
+                    metadata={"pending_hypotheses": sum(1 for hyp in result.hypotheses if hyp.status == HypothesisStatus.PENDING)},
+                    parent_phase="hypothesis_generation"
+                )
+
                 for hypothesis in result.hypotheses:
                     if hypothesis.status == HypothesisStatus.PENDING:
                         # Design experiment
                         experiment_design = await self.experiment_designer.design_experiment(hypothesis)
                         result.experiments.append(experiment_design)
 
+                        design_metadata = {
+                            "title": experiment_design.name,
+                            "description": experiment_design.description,
+                            "parent_id": hypothesis_nodes.get(hypothesis.id),
+                        }
+                        await self._log_progress(
+                            session_id,
+                            phase=f"design_{experiment_design.id}",
+                            progress=iteration_progress_start + per_iteration_increment * (iteration - 1) + 5.0,
+                            message=f"Designed experiment {experiment_design.name}",
+                            metadata=design_metadata,
+                            parent_phase="experimentation"
+                        )
+
                         # Execute experiment
                         execution = await self.experiment_executor.execute_experiment(experiment_design)
                         result.executions.append(execution)
+
+                        execution_metadata = {
+                            "title": experiment_design.name,
+                            "status": execution.status.value,
+                            "parent_id": hypothesis_nodes.get(hypothesis.id),
+                        }
+                        await self._log_progress(
+                            session_id,
+                            phase=f"execution_{execution.id}",
+                            progress=iteration_progress_start + per_iteration_increment * (iteration - 1) + 10.0,
+                            message=f"Executed experiment for hypothesis {hypothesis.id}",
+                            metadata=execution_metadata,
+                            parent_phase="experimentation"
+                        )
 
                         # Analyze results
                         if execution.status == ExperimentStatus.COMPLETED:
@@ -818,20 +980,67 @@ class ScientificResearchEngine:
                             # Update hypothesis status based on results
                             await self._update_hypothesis_status(hypothesis, experiment_result)
 
+                            await self._log_progress(
+                                session_id,
+                                phase=f"result_{experiment_result.execution_id}",
+                                progress=iteration_progress_start + per_iteration_increment * (iteration - 1) + 20.0,
+                                message=f"Results for hypothesis {hypothesis.id}",
+                                metadata={
+                                    "title": experiment_result.conclusions[0] if experiment_result.conclusions else "Experiment Result",
+                                    "confidence_score": experiment_result.confidence_score,
+                                    "parent_id": hypothesis_nodes.get(hypothesis.id),
+                                },
+                                parent_phase="experimentation",
+                                node_type="result"
+                            )
+
                 # Check if we should continue iterating
                 current_confidence = self._calculate_overall_confidence(result.results)
                 max_confidence_achieved = max(max_confidence_achieved, current_confidence)
 
                 if current_confidence >= self.confidence_threshold:
                     self.logger.info(f"Confidence threshold reached: {current_confidence}")
+                    await self._log_progress(
+                        session_id,
+                        phase="experimentation",
+                        progress=iteration_progress_start + per_iteration_increment * iteration,
+                        message="Confidence threshold achieved",
+                        metadata={"confidence_score": current_confidence},
+                        parent_phase="hypothesis_generation"
+                    )
                     break
 
                 # Refine hypotheses for next iteration if needed
                 if iteration < self.max_iterations:
                     await self._refine_hypotheses_for_next_iteration(result, iteration_results)
 
+            if iteration > 0:
+                await self._log_progress(
+                    session_id,
+                    phase="experimentation",
+                    progress=iteration_progress_start + per_iteration_increment * iteration,
+                    message="Experimental phase completed",
+                    metadata={
+                        "iterations": result.iteration_count,
+                        "confidence": max_confidence_achieved
+                    },
+                    parent_phase="hypothesis_generation"
+                )
+
             # Phase 4: Synthesis and Final Analysis
             self.logger.info("Phase 4: Synthesizing results and generating conclusions")
+
+            await self._log_progress(
+                session_id,
+                phase="synthesis",
+                progress=88.0,
+                message="Synthesizing research findings",
+                metadata={
+                    "executions": len(result.executions),
+                    "results": len(result.results)
+                },
+                parent_phase="experimentation"
+            )
 
             result.synthesis = await self._synthesize_research_results(result)
             result.final_conclusions = result.synthesis.get("conclusions", [])
@@ -840,12 +1049,44 @@ class ScientificResearchEngine:
             result.publication_draft = await self._generate_publication_draft(result)
             result.recommendations = await self._generate_research_recommendations(result)
 
+            if session_id and result.final_conclusions:
+                for idx, conclusion in enumerate(result.final_conclusions[:5]):
+                    await self._log_progress(
+                        session_id,
+                        phase=f"conclusion_{idx + 1}",
+                        progress=95.0,
+                        message=f"Conclusion {idx + 1}",
+                        metadata={
+                            "title": conclusion,
+                            "parent_id": self._session_phase_nodes.get(session_id, {}).get("synthesis"),
+                        },
+                        parent_phase="synthesis",
+                        node_type="result"
+                    )
+
             self.logger.info(f"Scientific research completed: {research_id}")
+
+            await self._log_progress(
+                session_id,
+                phase="synthesis",
+                progress=95.0,
+                message="Final analysis prepared",
+                metadata={
+                    "conclusions": len(result.final_conclusions),
+                    "recommendations": len(result.recommendations)
+                },
+                parent_phase="experimentation"
+            )
 
         except Exception as e:
             self.logger.error(f"Error in scientific research: {e}")
             result.final_conclusions = [f"Research encountered error: {str(e)}"]
             result.confidence_score = 0.1
+
+        finally:
+            if session_id:
+                self._session_phase_nodes.pop(session_id, None)
+                self._session_root_nodes.pop(session_id, None)
 
         return result
 

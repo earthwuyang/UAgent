@@ -1,5 +1,6 @@
 """Smart Router API endpoints"""
 
+import asyncio
 import logging
 from typing import Dict, Any, Optional
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field
 from ..core.app_state import get_app_state
 from ..core.smart_router import ClassificationRequest, ClassificationResult
 from ..core.websocket_manager import progress_tracker
+from ..core.streaming_llm_client import StreamingLLMClient
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,13 @@ class RouterResponse(BaseModel):
     reasoning: str = Field(..., description="Reasoning for the classification")
     workflow_plan: Dict[str, Any] = Field(..., description="Workflow plan")
     user_request: str = Field(..., description="Original user request")
+
+
+class RouteAndExecuteAck(BaseModel):
+    """Acknowledgement returned after scheduling research execution"""
+    session_id: str = Field(..., description="Unique session identifier")
+    status: str = Field(..., description="Execution status (accepted, running, completed, error)")
+    classification: RouterResponse = Field(..., description="Classification details for the request")
 
 
 @router.post("/classify", response_model=RouterResponse)
@@ -72,117 +81,251 @@ async def classify_request(request: RouterRequest):
         )
 
 
-@router.post("/route-and-execute")
+@router.options("/route-and-execute")
+async def route_and_execute_options():
+    """Handle OPTIONS request for CORS preflight"""
+    from fastapi.responses import Response
+
+    response = Response()
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, Origin"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    return response
+
+@router.post("/route-and-execute", response_model=RouteAndExecuteAck)
 async def route_and_execute(request: RouterRequest):
-    """Classify request and execute using the recommended engine"""
+    """Classify the request and schedule research execution"""
     try:
+        import uuid
+
         app_state = get_app_state()
         smart_router = app_state["smart_router"]
         engines = app_state["engines"]
+        session_manager = app_state["session_manager"]
+        base_llm_client = app_state["llm_client"]
 
-        # Generate session ID for tracking
-        import uuid
         session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
+        logger.info(f"Routing and scheduling request: {request.user_request[:100]}... (session={session_id})")
 
-        logger.info(f"Routing and executing request: {request.user_request[:100]}...")
-
-        # Classify request
         classification_request = ClassificationRequest(
             user_request=request.user_request,
             context=request.context
         )
-
         classification_result = await smart_router.classify_and_route(classification_request)
 
-        # Log research started
+        classification_response = RouterResponse(
+            primary_engine=classification_result.primary_engine,
+            confidence_score=classification_result.confidence_score,
+            sub_components=classification_result.sub_components,
+            reasoning=classification_result.reasoning,
+            workflow_plan=classification_result.workflow_plan,
+            user_request=request.user_request
+        )
+
         await progress_tracker.log_research_started(
             session_id=session_id,
             request=request.user_request,
             engine=classification_result.primary_engine
         )
 
-        # Execute based on classification
-        engine_name = classification_result.primary_engine.lower().replace("_", "")
+        await session_manager.create_session(
+            session_id=session_id,
+            request=request.user_request,
+            classification=classification_response.dict()
+        )
 
-        if engine_name == "deepresearch":
+        engine_key = classification_result.primary_engine.lower().replace("_", "")
+
+        async def execute_deep() -> Dict[str, Any]:
             engine = engines["deep"]
-            execution_result = await engine.research(request.user_request)
+            streaming_llm_client = StreamingLLMClient(base_llm_client, session_id)
+            original_llm_client = engine.llm_client
+            engine.llm_client = streaming_llm_client
 
-            return {
-                "classification": {
-                    "primary_engine": classification_result.primary_engine,
-                    "confidence_score": classification_result.confidence_score,
-                    "reasoning": classification_result.reasoning
-                },
-                "execution": {
-                    "engine_used": "deep_research",
-                    "query": execution_result.query,
+            original_search_clients = {}
+            for search_name, search_engine in engine.search_engines.items():
+                original_search_clients[search_name] = search_engine.llm_client
+                search_engine.llm_client = streaming_llm_client
+
+            try:
+                execution_result = await engine.research(
+                    request.user_request,
+                    session_id=session_id
+                )
+            finally:
+                engine.llm_client = original_llm_client
+                for search_name, search_engine in engine.search_engines.items():
+                    search_engine.llm_client = original_search_clients[search_name]
+
+            await progress_tracker.log_research_completed(
+                session_id=session_id,
+                engine="deep_research",
+                result_summary=(
+                    execution_result.summary[:200] + "..."
+                    if len(execution_result.summary) > 200
+                    else execution_result.summary
+                ),
+                metadata={
                     "sources_count": len(execution_result.sources),
-                    "key_findings": execution_result.key_findings,
-                    "confidence_score": execution_result.confidence_score,
-                    "summary": execution_result.summary[:500] + "..." if len(execution_result.summary) > 500 else execution_result.summary
+                    "confidence_score": execution_result.confidence_score
                 }
-            }
-
-        elif engine_name == "coderesearch":
-            engine = engines["code"]
-            execution_result = await engine.research_code(request.user_request)
-
-            return {
-                "classification": {
-                    "primary_engine": classification_result.primary_engine,
-                    "confidence_score": classification_result.confidence_score,
-                    "reasoning": classification_result.reasoning
-                },
-                "execution": {
-                    "engine_used": "code_research",
-                    "query": execution_result.query,
-                    "repositories_count": len(execution_result.repositories),
-                    "languages_found": list(set(repo.language for repo in execution_result.repositories)),
-                    "best_practices_count": len(execution_result.best_practices),
-                    "confidence_score": execution_result.confidence_score,
-                    "integration_guide_preview": execution_result.integration_guide[:500] + "..." if len(execution_result.integration_guide) > 500 else execution_result.integration_guide,
-                    "recommendations_count": len(execution_result.recommendations)
-                }
-            }
-
-        elif engine_name == "scientificresearch":
-            engine = engines["scientific"]
-            params = classification_result.workflow_plan
-
-            execution_result = await engine.conduct_research(
-                request.user_request,
-                include_literature_review=params.get("include_literature_review", True),
-                include_code_analysis=params.get("include_code_analysis", True),
-                enable_iteration=params.get("enable_iteration", True)
             )
 
             return {
-                "classification": {
-                    "primary_engine": classification_result.primary_engine,
-                    "confidence_score": classification_result.confidence_score,
-                    "reasoning": classification_result.reasoning
-                },
-                "execution": {
-                    "engine_used": "scientific_research",
-                    "query": execution_result.query,
+                "engine_used": "deep_research",
+                "query": execution_result.query,
+                "sources_count": len(execution_result.sources),
+                "key_findings": execution_result.key_findings,
+                "confidence_score": execution_result.confidence_score,
+                "summary": (
+                    execution_result.summary[:500] + "..."
+                    if len(execution_result.summary) > 500
+                    else execution_result.summary
+                )
+            }
+
+        async def execute_code() -> Dict[str, Any]:
+            engine = engines["code"]
+            streaming_llm_client = StreamingLLMClient(base_llm_client, session_id)
+            original_llm_client = engine.llm_client
+            engine.llm_client = streaming_llm_client
+
+            try:
+                execution_result = await engine.research_code(
+                    request.user_request,
+                    session_id=session_id
+                )
+            finally:
+                engine.llm_client = original_llm_client
+
+            await progress_tracker.log_research_completed(
+                session_id=session_id,
+                engine="code_research",
+                result_summary=(
+                    f"Found {len(execution_result.repositories)} repositories "
+                    f"with {len(execution_result.best_practices)} best practices"
+                ),
+                metadata={
+                    "repositories_count": len(execution_result.repositories),
+                    "confidence_score": execution_result.confidence_score,
+                    "languages_found": list({repo.language for repo in execution_result.repositories})
+                }
+            )
+
+            return {
+                "engine_used": "code_research",
+                "query": execution_result.query,
+                "repositories_count": len(execution_result.repositories),
+                "languages_found": list({repo.language for repo in execution_result.repositories}),
+                "best_practices_count": len(execution_result.best_practices),
+                "confidence_score": execution_result.confidence_score,
+                "integration_guide_preview": (
+                    execution_result.integration_guide[:500] + "..."
+                    if len(execution_result.integration_guide) > 500
+                    else execution_result.integration_guide
+                ),
+                "recommendations_count": len(execution_result.recommendations)
+            }
+
+        async def execute_scientific() -> Dict[str, Any]:
+            engine = engines["scientific"]
+            params = classification_result.workflow_plan
+            streaming_llm_client = StreamingLLMClient(base_llm_client, session_id)
+            original_llm_client = engine.llm_client
+            engine.llm_client = streaming_llm_client
+
+            try:
+                execution_result = await engine.conduct_research(
+                    request.user_request,
+                    include_literature_review=params.get("include_literature_review", True),
+                    include_code_analysis=params.get("include_code_analysis", True),
+                    enable_iteration=params.get("enable_iteration", True),
+                    session_id=session_id
+                )
+            finally:
+                engine.llm_client = original_llm_client
+
+            await progress_tracker.log_research_completed(
+                session_id=session_id,
+                engine="scientific_research",
+                result_summary=(
+                    f"Completed {execution_result.iteration_count} iterations "
+                    f"with {len(execution_result.hypotheses)} hypotheses"
+                ),
+                metadata={
                     "hypotheses_count": len(execution_result.hypotheses),
                     "experiments_count": len(execution_result.experiments),
                     "iterations_completed": execution_result.iteration_count,
                     "confidence_score": execution_result.confidence_score,
                     "has_literature_review": execution_result.literature_review is not None,
-                    "has_code_analysis": execution_result.code_analysis is not None,
-                    "summary": execution_result.synthesis if isinstance(execution_result.synthesis, str) else str(execution_result.synthesis)[:500] + "..."
+                    "has_code_analysis": execution_result.code_analysis is not None
                 }
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown engine type: {classification_result.primary_engine}"
             )
 
+            summary_value = (
+                execution_result.synthesis
+                if isinstance(execution_result.synthesis, str)
+                else str(execution_result.synthesis)
+            )
+
+            return {
+                "engine_used": "scientific_research",
+                "query": execution_result.query,
+                "hypotheses_count": len(execution_result.hypotheses),
+                "experiments_count": len(execution_result.experiments),
+                "iterations_completed": execution_result.iteration_count,
+                "confidence_score": execution_result.confidence_score,
+                "has_literature_review": execution_result.literature_review is not None,
+                "has_code_analysis": execution_result.code_analysis is not None,
+                "summary": summary_value[:500] + "..." if len(summary_value) > 500 else summary_value
+            }
+
+        async def execute_research() -> None:
+            await session_manager.set_status(session_id, "running")
+            try:
+                if engine_key == "deepresearch":
+                    execution_payload = await execute_deep()
+                elif engine_key == "coderesearch":
+                    execution_payload = await execute_code()
+                elif engine_key == "scientificresearch":
+                    execution_payload = await execute_scientific()
+                else:
+                    raise ValueError(f"Unknown engine type: {classification_result.primary_engine}")
+
+                result_payload = {
+                    "classification": classification_response.dict(),
+                    "execution": execution_payload
+                }
+                await session_manager.set_result(session_id, result_payload)
+
+            except Exception as exc:
+                logger.error(
+                    "Research execution failed for session %s: %s",
+                    session_id,
+                    exc,
+                    exc_info=True
+                )
+                await session_manager.set_error(session_id, str(exc))
+                await progress_tracker.log_error(
+                    session_id=session_id,
+                    engine=classification_result.primary_engine,
+                    error=str(exc),
+                    phase="execution"
+                )
+
+        task = asyncio.create_task(execute_research(), name=f"research_{session_id}")
+        await session_manager.attach_task(session_id, task)
+
+        return RouteAndExecuteAck(
+            session_id=session_id,
+            status="accepted",
+            classification=classification_response
+        )
+
     except Exception as e:
-        logger.error(f"Route and execute failed: {e}", exc_info=True)
+        logger.error(f"Route and execute scheduling failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Route and execute failed: {str(e)}"

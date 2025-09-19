@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import re
+import uuid
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
 from ..llm_client import LLMClient
+from ..websocket_manager import progress_tracker
 
 
 @dataclass
@@ -298,22 +300,109 @@ class CodeResearchEngine:
         # Initialize sub-engines
         self.github_engine = GitHubSearchEngine(llm_client)
         self.pattern_engine = CodePatternEngine(llm_client)
+        self._session_phase_nodes: Dict[str, Dict[str, str]] = {}
+        self._session_root_nodes: Dict[str, str] = {}
 
-    async def research_code(self, query: str, language: Optional[str] = None, include_analysis: bool = True) -> CodeResearchResult:
+    def _get_root_node_id(self, session_id: Optional[str]) -> str:
+        if not session_id:
+            return "code_research-root"
+        if session_id not in self._session_root_nodes:
+            self._session_root_nodes[session_id] = f"{session_id}-code_research-root"
+        return self._session_root_nodes[session_id]
+
+    async def _log_progress(
+        self,
+        session_id: Optional[str],
+        phase: str,
+        progress: float,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        parent_phase: Optional[str] = None,
+        node_type: str = "step"
+    ) -> str:
+        if not session_id:
+            return ""
+
+        metadata = dict(metadata or {})
+        node_id = metadata.get("node_id")
+
+        phase_nodes = self._session_phase_nodes.setdefault(session_id, {})
+        if node_id is None:
+            node_id = phase_nodes.get(phase) or f"{session_id}-code-{phase}-{uuid.uuid4().hex[:6]}"
+        parent_id = metadata.get("parent_id")
+        if not parent_id:
+            if parent_phase and parent_phase in phase_nodes:
+                parent_id = phase_nodes[parent_phase]
+            else:
+                parent_id = self._get_root_node_id(session_id)
+        metadata["parent_id"] = parent_id
+        phase_nodes[phase] = node_id
+
+        metadata["node_id"] = node_id
+        metadata.setdefault("node_type", node_type)
+        metadata.setdefault("title", message)
+        metadata.setdefault("phase", phase)
+
+        try:
+            await progress_tracker.log_research_progress(
+                session_id=session_id or "unknown",
+                engine="code_research",
+                phase=phase,
+                progress=progress,
+                message=message,
+                metadata=metadata
+            )
+        except Exception as exc:  # pragma: no cover - best effort logging
+            self.logger.debug(
+                "Failed to log code research progress for %s (phase=%s): %s",
+                session_id,
+                phase,
+                exc
+            )
+
+        return node_id
+
+    async def research_code(
+        self,
+        query: str,
+        language: Optional[str] = None,
+        include_analysis: bool = True,
+        session_id: Optional[str] = None
+    ) -> CodeResearchResult:
         """Conduct comprehensive code research
 
         Args:
             query: Code research query (e.g., "FastAPI REST API", "machine learning pipelines")
             language: Programming language filter
             include_analysis: Whether to include detailed code analysis
+            session_id: Optional session identifier for progress streaming
 
         Returns:
             Comprehensive code research result
         """
         self.logger.info(f"Starting code research for: {query}")
 
+        root_id = self._get_root_node_id(session_id)
+
+        await self._log_progress(
+            session_id,
+            phase="initializing",
+            progress=5.0,
+            message="Preparing repository discovery pipeline",
+            metadata={"query": query, "language": language, "parent_id": root_id}
+        )
+
         # Search for relevant repositories
         repositories = await self.github_engine.search_repositories(query, language, limit=10)
+
+        repo_phase_node = await self._log_progress(
+            session_id,
+            phase="discovering_repositories",
+            progress=30.0,
+            message=f"Found {len(repositories)} candidate repositories",
+            metadata={"repositories": [repo.name for repo in repositories[:5]]},
+            parent_phase="initializing"
+        )
 
         # Analyze repositories if requested
         analyses = []
@@ -325,11 +414,56 @@ class CodeResearchEngine:
             ]
             analyses = await asyncio.gather(*analysis_tasks)
 
+            await self._log_progress(
+                session_id,
+                phase="analyzing_repositories",
+                progress=55.0,
+                message="Completed deep analysis on top repositories",
+                metadata={"analyzed": [analysis.repository for analysis in analyses]},
+                parent_phase="discovering_repositories"
+            )
+
         # Extract best practices and patterns
         best_practices = await self.pattern_engine.extract_best_practices(repositories)
 
+        await self._log_progress(
+            session_id,
+            phase="extracting_patterns",
+            progress=70.0,
+            message=f"Identified {len(best_practices)} reusable patterns",
+            metadata={"pattern_count": len(best_practices)},
+            parent_phase="analyzing_repositories"
+        )
+
+        if session_id and repositories:
+            for idx, repo in enumerate(repositories[:5]):
+                await self._log_progress(
+                    session_id,
+                    phase=f"repository_{idx + 1}",
+                    progress=45.0,
+                    message=f"Repository: {repo.name}",
+                    metadata={
+                        "title": repo.name,
+                        "description": repo.description,
+                        "url": repo.url,
+                        "language": repo.language,
+                        "stars": repo.stars,
+                        "parent_id": repo_phase_node,
+                    },
+                    parent_phase="discovering_repositories",
+                    node_type="result"
+                )
+
         # Generate integration guide
         integration_guide = await self._generate_integration_guide(query, repositories, analyses)
+
+        await self._log_progress(
+            session_id,
+            phase="synthesizing_guidance",
+            progress=82.0,
+            message="Prepared integration guidance and recommendations",
+            metadata={"guide_length": len(integration_guide)}
+        )
 
         # Generate recommendations
         recommendations = await self._generate_recommendations(query, repositories, analyses, best_practices)
@@ -337,15 +471,20 @@ class CodeResearchEngine:
         # Calculate confidence score
         confidence_score = self._calculate_confidence_score(repositories, analyses)
 
-        return CodeResearchResult(
-            query=query,
-            repositories=repositories,
-            analysis=analyses,
-            best_practices=best_practices,
-            integration_guide=integration_guide,
-            recommendations=recommendations,
-            confidence_score=confidence_score
-        )
+        try:
+            return CodeResearchResult(
+                query=query,
+                repositories=repositories,
+                analysis=analyses,
+                best_practices=best_practices,
+                integration_guide=integration_guide,
+                recommendations=recommendations,
+                confidence_score=confidence_score
+            )
+        finally:
+            if session_id:
+                self._session_phase_nodes.pop(session_id, None)
+                self._session_root_nodes.pop(session_id, None)
 
     async def analyze_specific_repository(self, repository_url: str) -> CodeAnalysis:
         """Analyze a specific repository by URL

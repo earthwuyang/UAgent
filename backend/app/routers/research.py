@@ -245,54 +245,126 @@ async def conduct_scientific_research(request: ScientificResearchRequest, backgr
 @router.get("/sessions")
 async def list_research_sessions():
     """List all research sessions"""
-    sessions = []
+    app_state = get_app_state()
+    session_manager = app_state.get("session_manager")
+
+    sessions: List[Dict[str, Any]] = []
+
+    if session_manager:
+        manager_sessions = await session_manager.list_sessions()
+        for record in manager_sessions:
+            sessions.append({
+                "session_id": record["session_id"],
+                "query": record["request"],
+                "status": record["status"],
+                "type": record["classification"].get("primary_engine"),
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+                "has_result": record["result"] is not None,
+                "error": record["error"]
+            })
+
+    # Include legacy sessions created through direct research endpoints
     for research_id, session_data in research_sessions.items():
         sessions.append({
-            "research_id": research_id,
-            "type": session_data["type"],
+            "session_id": research_id,
             "query": session_data["request"]["query"],
             "status": session_data["status"],
-            "created_at": session_data.get("created_at", "unknown")
+            "type": session_data["type"],
+            "created_at": session_data.get("created_at", "unknown"),
+            "updated_at": session_data.get("updated_at", "unknown"),
+            "has_result": True,
+            "error": None
         })
+
     return {"sessions": sessions, "total": len(sessions)}
 
 
 @router.get("/sessions/{research_id}")
 async def get_research_session(research_id: str):
     """Get specific research session details"""
-    if research_id not in research_sessions:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Research session {research_id} not found"
-        )
+    app_state = get_app_state()
+    session_manager = app_state.get("session_manager")
 
-    session_data = research_sessions[research_id]
-    return {
-        "research_id": research_id,
-        "type": session_data["type"],
-        "request": session_data["request"],
-        "status": session_data["status"],
-        "summary": _create_session_summary(session_data)
-    }
+    if session_manager:
+        record = await session_manager.get_session(research_id)
+        if record:
+            return {
+                "session_id": record["session_id"],
+                "request": record["request"],
+                "classification": record["classification"],
+                "status": record["status"],
+                "result": record["result"],
+                "error": record["error"],
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"]
+            }
+        return {
+            "session_id": research_id,
+            "status": "pending",
+            "result": None,
+            "error": None
+        }
+
+    if research_id in research_sessions:
+        session_data = research_sessions[research_id]
+        return {
+            "session_id": research_id,
+            "type": session_data["type"],
+            "request": session_data["request"],
+            "status": session_data["status"],
+            "summary": _create_session_summary(session_data),
+            "result": _serialize_result(session_data["result"]),
+            "created_at": session_data.get("created_at", "unknown"),
+            "updated_at": session_data.get("updated_at", "unknown")
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Research session {research_id} not found"
+    )
 
 
 @router.get("/sessions/{research_id}/full")
 async def get_full_research_result(research_id: str):
     """Get full research result including all data"""
-    if research_id not in research_sessions:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Research session {research_id} not found"
-        )
+    app_state = get_app_state()
+    session_manager = app_state.get("session_manager")
 
-    session_data = research_sessions[research_id]
-    return {
-        "research_id": research_id,
-        "type": session_data["type"],
-        "request": session_data["request"],
-        "result": _serialize_result(session_data["result"]),
-        "status": session_data["status"]
-    }
+    if session_manager:
+        record = await session_manager.get_session(research_id)
+        if record:
+            return {
+                "session_id": record["session_id"],
+                "classification": record["classification"],
+                "result": record["result"],
+                "status": record["status"],
+                "error": record["error"]
+            }
+        return {
+            "session_id": research_id,
+            "classification": None,
+            "result": None,
+            "status": "pending",
+            "error": None
+        }
+
+    if research_id in research_sessions:
+        session_data = research_sessions[research_id]
+        return {
+            "session_id": research_id,
+            "classification": {
+                "primary_engine": session_data["type"],
+                "user_request": session_data["request"].get("query")
+            },
+            "result": _serialize_result(session_data["result"]),
+            "status": session_data["status"]
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Research session {research_id} not found"
+    )
 
 
 @router.delete("/sessions/{research_id}")

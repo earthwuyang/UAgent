@@ -18,6 +18,7 @@ from .core.research_engines import (
     ScientificResearchEngine
 )
 from .core.openhands import OpenHandsClient
+from .core.session_manager import ResearchSessionManager
 from .core.app_state import set_app_state, clear_app_state
 
 
@@ -53,6 +54,9 @@ async def lifespan(app: FastAPI):
     workspace_dir = os.getenv("WORKSPACE_DIR", "/tmp/uagent_workspaces")
     openhands_client = OpenHandsClient(base_workspace_dir=workspace_dir)
 
+    # Initialize session manager
+    session_manager = ResearchSessionManager()
+
     # Initialize research engines
     deep_engine = DeepResearchEngine(llm_client)
     code_engine = CodeResearchEngine(llm_client)
@@ -79,7 +83,8 @@ async def lifespan(app: FastAPI):
             "code": code_engine,
             "scientific": scientific_engine
         },
-        "smart_router": smart_router
+        "smart_router": smart_router,
+        "session_manager": session_manager
     })
 
     logger.info("UAgent system started successfully")
@@ -90,6 +95,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down UAgent system...")
     if cache:
         await cache.clear()
+    await session_manager.shutdown()
     clear_app_state()
     logger.info("UAgent system shutdown complete")
 

@@ -1,14 +1,12 @@
-import React, { useState } from 'react'
+import React from 'react'
 import { Brain, Zap, Search, Code, FlaskConical, ArrowRight } from 'lucide-react'
 import SmartResearchInput from './SmartResearchInput'
-import ResearchResult from './ResearchResult'
-import type { RouteAndExecuteResponse } from '../types/api'
+import type { RouteAndExecuteAck } from '../types/api'
 
 const HomePage: React.FC = () => {
-  const [currentResult, setCurrentResult] = useState<RouteAndExecuteResponse | null>(null)
-
-  const handleResultReceived = (result: RouteAndExecuteResponse) => {
-    setCurrentResult(result)
+  const handleResultReceived = (ack: RouteAndExecuteAck) => {
+    const sessionUrl = `${window.location.origin}/${ack.session_id}`
+    window.open(sessionUrl, '_blank')
   }
 
   const features = [
@@ -94,13 +92,6 @@ const HomePage: React.FC = () => {
       <div className="max-w-4xl mx-auto">
         <SmartResearchInput onResultReceived={handleResultReceived} />
       </div>
-
-      {/* Current Result */}
-      {currentResult && (
-        <div className="max-w-6xl mx-auto">
-          <ResearchResult result={currentResult} />
-        </div>
-      )}
 
       {/* Features Grid */}
       <div className="grid md:grid-cols-3 gap-8">

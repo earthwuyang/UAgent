@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+import uuid
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
 from ..llm_client import LLMClient
+from ..websocket_manager import progress_tracker
 
 
 @dataclass
@@ -184,21 +186,108 @@ class DeepResearchEngine:
             SearchSource("technical", "technical", enabled=True, priority=2)
         ]
 
-    async def research(self, query: str, sources: Optional[List[str]] = None) -> ResearchResult:
+        self._session_phase_nodes: Dict[str, Dict[str, str]] = {}
+        self._session_root_nodes: Dict[str, str] = {}
+
+    def _get_root_node_id(self, session_id: Optional[str]) -> str:
+        if not session_id:
+            return "deep_research-root"
+        if session_id not in self._session_root_nodes:
+            self._session_root_nodes[session_id] = f"{session_id}-deep_research-root"
+        return self._session_root_nodes[session_id]
+
+    async def _log_progress(
+        self,
+        session_id: Optional[str],
+        phase: str,
+        progress: float,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        parent_phase: Optional[str] = None,
+        node_type: str = "step"
+    ) -> str:
+        if not session_id:
+            return ""
+
+        metadata = dict(metadata or {})
+        node_id = metadata.get("node_id")
+
+        phase_nodes = self._session_phase_nodes.setdefault(session_id, {})
+        if node_id is None:
+            node_id = phase_nodes.get(phase) or f"{session_id}-deep-{phase}-{uuid.uuid4().hex[:6]}"
+        parent_id = metadata.get("parent_id")
+        if not parent_id:
+            if parent_phase and parent_phase in phase_nodes:
+                parent_id = phase_nodes[parent_phase]
+            else:
+                parent_id = self._get_root_node_id(session_id)
+        metadata["parent_id"] = parent_id
+        phase_nodes[phase] = node_id
+
+        metadata["node_id"] = node_id
+        metadata.setdefault("node_type", node_type)
+        metadata.setdefault("title", message)
+        metadata.setdefault("phase", phase)
+
+        try:
+            await progress_tracker.log_research_progress(
+                session_id=session_id or "unknown",
+                engine="deep_research",
+                phase=phase,
+                progress=progress,
+                message=message,
+                metadata=metadata
+            )
+        except Exception as exc:  # pragma: no cover - best effort logging
+            self.logger.debug(
+                "Failed to log deep research progress for %s (phase=%s): %s",
+                session_id,
+                phase,
+                exc
+            )
+
+        return node_id
+
+    async def research(
+        self,
+        query: str,
+        sources: Optional[List[str]] = None,
+        session_id: Optional[str] = None
+    ) -> ResearchResult:
         """Conduct comprehensive research on a topic
 
         Args:
             query: Research query/topic
             sources: List of source types to use (defaults to all enabled)
+            session_id: Optional session identifier for progress streaming
 
         Returns:
             Comprehensive research result
         """
         self.logger.info(f"Starting deep research for: {query}")
 
+        root_id = self._get_root_node_id(session_id)
+
+        await self._log_progress(
+            session_id,
+            phase="initializing",
+            progress=5.0,
+            message="Preparing deep research pipeline",
+            metadata={"query": query, "parent_id": root_id}
+        )
+
         # Determine which sources to use
         if sources is None:
             sources = [s.name for s in self.search_sources if s.enabled]
+
+        await self._log_progress(
+            session_id,
+            phase="collecting_sources",
+            progress=15.0,
+            message=f"Gathering information from {len(sources)} sources",
+            metadata={"sources": sources},
+            parent_phase="initializing"
+        )
 
         # Collect results from all sources
         all_results = []
@@ -213,6 +302,15 @@ class DeepResearchEngine:
         # Execute searches concurrently
         search_results = await asyncio.gather(*[task for _, task in search_tasks])
 
+        await self._log_progress(
+            session_id,
+            phase="collecting_sources",
+            progress=40.0,
+            message="Collected raw search results",
+            metadata={"source_count": len(search_tasks)},
+            parent_phase="initializing"
+        )
+
         # Combine results
         for i, (source_name, _) in enumerate(search_tasks):
             all_results.extend(search_results[i])
@@ -220,18 +318,88 @@ class DeepResearchEngine:
         # Sort by relevance
         all_results.sort(key=lambda x: x.relevance_score, reverse=True)
 
+        organizing_node = await self._log_progress(
+            session_id,
+            phase="organizing_results",
+            progress=55.0,
+            message=f"Ranked {len(all_results)} findings by relevance",
+            metadata={"total_results": len(all_results)},
+            parent_phase="collecting_sources"
+        )
+
+        if session_id and all_results:
+            for idx, result in enumerate(all_results[: min(5, len(all_results))]):
+                await self._log_progress(
+                    session_id,
+                    phase=f"source_{idx + 1}",
+                    progress=60.0,
+                    message=f"Source: {result.title}",
+                    metadata={
+                        "title": result.title,
+                        "description": result.url,
+                        "url": result.url,
+                        "relevance_score": result.relevance_score,
+                        "parent_id": organizing_node,
+                    },
+                    parent_phase="organizing_results",
+                    node_type="result"
+                )
+
         # Analyze and synthesize results using LLM
+        await self._log_progress(
+            session_id,
+            phase="synthesizing",
+            progress=65.0,
+            message="Generating synthesis with LLM",
+            metadata={"top_result_title": all_results[0].title if all_results else None},
+            parent_phase="organizing_results"
+        )
+
         synthesis_result = await self._synthesize_results(query, all_results)
 
-        return ResearchResult(
-            query=query,
-            summary=synthesis_result["summary"],
-            key_findings=synthesis_result["key_findings"],
-            sources=all_results,
-            analysis=synthesis_result["analysis"],
-            recommendations=synthesis_result["recommendations"],
-            confidence_score=synthesis_result["confidence_score"]
+        findings = synthesis_result.get("key_findings", [])
+
+        await self._log_progress(
+            session_id,
+            phase="synthesizing",
+            progress=85.0,
+            message="Synthesis prepared",
+            metadata={
+                "key_findings": len(findings),
+                "recommendations": len(synthesis_result.get("recommendations", []))
+            },
+            parent_phase="organizing_results"
         )
+
+        if session_id and findings:
+            for idx, finding in enumerate(findings[:5]):
+                await self._log_progress(
+                    session_id,
+                    phase=f"finding_{idx + 1}",
+                    progress=90.0,
+                    message=f"Key Finding {idx + 1}",
+                    metadata={
+                        "title": finding,
+                        "parent_id": self._session_phase_nodes.get(session_id, {}).get("synthesizing"),
+                    },
+                    parent_phase="synthesizing",
+                    node_type="result"
+                )
+
+        try:
+            return ResearchResult(
+                query=query,
+                summary=synthesis_result["summary"],
+                key_findings=synthesis_result["key_findings"],
+                sources=all_results,
+                analysis=synthesis_result["analysis"],
+                recommendations=synthesis_result["recommendations"],
+                confidence_score=synthesis_result["confidence_score"]
+            )
+        finally:
+            if session_id:
+                self._session_phase_nodes.pop(session_id, None)
+                self._session_root_nodes.pop(session_id, None)
 
     async def _synthesize_results(self, query: str, results: List[SearchResult]) -> Dict[str, Any]:
         """Synthesize search results into comprehensive analysis"""

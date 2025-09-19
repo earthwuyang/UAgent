@@ -16,8 +16,12 @@ import ReactFlow, {
   ReactFlowProvider,
   useReactFlow,
   ControlButton,
+  Handle,
+  Position,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
+import LLMConversationLogs from './LLMConversationLogs';
+import { WS_BASE_URL } from '../../config';
 
 // Research process node interfaces
 interface ResearchNode {
@@ -33,6 +37,7 @@ interface ResearchNode {
   metadata?: any;
   parent_id?: string;
   children?: string[];
+  depth?: number;
 }
 
 interface ProgressEvent {
@@ -99,6 +104,9 @@ const ResearchNodeComponent: React.FC<{ data: { node: ResearchNode, isSelected?:
       ${isSelected ? 'ring-2 ring-blue-500 scale-105 shadow-lg' : 'hover:shadow-lg hover:scale-[1.02]'}
       ${node.status === 'running' ? 'animate-pulse' : ''}
     `}>
+      {/* ReactFlow Handles */}
+      <Handle type="target" position={Position.Top} id="target" />
+      <Handle type="source" position={Position.Bottom} id="source" />
       {/* Header */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center space-x-2">
@@ -168,7 +176,10 @@ const DetailedSidebar: React.FC<{
   selectedNode: ResearchNode | null;
   onClose: () => void;
   events: ProgressEvent[];
-}> = ({ selectedNode, onClose, events }) => {
+  sessionId?: string;
+}> = ({ selectedNode, onClose, events, sessionId }) => {
+  const [activeTab, setActiveTab] = useState<'details' | 'llm' | 'events'>('details');
+
   const nodeEvents = events.filter(event =>
     selectedNode && event.data.engine === selectedNode.engine
   );
@@ -176,10 +187,10 @@ const DetailedSidebar: React.FC<{
   if (!selectedNode) return null;
 
   return (
-    <div className="fixed right-0 top-0 h-full w-80 bg-white shadow-xl border-l border-gray-200 z-50 overflow-y-auto">
+    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-xl border-l border-gray-200 z-50 flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b">
-        <h3 className="text-lg font-bold">Node Details</h3>
+        <h3 className="text-lg font-bold">🔍 Node Details</h3>
         <button
           onClick={onClose}
           className="text-gray-500 hover:text-gray-700 text-xl font-bold"
@@ -188,8 +199,45 @@ const DetailedSidebar: React.FC<{
         </button>
       </div>
 
+      {/* Tabs */}
+      <div className="flex border-b bg-gray-50">
+        <button
+          onClick={() => setActiveTab('details')}
+          className={`flex-1 px-4 py-2 text-sm font-medium ${
+            activeTab === 'details'
+              ? 'text-blue-600 border-b-2 border-blue-600 bg-white'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          📋 Details
+        </button>
+        <button
+          onClick={() => setActiveTab('llm')}
+          data-tab="llm"
+          className={`flex-1 px-4 py-2 text-sm font-medium ${
+            activeTab === 'llm'
+              ? 'text-blue-600 border-b-2 border-blue-600 bg-white'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          🤖 LLM Chat
+        </button>
+        <button
+          onClick={() => setActiveTab('events')}
+          className={`flex-1 px-4 py-2 text-sm font-medium ${
+            activeTab === 'events'
+              ? 'text-blue-600 border-b-2 border-blue-600 bg-white'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          📊 Events
+        </button>
+      </div>
+
       {/* Content */}
-      <div className="p-4 space-y-4">
+      <div className="flex-1 overflow-hidden">
+        {activeTab === 'details' && (
+          <div className="p-4 space-y-4 h-full overflow-y-auto">
         {/* Basic Info */}
         <div className="space-y-2">
           <div>
@@ -266,11 +314,64 @@ const DetailedSidebar: React.FC<{
           </div>
         </div>
 
-        {/* Timestamp */}
-        {selectedNode.timestamp && (
-          <div>
-            <label className="text-sm font-medium text-gray-600">Created</label>
-            <div className="text-sm">{new Date(selectedNode.timestamp).toLocaleString()}</div>
+            {/* Timestamp */}
+            {selectedNode.timestamp && (
+              <div>
+                <label className="text-sm font-medium text-gray-600">Created</label>
+                <div className="text-sm">{new Date(selectedNode.timestamp).toLocaleString()}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'llm' && sessionId && (
+          <LLMConversationLogs
+            sessionId={sessionId}
+            nodeId={selectedNode.id}
+            engine={selectedNode.engine}
+          />
+        )}
+
+        {activeTab === 'events' && (
+          <div className="p-4 space-y-4 h-full overflow-y-auto">
+            <div>
+              <label className="text-sm font-medium text-gray-600">Recent Events ({nodeEvents.length})</label>
+              <div className="space-y-2 mt-2">
+                {nodeEvents.length === 0 ? (
+                  <div className="text-center text-gray-500 py-8">
+                    <div className="text-2xl mb-2">📭</div>
+                    <p>No events for this node</p>
+                  </div>
+                ) : (
+                  nodeEvents.map((event, index) => (
+                    <div key={index} className="text-xs bg-gray-50 p-3 rounded border">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="font-medium">{event.event_type.replace('_', ' ').toUpperCase()}</div>
+                        <div className="text-gray-500">
+                          {new Date(event.timestamp).toLocaleTimeString()}
+                        </div>
+                      </div>
+                      {event.message && (
+                        <div className="text-gray-600 mb-1">{event.message}</div>
+                      )}
+                      {event.data.phase && (
+                        <div className="text-blue-600 text-xs">Phase: {event.data.phase}</div>
+                      )}
+                      {event.progress_percentage !== undefined && (
+                        <div className="text-green-600 text-xs">Progress: {event.progress_percentage}%</div>
+                      )}
+                      {event.data.metadata && (
+                        <div className="mt-2 pt-2 border-t border-gray-200">
+                          <div className="text-xs text-gray-500">
+                            <pre className="whitespace-pre-wrap">{JSON.stringify(event.data.metadata, null, 2)}</pre>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -284,79 +385,160 @@ const nodeTypes: NodeTypes = {
 
 // Convert research progress to tree nodes
 function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
-  const nodes: ResearchNode[] = [];
-  const engineNodes = new Set<string>();
+  const nodeMap = new Map<string, ResearchNode>()
+  const sessionRoots = new Map<string, string>()
 
   events.forEach((event, index) => {
-    const nodeId = `${event.data.engine}-${event.data.phase || 'main'}-${index}`;
+    const engine = event.data.engine || 'engine'
+    const sessionKey = event.session_id || 'session'
+    const engineKey = `${sessionKey}-${engine}`
+    const rootId = `${engineKey}-root`
 
-    // Create engine node if not exists
-    const engineId = `engine-${event.data.engine}`;
-    if (!engineNodes.has(engineId)) {
-      nodes.push({
-        id: engineId,
+    if (!sessionRoots.has(engineKey)) {
+      sessionRoots.set(engineKey, rootId)
+      nodeMap.set(rootId, {
+        id: rootId,
         type: 'engine',
-        engine: event.data.engine,
-        phase: 'main',
-        status: event.event_type === 'research_completed' ? 'completed' :
-               event.event_type === 'research_error' ? 'error' : 'running',
-        title: `${event.data.engine.replace('_', ' ').toUpperCase()} Engine`,
-        description: `Main ${event.data.engine} research engine`,
+        engine,
+        phase: 'root',
+        status: 'running',
+        title: `${engine.replace('_', ' ').toUpperCase()} Engine`,
+        description: `Execution tree for ${engine}`,
         timestamp: event.timestamp,
-        progress: event.progress_percentage
-      });
-      engineNodes.add(engineId);
+        progress: event.progress_percentage,
+        metadata: { node_id: rootId },
+        children: [],
+        parent_id: undefined,
+        depth: 0,
+      })
     }
 
-    // Create step node
-    nodes.push({
-      id: nodeId,
-      type: 'step',
-      engine: event.data.engine,
-      phase: event.data.phase || 'processing',
-      status: event.event_type === 'research_completed' ? 'completed' :
-             event.event_type === 'research_error' ? 'error' : 'running',
-      title: event.message || `${event.event_type.replace('_', ' ').toUpperCase()}`,
-      description: event.data.phase ? `Phase: ${event.data.phase}` : undefined,
-      timestamp: event.timestamp,
-      progress: event.progress_percentage,
-      metadata: event.data.metadata,
-      parent_id: engineId
-    });
-  });
+    const metadata = { ...(event.data.metadata || {}) }
+    const nodeId = metadata.node_id || `${sessionKey}-${engine}-${event.data.phase || 'step'}-${index}`
+    const parentId = metadata.parent_id || sessionRoots.get(engineKey)!
+    const nodeType = metadata.node_type === 'result' ? 'result' : 'step'
+    const status = event.event_type === 'research_completed'
+      ? 'completed'
+      : event.event_type === 'research_error'
+      ? 'error'
+      : 'running'
 
-  return nodes;
+    const existingNode = nodeMap.get(nodeId)
+    if (existingNode) {
+      existingNode.status = status
+      existingNode.progress = event.progress_percentage ?? existingNode.progress
+      existingNode.timestamp = event.timestamp
+      existingNode.metadata = { ...existingNode.metadata, ...metadata }
+      if (status === 'completed' && existingNode.type !== 'engine') {
+        existingNode.status = 'completed'
+      }
+    } else {
+      const parentNode = nodeMap.get(parentId)
+      const title = metadata.title || event.message || event.event_type.replace('_', ' ').toUpperCase()
+      const description = metadata.description || (event.data.phase ? `Phase: ${event.data.phase}` : undefined)
+
+      const node: ResearchNode = {
+        id: nodeId,
+        type: nodeType,
+        engine,
+        phase: metadata.phase || event.data.phase || 'processing',
+        status,
+        title,
+        description,
+        timestamp: event.timestamp,
+        progress: event.progress_percentage,
+        metadata,
+        parent_id: parentId,
+        children: [],
+      }
+
+      nodeMap.set(nodeId, node)
+
+      if (parentNode) {
+        parentNode.children = parentNode.children || []
+        if (!parentNode.children.includes(nodeId)) {
+          parentNode.children.push(nodeId)
+        }
+      }
+    }
+
+    if (event.event_type === 'research_completed') {
+      const rootNode = nodeMap.get(sessionRoots.get(engineKey)!)
+      if (rootNode) {
+        rootNode.status = 'completed'
+        rootNode.progress = 100
+        rootNode.timestamp = event.timestamp
+      }
+    }
+  })
+
+  return Array.from(nodeMap.values())
 }
 
 // Convert to ReactFlow format
 function convertToFlowNodes(researchNodes: ResearchNode[]): Node[] {
-  const engines = researchNodes.filter(n => n.type === 'engine');
-  const steps = researchNodes.filter(n => n.type === 'step');
+  const nodeMap = new Map<string, ResearchNode>()
+  researchNodes.forEach((node) => {
+    node.children = node.children || []
+    nodeMap.set(node.id, node)
+  })
 
-  const nodes: Node[] = [];
+  const roots = researchNodes.filter((node) => !node.parent_id)
+  const nodePositions = new Map<string, { x: number; y: number }>()
+  const horizontalSpacing = 240
+  const verticalSpacing = 160
 
-  // Position engines
-  engines.forEach((engine, index) => {
-    nodes.push({
-      id: engine.id,
+  const assignLayout = (nodeId: string, depth: number, baseX: number): { minX: number; maxX: number } => {
+    const node = nodeMap.get(nodeId)
+    if (!node) {
+      return { minX: baseX, maxX: baseX }
+    }
+
+    const children = node.children?.map((childId) => nodeMap.get(childId)).filter(Boolean) as ResearchNode[]
+
+    if (!children || children.length === 0) {
+      const x = baseX
+      const y = depth * verticalSpacing
+      node.depth = depth
+      nodePositions.set(nodeId, { x, y })
+      return { minX: x - horizontalSpacing / 2, maxX: x + horizontalSpacing / 2 }
+    }
+
+    let currentX = baseX
+    const childRanges: Array<{ minX: number; maxX: number }> = []
+
+    children.forEach((child, index) => {
+      const childBaseX = currentX + index * horizontalSpacing
+      const range = assignLayout(child.id, depth + 1, childBaseX)
+      childRanges.push(range)
+      currentX = range.maxX
+    })
+
+    const minX = childRanges[0].minX
+    const maxX = childRanges[childRanges.length - 1].maxX
+    const nodeX = (minX + maxX) / 2
+    const nodeY = depth * verticalSpacing
+
+    node.depth = depth
+    nodePositions.set(nodeId, { x: nodeX, y: nodeY })
+
+    return { minX, maxX }
+  }
+
+  roots.forEach((root, index) => {
+    const startX = index * 500
+    assignLayout(root.id, 0, startX)
+  })
+
+  return researchNodes.map((node) => {
+    const position = nodePositions.get(node.id) || { x: 0, y: 0 }
+    return {
+      id: node.id,
       type: 'researchNode',
-      position: { x: index * 350, y: 0 },
-      data: { node: engine, isSelected: false }
-    });
-
-    // Position steps under each engine
-    const engineSteps = steps.filter(s => s.parent_id === engine.id);
-    engineSteps.forEach((step, stepIndex) => {
-      nodes.push({
-        id: step.id,
-        type: 'researchNode',
-        position: { x: index * 350, y: (stepIndex + 1) * 150 },
-        data: { node: step, isSelected: false }
-      });
-    });
-  });
-
-  return nodes;
+      position,
+      data: { node, isSelected: false }
+    }
+  })
 }
 
 function convertToFlowEdges(researchNodes: ResearchNode[]): Edge[] {
@@ -368,11 +550,13 @@ function convertToFlowEdges(researchNodes: ResearchNode[]): Edge[] {
         id: `${node.parent_id}-${node.id}`,
         source: node.parent_id,
         target: node.id,
+        sourceHandle: 'source',
+        targetHandle: 'target',
         type: 'smoothstep',
         animated: node.status === 'running'
-      });
+      })
     }
-  });
+  })
 
   return edges;
 }
@@ -404,8 +588,13 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
   useEffect(() => {
     if (!sessionId || propEvents) return;
 
+    let isCleanup = false;
+    let reconnectTimeout: number | null = null;
+
     const connectWS = () => {
-      const wsUrl = `ws://localhost:8012/ws/research/${sessionId}`;
+      if (isCleanup) return;
+
+      const wsUrl = `${WS_BASE_URL}/ws/research/${sessionId}`;
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -423,10 +612,13 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         console.log('Tree visualization WebSocket disconnected');
-        // Reconnect after 3 seconds
-        setTimeout(connectWS, 3000);
+
+        // Only reconnect if not a clean close and component hasn't unmounted
+        if (!isCleanup && event.code !== 1000) {
+          reconnectTimeout = setTimeout(connectWS, 3000);
+        }
       };
 
       ws.onerror = (error) => {
@@ -437,7 +629,19 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
     };
 
     const ws = connectWS();
-    return () => ws?.close();
+    return () => {
+      isCleanup = true;
+
+      // Clear any pending reconnection timeout
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+
+      // Close WebSocket connection with clean close code
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.close(1000, 'Component unmounting');
+      }
+    };
   }, [sessionId, propEvents]);
 
   const flowData = useMemo(() => {
@@ -484,6 +688,25 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
     [onNodeSelect, flowData.researchNodes]
   );
 
+  const onNodeDoubleClick = useCallback(
+    (event: React.MouseEvent, node: Node) => {
+      // Find and show detailed info for this node with LLM tab pre-selected
+      const researchNode = flowData.researchNodes?.find(n => n.id === node.id);
+      if (researchNode) {
+        setSelectedNode(researchNode);
+        setSidebarOpen(true);
+        // Auto-select LLM tab for double-click
+        setTimeout(() => {
+          const llmTab = document.querySelector('[data-tab="llm"]') as HTMLButtonElement;
+          if (llmTab) {
+            llmTab.click();
+          }
+        }, 100);
+      }
+    },
+    [flowData.researchNodes]
+  );
+
   if (!events || events.length === 0) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-gray-50">
@@ -504,6 +727,7 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
+        onNodeDoubleClick={onNodeDoubleClick}
         nodeTypes={nodeTypes}
         fitView={false}
         attributionPosition="bottom-left"
@@ -538,6 +762,7 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
             setSelectedNode(null);
           }}
           events={events}
+          sessionId={sessionId}
         />
       )}
     </>
@@ -546,7 +771,7 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
 
 const ResearchTreeVisualization: React.FC<ResearchTreeVisualizationProps> = (props) => {
   return (
-    <div className="w-full h-full bg-white relative">
+    <div className="w-full bg-white relative" style={{ height: '600px' }}>
       <ReactFlowProvider>
         <FlowContent {...props} />
       </ReactFlowProvider>
