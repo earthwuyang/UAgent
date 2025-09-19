@@ -1,7 +1,9 @@
 """Scientific Research Engine - Experimental research with hypothesis testing (MOST COMPLEX)"""
 
 import asyncio
+import json
 import logging
+import re
 import uuid
 from typing import Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass, field
@@ -13,6 +15,11 @@ from ..openhands import OpenHandsClient, CodeGenerationRequest
 from ..websocket_manager import progress_tracker
 from .deep_research import DeepResearchEngine, ResearchResult as DeepResearchResult
 from .code_research import CodeResearchEngine, CodeResearchResult
+from ...integrations.openhands_bridge import (
+    OpenHandsGoalPlanBridge,
+    GoalPlan,
+    GoalPlanStep,
+)
 
 
 class ExperimentStatus(Enum):
@@ -77,6 +84,7 @@ class ExperimentExecution:
     logs: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     intermediate_results: Dict[str, Any] = field(default_factory=dict)
+    goal_plan: Optional[GoalPlan] = None
 
 
 @dataclass
@@ -97,6 +105,42 @@ class ExperimentResult:
 
 
 @dataclass
+class IdeaEvaluation:
+    """Evaluation and scoring for a research idea"""
+
+    idea_id: str
+    overall_score: float
+    scores: Dict[str, float]
+    decision: str
+    strengths: List[str]
+    weaknesses: List[str]
+    comments: str
+
+
+@dataclass
+class ResearchIdea:
+    """Candidate research idea explored during scientific research"""
+
+    id: str
+    title: str
+    summary: str
+    objective: str
+    plan: str
+    search_queries: List[str]
+    node_id: Optional[str] = None
+    parent_node_id: Optional[str] = None
+    literature_review: Optional[DeepResearchResult] = None
+    code_analysis: Optional[CodeResearchResult] = None
+    hypotheses: List[ResearchHypothesis] = field(default_factory=list)
+    experiments: List[ExperimentDesign] = field(default_factory=list)
+    executions: List[ExperimentExecution] = field(default_factory=list)
+    results: List[ExperimentResult] = field(default_factory=list)
+    evaluation: Optional[IdeaEvaluation] = None
+    confidence_score: float = 0.0
+    iteration_count: int = 0
+
+
+@dataclass
 class ScientificResearchResult:
     """Comprehensive scientific research result"""
     research_id: str
@@ -114,6 +158,9 @@ class ScientificResearchResult:
     publication_draft: str
     iteration_count: int
     recommendations: List[str]
+    ideas: List[ResearchIdea] = field(default_factory=list)
+    idea_evaluations: Dict[str, IdeaEvaluation] = field(default_factory=dict)
+    selected_idea_id: Optional[str] = None
 
 
 class HypothesisGenerator:
@@ -239,6 +286,23 @@ class ExperimentDesigner:
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
 
+    @staticmethod
+    def _safe_loads(payload: str) -> Dict[str, Any]:
+        if not payload:
+            return {}
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", payload, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except json.JSONDecodeError:
+                    return {}
+        except TypeError:
+            return {}
+        return {}
+
     async def design_experiment(
         self,
         hypothesis: ResearchHypothesis,
@@ -273,9 +337,7 @@ class ExperimentDesigner:
 
         try:
             response = await self.llm_client.generate(design_prompt)
-
-            import json
-            design_data = json.loads(response)
+            design_data = self._safe_loads(response)
 
             design = ExperimentDesign(
                 id=f"exp_{uuid.uuid4().hex[:8]}",
@@ -296,7 +358,7 @@ class ExperimentDesigner:
             return design
 
         except Exception as e:
-            self.logger.error(f"Error designing experiment: {e}")
+            self.logger.warning(f"Error designing experiment: {e}")
             # Fallback experiment design
             return ExperimentDesign(
                 id=f"exp_{uuid.uuid4().hex[:8]}",
@@ -682,6 +744,11 @@ class ScientificResearchEngine:
         self.hypothesis_generator = HypothesisGenerator(llm_client)
         self.experiment_designer = ExperimentDesigner(llm_client)
         self.experiment_executor = ExperimentExecutor(llm_client, openhands_client)
+        self.goal_bridge = (
+            OpenHandsGoalPlanBridge(openhands_client, llm_client)
+            if openhands_client and llm_client
+            else None
+        )
 
         # Configuration
         self.max_iterations = self.config.get("max_iterations", 3)
@@ -696,6 +763,127 @@ class ScientificResearchEngine:
         if session_id not in self._session_root_nodes:
             self._session_root_nodes[session_id] = f"{session_id}-scientific_research-root"
         return self._session_root_nodes[session_id]
+
+    @staticmethod
+    def _safe_parse_json_block(content: str) -> Any:
+        if not content:
+            return None
+        try:
+            return json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            match = re.search(r"\{.*\}\s*$", content, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except json.JSONDecodeError:
+                    return None
+        return None
+
+    @staticmethod
+    def _normalize_idea_id(title: str, fallback: Optional[str] = None) -> str:
+        base = re.sub(r"[^a-z0-9]+", "-", (title or "idea").lower()).strip("-")
+        if not base:
+            base = fallback or f"idea-{uuid.uuid4().hex[:6]}"
+        return base[:40]
+
+    def _max_parallel_ideas(self, total: int) -> int:
+        configured = int(self.config.get("max_parallel_ideas", 2))
+        return max(1, min(configured, max(1, total)))
+
+    async def _generate_research_ideas(
+        self,
+        research_question: str,
+        session_id: Optional[str],
+    ) -> List[ResearchIdea]:
+        max_ideas = int(self.config.get("max_ideas", 3))
+        idea_prompt = f"""
+Generate up to {max_ideas} distinct, high-impact research ideas that could address the following scientific problem:
+
+"{research_question}"
+
+Respond **only** with JSON array. Each idea object must provide:
+- "id": short slug (lowercase, hyphen/underscore allowed)
+- "title": concise descriptive title
+- "summary": 2-3 sentence overview
+- "objective": primary scientific objective or hypothesis
+- "plan": proposed experimental or analytical plan in 3-4 bullet sentences
+- "search_queries": list of 2-4 search queries that should be investigated further
+
+Ensure ideas are mutually distinct and feasible for an academic research lab. Do not include narrative outside JSON.
+"""
+
+        response = await self.llm_client.generate(
+            idea_prompt,
+            max_tokens=1200,
+            temperature=self.config.get("idea_generation_temperature", 0.6),
+        )
+
+        parsed = self._safe_parse_json_block(response)
+
+        ideas: List[ResearchIdea] = []
+        if isinstance(parsed, list):
+            for item in parsed[:max_ideas]:
+                if not isinstance(item, dict):
+                    continue
+                raw_id = item.get("id") or item.get("title") or item.get("summary")
+                idea_id = self._normalize_idea_id(raw_id or research_question, fallback=f"idea-{len(ideas)+1}")
+                idea = ResearchIdea(
+                    id=idea_id,
+                    title=item.get("title", f"Idea {len(ideas)+1}"),
+                    summary=item.get("summary", "Proposed research direction"),
+                    objective=item.get("objective", research_question),
+                    plan=item.get("plan", ""),
+                    search_queries=[q.strip() for q in item.get("search_queries", []) if isinstance(q, str) and q.strip()],
+                )
+                if not idea.search_queries:
+                    idea.search_queries = [idea.title, research_question]
+                ideas.append(idea)
+
+        if not ideas:
+            fallback_id = self._normalize_idea_id(research_question, fallback="idea-core")
+            ideas = [
+                ResearchIdea(
+                    id=fallback_id,
+                    title=f"Core exploration: {research_question[:60]}",
+                    summary="Baseline investigation derived from the original question.",
+                    objective=research_question,
+                    plan="Perform literature review, derive hypotheses, run experiments using available datasets.",
+                    search_queries=[research_question, f"state of the art {research_question}"],
+                )
+            ]
+
+        if session_id:
+            parent_id = await self._log_progress(
+                session_id,
+                phase="ideation",
+                progress=15.0,
+                message=f"Generated {len(ideas)} research ideas",
+                metadata={
+                    "node_type": "group",
+                    "title": "Idea Generation",
+                    "idea_count": len(ideas),
+                },
+                parent_phase="initializing",
+            )
+            for index, idea in enumerate(ideas, start=1):
+                idea.parent_node_id = parent_id
+                idea.node_id = await self._log_progress(
+                    session_id,
+                    phase=f"idea_{idea.id}",
+                    progress=18.0 + index,
+                    message=idea.title,
+                    metadata={
+                        "parent_id": parent_id,
+                        "node_type": "idea",
+                        "title": idea.title,
+                        "summary": idea.summary,
+                        "objective": idea.objective,
+                        "plan": idea.plan,
+                    },
+                    parent_phase="ideation",
+                )
+
+        return ideas
 
     async def _log_progress(
         self,
@@ -748,6 +936,528 @@ class ScientificResearchEngine:
             )
 
         return metadata["node_id"]
+
+    async def _gather_idea_context(
+        self,
+        idea: ResearchIdea,
+        session_id: Optional[str],
+        base_progress: float,
+        progress_window: float,
+        include_literature: bool,
+        include_code: bool,
+    ) -> Tuple[Optional[DeepResearchResult], Optional[CodeResearchResult]]:
+        query = idea.search_queries[0] if idea.search_queries else idea.title
+
+        literature_result: Optional[DeepResearchResult] = None
+        code_result: Optional[CodeResearchResult] = None
+
+        if include_literature:
+            try:
+                literature_result = await self.deep_research_engine.research(query, session_id=None)
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.warning("Deep research failed for idea %s: %s", idea.id, exc)
+
+        if include_code:
+            try:
+                code_result = await self.code_research_engine.research_code(
+                    query,
+                    include_analysis=True,
+                    session_id=None,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.warning("Code research failed for idea %s: %s", idea.id, exc)
+
+        if session_id and idea.node_id:
+            if literature_result:
+                await self._log_progress(
+                    session_id,
+                    phase=f"{idea.id}_literature",
+                    progress=base_progress + progress_window * 0.15,
+                    message="Literature context gathered",
+                    metadata={
+                        "parent_id": idea.node_id,
+                        "node_type": "analysis",
+                        "title": "Literature Review",
+                        "summary": literature_result.summary,
+                        "key_findings": literature_result.key_findings[:3],
+                    },
+                    parent_phase=f"idea_{idea.id}",
+                )
+            if code_result:
+                await self._log_progress(
+                    session_id,
+                    phase=f"{idea.id}_code",
+                    progress=base_progress + progress_window * 0.25,
+                    message="Code landscape analyzed",
+                    metadata={
+                        "parent_id": idea.node_id,
+                        "node_type": "analysis",
+                        "title": "Code Research",
+                        "summary": code_result.integration_guide[:200],
+                        "repositories": [repo.name for repo in code_result.repositories[:3]],
+                    },
+                    parent_phase=f"idea_{idea.id}",
+                )
+
+        return literature_result, code_result
+
+    async def _log_goal_plan(
+        self,
+        session_id: Optional[str],
+        idea: ResearchIdea,
+        plan: GoalPlan,
+        base_progress: float,
+        progress_window: float,
+    ) -> Dict[str, str]:
+        if not session_id or not idea.node_id or not plan:
+            return {}
+
+        plan_node = await self._log_progress(
+            session_id,
+            phase=f"{idea.id}_goal_plan",
+            progress=base_progress,
+            message="Goal plan generated",
+            metadata={
+                "parent_id": idea.node_id,
+                "node_type": "plan",
+                "title": "Goal Plan",
+                "summary": plan.summary,
+            },
+            parent_phase=f"idea_{idea.id}",
+        )
+
+        step_nodes: Dict[str, str] = {"__plan__": plan_node}
+        for idx, step in enumerate(plan.steps, start=1):
+            offset = progress_window * (0.1 + 0.05 * idx)
+            step_node = await self._log_progress(
+                session_id,
+                phase=f"{idea.id}_goal_plan_step_{idx}",
+                progress=base_progress + offset,
+                message=step.description,
+                metadata={
+                    "parent_id": plan_node,
+                    "node_type": "step",
+                    "title": step.description,
+                    "expected_output": step.expected_output,
+                    "status": step.status,
+                },
+                parent_phase=f"{idea.id}_goal_plan",
+            )
+            step_nodes[step.id] = step_node
+
+        return step_nodes
+
+    async def _log_goal_plan_step_update(
+        self,
+        session_id: Optional[str],
+        idea: ResearchIdea,
+        step: GoalPlanStep,
+        node_map: Dict[str, str],
+        progress_value: float,
+    ) -> None:
+        if not session_id or not idea.node_id:
+            return
+        node_id = node_map.get(step.id)
+        if not node_id:
+            return
+        stdout = ""
+        stderr = ""
+        if step.code_result and step.code_result.execution_result:
+            stdout = step.code_result.execution_result.stdout
+            stderr = step.code_result.execution_result.stderr
+
+        await self._log_progress(
+            session_id,
+            phase=f"{idea.id}_goal_plan_step_{step.id}_update",
+            progress=progress_value,
+            message=f"{step.description} [{step.status}]",
+            metadata={
+                "node_id": node_id,
+                "parent_id": node_map.get("__plan__") or idea.node_id,
+                "node_type": "step",
+                "status": step.status,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+            parent_phase=f"idea_{idea.id}_goal_plan",
+        )
+
+    async def _run_experiments_for_idea(
+        self,
+        idea: ResearchIdea,
+        session_id: Optional[str],
+        base_progress: float,
+        progress_window: float,
+        max_iterations: int,
+    ) -> Tuple[float, int]:
+        iteration = 0
+        max_confidence = 0.0
+        per_iteration_increment = progress_window / max(1, max_iterations)
+
+        while iteration < max_iterations:
+            pending_hypotheses = [
+                hyp
+                for hyp in idea.hypotheses
+                if hyp.status in {HypothesisStatus.PENDING, HypothesisStatus.INCONCLUSIVE}
+            ]
+            if not pending_hypotheses:
+                break
+
+            iteration += 1
+            idea.iteration_count = iteration
+            iteration_progress = base_progress + per_iteration_increment * (iteration - 1)
+
+            if session_id and idea.node_id:
+                await self._log_progress(
+                    session_id,
+                    phase=f"{idea.id}_experiments_iter_{iteration}",
+                    progress=iteration_progress,
+                    message=f"Experiments iteration {iteration}",
+                    metadata={
+                        "parent_id": idea.node_id,
+                        "node_type": "step",
+                        "iteration": iteration,
+                        "pending_hypotheses": len(pending_hypotheses),
+                    },
+                    parent_phase=f"idea_{idea.id}",
+                )
+
+            iteration_results: List[ExperimentResult] = []
+
+            for hypothesis in pending_hypotheses:
+                design = await self.experiment_designer.design_experiment(hypothesis)
+                idea.experiments.append(design)
+
+                if session_id and idea.node_id:
+                    await self._log_progress(
+                        session_id,
+                        phase=f"{idea.id}_design_{design.id}",
+                        progress=iteration_progress + per_iteration_increment * 0.2,
+                        message=f"Designed experiment: {design.name}",
+                        metadata={
+                            "parent_id": idea.node_id,
+                            "node_type": "step",
+                            "title": design.name,
+                            "methodology": design.methodology,
+                        },
+                        parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                    )
+
+                goal_plan_nodes: Dict[str, str] = {}
+                goal_plan: Optional[GoalPlan] = None
+
+                if self.goal_bridge:
+                    plan_context = {
+                        "hypothesis": hypothesis.statement,
+                        "variables": hypothesis.variables,
+                        "analysis_plan": design.analysis_plan,
+                        "resource_requirements": design.resource_requirements,
+                    }
+                    goal_plan = await self.goal_bridge.generate_goal_plan(design.description or design.name, plan_context)
+                    goal_plan_nodes = await self._log_goal_plan(
+                        session_id,
+                        idea,
+                        goal_plan,
+                        iteration_progress + per_iteration_increment * 0.22,
+                        per_iteration_increment * 0.15,
+                    )
+
+                    async def _plan_callback(event_type: str, payload: Dict[str, Any]) -> None:
+                        if not payload:
+                            return
+                        step_id = payload.get("step_id")
+                        if not step_id:
+                            return
+                        matching = next((s for s in goal_plan.steps if s.id == step_id), None)
+                        if not matching:
+                            return
+                        progress_point = iteration_progress + per_iteration_increment * (0.25 if event_type == "step_started" else 0.28)
+                        await self._log_goal_plan_step_update(
+                            session_id,
+                            idea,
+                            matching,
+                            goal_plan_nodes,
+                            progress_point,
+                        )
+
+                    goal_plan = await self.goal_bridge.execute_goal_plan(
+                        goal_plan,
+                        plan_context,
+                        progress_callback=_plan_callback,
+                    )
+
+                execution = await self.experiment_executor.execute_experiment(design)
+                idea.executions.append(execution)
+                if goal_plan:
+                    execution.goal_plan = goal_plan
+
+                if session_id and idea.node_id:
+                    await self._log_progress(
+                        session_id,
+                        phase=f"{idea.id}_execution_{execution.id}",
+                        progress=iteration_progress + per_iteration_increment * 0.4,
+                        message=f"Executed experiment {design.name}",
+                        metadata={
+                            "parent_id": idea.node_id,
+                            "node_type": "step",
+                            "status": execution.status.value,
+                        },
+                        parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                    )
+
+                if execution.status == ExperimentStatus.COMPLETED:
+                    experiment_result = await self._analyze_experiment_result(hypothesis, design, execution)
+                    idea.results.append(experiment_result)
+                    iteration_results.append(experiment_result)
+                    await self._update_hypothesis_status(hypothesis, experiment_result)
+
+                    if session_id and idea.node_id:
+                        await self._log_progress(
+                            session_id,
+                            phase=f"{idea.id}_result_{experiment_result.execution_id}",
+                            progress=iteration_progress + per_iteration_increment * 0.6,
+                            message=f"Result for {design.name}",
+                            metadata={
+                                "parent_id": idea.node_id,
+                                "node_type": "result",
+                                "conclusions": experiment_result.conclusions[:2],
+                                "confidence_score": experiment_result.confidence_score,
+                            },
+                            parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                        )
+                else:
+                    hypothesis.evidence.append("Experiment execution failed")
+                    if session_id and idea.node_id:
+                        await self._log_progress(
+                            session_id,
+                            phase=f"{idea.id}_result_{execution.id}",
+                            progress=iteration_progress + per_iteration_increment * 0.6,
+                            message=f"Experiment {design.name} failed",
+                            metadata={
+                                "parent_id": idea.node_id,
+                                "node_type": "result",
+                                "status": execution.status.value,
+                                "errors": execution.errors[:1] if execution.errors else [],
+                            },
+                            parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                        )
+
+            current_confidence = self._calculate_overall_confidence(idea.results)
+            max_confidence = max(max_confidence, current_confidence)
+
+            if current_confidence >= self.confidence_threshold:
+                break
+
+            if iteration < max_iterations and iteration_results:
+                await self._refine_hypotheses_for_next_iteration(idea.hypotheses, iteration_results)
+
+        idea.confidence_score = max_confidence
+        return max_confidence, iteration
+
+    async def _evaluate_idea(
+        self,
+        idea: ResearchIdea,
+        session_id: Optional[str],
+        progress_value: float,
+    ) -> IdeaEvaluation:
+        results_summary = "\n".join(
+            [
+                f"- {res.conclusions[0]} (confidence {res.confidence_score:.2f})"
+                for res in idea.results[:5]
+                if res.conclusions
+            ]
+        ) or "No definitive experimental conclusions yet."
+
+        literature_summary = idea.literature_review.summary if idea.literature_review else "No literature synthesis available."
+        code_summary = (
+            idea.code_analysis.integration_guide[:400]
+            if idea.code_analysis and idea.code_analysis.integration_guide
+            else "No implementation notes available."
+        )
+
+        evaluation_prompt = f"""
+You are a panel of expert reviewers scoring a scientific research idea.
+
+Idea Title: {idea.title}
+Summary: {idea.summary}
+Objective: {idea.objective}
+Plan: {idea.plan}
+
+Literature Context:
+{literature_summary}
+
+Code / Implementation Context:
+{code_summary}
+
+Experimental Findings So Far:
+{results_summary}
+
+Provide a JSON object with the following fields:
+- "overall_score": float between 0 and 10 assessing overall promise
+- "novelty": float between 0 and 10 (novelty of idea)
+- "feasibility": float between 0 and 10 (practical feasibility)
+- "impact": float between 0 and 10 (potential impact)
+- "clarity": float between 0 and 10 (clarity of approach)
+- "strengths": list of 2-4 bullet point strengths
+- "weaknesses": list of 2-4 bullet point weaknesses or risks
+- "decision": "accept" if worth prioritizing or "reject" otherwise
+- "comments": concise reviewer-style paragraph summarizing reasoning
+
+Return JSON only.
+"""
+
+        response = await self.llm_client.generate(
+            evaluation_prompt,
+            max_tokens=700,
+            temperature=self.config.get("idea_evaluation_temperature", 0.3),
+        )
+
+        parsed = self._safe_parse_json_block(response) or {}
+
+        def _score(value: Any, default: float = 5.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        idea_scores = {
+            "novelty": _score(parsed.get("novelty"), 6.0),
+            "feasibility": _score(parsed.get("feasibility"), 6.0),
+            "impact": _score(parsed.get("impact"), 6.0),
+            "clarity": _score(parsed.get("clarity"), 6.0),
+        }
+        overall_score = _score(parsed.get("overall_score"), sum(idea_scores.values()) / len(idea_scores))
+        evaluation = IdeaEvaluation(
+            idea_id=idea.id,
+            overall_score=overall_score,
+            scores=idea_scores,
+            decision=str(parsed.get("decision", "accept")).lower(),
+            strengths=[str(item).strip() for item in parsed.get("strengths", []) if str(item).strip()],
+            weaknesses=[str(item).strip() for item in parsed.get("weaknesses", []) if str(item).strip()],
+            comments=str(parsed.get("comments", "")),
+        )
+
+        if session_id and idea.node_id:
+            await self._log_progress(
+                session_id,
+                phase=f"{idea.id}_evaluation",
+                progress=progress_value,
+                message=f"Idea scored: {overall_score:.2f}",
+                metadata={
+                    "parent_id": idea.node_id,
+                    "node_type": "result",
+                    "overall_score": overall_score,
+                    "scores": evaluation.scores,
+                    "decision": evaluation.decision,
+                },
+                parent_phase=f"idea_{idea.id}",
+            )
+
+        return evaluation
+
+    def _select_best_idea(self, ideas: List[ResearchIdea]) -> Optional[ResearchIdea]:
+        if not ideas:
+            return None
+        evaluated = [idea for idea in ideas if idea.evaluation]
+        if not evaluated:
+            return ideas[0]
+
+        def _idea_sort_key(idea: ResearchIdea) -> Tuple[float, float, float]:
+            evaluation = idea.evaluation
+            return (
+                evaluation.overall_score,
+                idea.confidence_score,
+                idea.iteration_count,
+            )
+
+        evaluated.sort(key=_idea_sort_key, reverse=True)
+        return evaluated[0]
+
+    async def _process_idea(
+        self,
+        idea: ResearchIdea,
+        research_question: str,
+        session_id: Optional[str],
+        semaphore: asyncio.Semaphore,
+        idx: int,
+        total: int,
+        include_literature: bool,
+        include_code: bool,
+        enable_iteration: bool,
+    ) -> ResearchIdea:
+        async with semaphore:
+            progress_window = 45.0 / max(1, total)
+            base_progress = 22.0 + progress_window * idx
+
+            literature_result, code_result = await self._gather_idea_context(
+                idea,
+                session_id,
+                base_progress,
+                progress_window,
+                include_literature,
+                include_code,
+            )
+            idea.literature_review = literature_result
+            idea.code_analysis = code_result
+
+            literature_context = literature_result.summary if literature_result else None
+            code_context = code_result.integration_guide if code_result else None
+
+            hypotheses = await self.hypothesis_generator.generate_hypotheses(
+                research_question,
+                literature_context=literature_context,
+                code_context=code_context,
+            )
+
+            if not hypotheses:
+                hypotheses = [
+                    ResearchHypothesis(
+                        id=f"hyp_{uuid.uuid4().hex[:8]}",
+                        statement=f"Evaluate core assumption behind {idea.title}",
+                        reasoning="Fallback hypothesis when generation fails",
+                        testable_predictions=["Primary metric improves"],
+                        success_criteria={"confidence_threshold": 0.6},
+                        variables={"independent": ["intervention"], "dependent": ["metric"]},
+                    )
+                ]
+
+            idea.hypotheses = hypotheses
+
+            if session_id and idea.node_id:
+                for h_idx, hypothesis in enumerate(hypotheses, start=1):
+                    await self._log_progress(
+                        session_id,
+                        phase=f"{idea.id}_hypothesis_{h_idx}",
+                        progress=base_progress + progress_window * 0.35,
+                        message=f"Hypothesis {h_idx}",
+                        metadata={
+                            "parent_id": idea.node_id,
+                            "node_type": "result",
+                            "title": hypothesis.statement,
+                            "reasoning": hypothesis.reasoning,
+                        },
+                        parent_phase=f"idea_{idea.id}",
+                    )
+
+            max_iterations = max(1, self.max_iterations) if enable_iteration else 1
+            confidence, iterations = await self._run_experiments_for_idea(
+                idea,
+                session_id,
+                base_progress + progress_window * 0.4,
+                progress_window * 0.45,
+                max_iterations,
+            )
+
+            idea.confidence_score = confidence
+            idea.iteration_count = iterations
+
+            idea.evaluation = await self._evaluate_idea(
+                idea,
+                session_id,
+                base_progress + progress_window * 0.95,
+            )
+
+            return idea
 
     async def conduct_research(
         self,
@@ -808,227 +1518,106 @@ class ScientificResearchEngine:
             recommendations=[]
         )
 
+        enable_iteration = bool(enable_iteration and self.config.get("enable_iteration", True))
+
         try:
-            # Phase 1: Background Research (Orchestrating other engines)
-            self.logger.info("Phase 1: Conducting background research")
+            self.logger.info("Phase 1: Generating candidate research ideas")
 
-            background_tasks = []
+            ideas = await self._generate_research_ideas(research_question, session_id)
+            result.ideas = ideas
 
-            if include_literature_review:
-                literature_task = self.deep_research_engine.research(
-                    f"literature review: {research_question}",
-                    sources=["academic", "web"]
-                )
-                background_tasks.append(("literature", literature_task))
+            idea_count = len(ideas)
+            semaphore = asyncio.Semaphore(self._max_parallel_ideas(idea_count))
 
-            if include_code_analysis:
-                code_task = self.code_research_engine.research_code(
-                    research_question,
-                    include_analysis=True
-                )
-                background_tasks.append(("code", code_task))
-
-            # Execute background research concurrently
-            if background_tasks:
-                await self._log_progress(
-                    session_id,
-                    phase="background_research",
-                    progress=18.0,
-                    message="Running background research across engines",
-                    metadata={"include_literature": include_literature_review, "include_code": include_code_analysis},
-                    parent_phase="initializing"
-                )
-
-                background_results = await asyncio.gather(*[task for _, task in background_tasks])
-
-                for i, (task_type, _) in enumerate(background_tasks):
-                    if task_type == "literature":
-                        result.literature_review = background_results[i]
-                    elif task_type == "code":
-                        result.code_analysis = background_results[i]
-
-                await self._log_progress(
-                    session_id,
-                    phase="background_research",
-                    progress=32.0,
-                    message="Background research completed",
-                    metadata={
-                        "literature": bool(result.literature_review),
-                        "code_analysis": bool(result.code_analysis)
-                    },
-                    parent_phase="initializing"
-                )
-
-            # Phase 2: Hypothesis Generation
-            self.logger.info("Phase 2: Generating research hypotheses")
-
-            literature_context = None
-            code_context = None
-
-            if result.literature_review:
-                literature_context = f"Key findings: {', '.join(result.literature_review.key_findings[:3])}"
-
-            if result.code_analysis:
-                code_context = f"Implementation analysis: {result.code_analysis.integration_guide[:500]}"
-
-            result.hypotheses = await self.hypothesis_generator.generate_hypotheses(
-                research_question,
-                literature_context,
-                code_context
-            )
-
-            await self._log_progress(
-                session_id,
-                phase="hypothesis_generation",
-                progress=48.0,
-                message=f"Generated {len(result.hypotheses)} hypotheses",
-                metadata={"hypotheses": [hyp.statement for hyp in result.hypotheses[:3]]},
-                parent_phase="background_research"
-            )
-
-            hypothesis_nodes: Dict[str, str] = {}
-            if session_id:
-                for idx, hypothesis in enumerate(result.hypotheses):
-                    node_id = await self._log_progress(
+            processed_ideas = await asyncio.gather(
+                *[
+                    self._process_idea(
+                        idea,
+                        research_question,
                         session_id,
-                        phase=f"hypothesis_{idx + 1}",
-                        progress=50.0,
-                        message=f"Hypothesis {idx + 1}",
-                        metadata={
-                            "title": hypothesis.statement,
-                            "description": hypothesis.reasoning,
-                            "parent_id": self._session_phase_nodes.get(session_id, {}).get("hypothesis_generation"),
-                        },
-                        parent_phase="hypothesis_generation",
-                        node_type="result"
+                        semaphore,
+                        idx,
+                        idea_count,
+                        include_literature_review,
+                        include_code_analysis,
+                        enable_iteration,
                     )
-                    hypothesis_nodes[hypothesis.id] = node_id
+                    for idx, idea in enumerate(ideas)
+                ]
+            )
 
-            # Phase 3: Iterative Experimentation
-            iteration = 0
-            max_confidence_achieved = 0.0
-            iteration_progress_start = 55.0
-            iteration_progress_window = 25.0
-            per_iteration_increment = iteration_progress_window / max(1, self.max_iterations)
+            result.ideas = processed_ideas
+            result.idea_evaluations = {
+                idea.id: idea.evaluation
+                for idea in processed_ideas
+                if idea.evaluation is not None
+            }
 
-            while iteration < self.max_iterations and enable_iteration:
-                iteration += 1
-                result.iteration_count = iteration
+            ranking = sorted(
+                processed_ideas,
+                key=lambda idea: (
+                    idea.evaluation.overall_score if idea.evaluation else 0.0,
+                    idea.confidence_score,
+                    idea.iteration_count,
+                ),
+                reverse=True,
+            )
 
-                self.logger.info(f"Phase 3.{iteration}: Experimental iteration {iteration}")
-
-                # Design and execute experiments for each hypothesis
-                iteration_results = []
-
+            if session_id:
                 await self._log_progress(
                     session_id,
-                    phase="experimentation",
-                    progress=iteration_progress_start + per_iteration_increment * (iteration - 1),
-                    message=f"Running experiments for iteration {iteration}",
-                    metadata={"pending_hypotheses": sum(1 for hyp in result.hypotheses if hyp.status == HypothesisStatus.PENDING)},
-                    parent_phase="hypothesis_generation"
+                    phase="idea_evaluation_summary",
+                    progress=82.0,
+                    message="Idea evaluations completed",
+                    metadata={
+                        "parent_id": self._session_phase_nodes.get(session_id, {}).get("ideation"),
+                        "node_type": "analysis",
+                        "ranking": [
+                            {
+                                "idea_id": idea.id,
+                                "title": idea.title,
+                                "overall_score": idea.evaluation.overall_score if idea.evaluation else None,
+                                "confidence": idea.confidence_score,
+                            }
+                            for idea in ranking
+                        ],
+                    },
+                    parent_phase="ideation",
                 )
 
-                for hypothesis in result.hypotheses:
-                    if hypothesis.status == HypothesisStatus.PENDING:
-                        # Design experiment
-                        experiment_design = await self.experiment_designer.design_experiment(hypothesis)
-                        result.experiments.append(experiment_design)
+            best_idea = self._select_best_idea(processed_ideas)
+            if not best_idea and processed_ideas:
+                best_idea = processed_ideas[0]
 
-                        design_metadata = {
-                            "title": experiment_design.name,
-                            "description": experiment_design.description,
-                            "parent_id": hypothesis_nodes.get(hypothesis.id),
-                        }
-                        await self._log_progress(
-                            session_id,
-                            phase=f"design_{experiment_design.id}",
-                            progress=iteration_progress_start + per_iteration_increment * (iteration - 1) + 5.0,
-                            message=f"Designed experiment {experiment_design.name}",
-                            metadata=design_metadata,
-                            parent_phase="experimentation"
-                        )
+            if best_idea:
+                result.selected_idea_id = best_idea.id
+                result.literature_review = best_idea.literature_review
+                result.code_analysis = best_idea.code_analysis
+                result.hypotheses = best_idea.hypotheses
+                result.experiments = best_idea.experiments
+                result.executions = best_idea.executions
+                result.results = best_idea.results
+                result.iteration_count = best_idea.iteration_count
+                result.confidence_score = best_idea.confidence_score
 
-                        # Execute experiment
-                        execution = await self.experiment_executor.execute_experiment(experiment_design)
-                        result.executions.append(execution)
-
-                        execution_metadata = {
-                            "title": experiment_design.name,
-                            "status": execution.status.value,
-                            "parent_id": hypothesis_nodes.get(hypothesis.id),
-                        }
-                        await self._log_progress(
-                            session_id,
-                            phase=f"execution_{execution.id}",
-                            progress=iteration_progress_start + per_iteration_increment * (iteration - 1) + 10.0,
-                            message=f"Executed experiment for hypothesis {hypothesis.id}",
-                            metadata=execution_metadata,
-                            parent_phase="experimentation"
-                        )
-
-                        # Analyze results
-                        if execution.status == ExperimentStatus.COMPLETED:
-                            experiment_result = await self._analyze_experiment_result(
-                                hypothesis,
-                                experiment_design,
-                                execution
-                            )
-                            result.results.append(experiment_result)
-                            iteration_results.append(experiment_result)
-
-                            # Update hypothesis status based on results
-                            await self._update_hypothesis_status(hypothesis, experiment_result)
-
-                            await self._log_progress(
-                                session_id,
-                                phase=f"result_{experiment_result.execution_id}",
-                                progress=iteration_progress_start + per_iteration_increment * (iteration - 1) + 20.0,
-                                message=f"Results for hypothesis {hypothesis.id}",
-                                metadata={
-                                    "title": experiment_result.conclusions[0] if experiment_result.conclusions else "Experiment Result",
-                                    "confidence_score": experiment_result.confidence_score,
-                                    "parent_id": hypothesis_nodes.get(hypothesis.id),
-                                },
-                                parent_phase="experimentation",
-                                node_type="result"
-                            )
-
-                # Check if we should continue iterating
-                current_confidence = self._calculate_overall_confidence(result.results)
-                max_confidence_achieved = max(max_confidence_achieved, current_confidence)
-
-                if current_confidence >= self.confidence_threshold:
-                    self.logger.info(f"Confidence threshold reached: {current_confidence}")
+                if session_id and best_idea.node_id:
                     await self._log_progress(
                         session_id,
-                        phase="experimentation",
-                        progress=iteration_progress_start + per_iteration_increment * iteration,
-                        message="Confidence threshold achieved",
-                        metadata={"confidence_score": current_confidence},
-                        parent_phase="hypothesis_generation"
+                        phase="idea_selection",
+                        progress=84.0,
+                        message=f"Selected best idea: {best_idea.title}",
+                        metadata={
+                            "parent_id": self._session_phase_nodes.get(session_id, {}).get("ideation"),
+                            "node_type": "result",
+                            "selected_idea": best_idea.title,
+                            "overall_score": best_idea.evaluation.overall_score if best_idea.evaluation else None,
+                            "confidence": best_idea.confidence_score,
+                        },
+                        parent_phase="ideation",
                     )
-                    break
 
-                # Refine hypotheses for next iteration if needed
-                if iteration < self.max_iterations:
-                    await self._refine_hypotheses_for_next_iteration(result, iteration_results)
-
-            if iteration > 0:
-                await self._log_progress(
-                    session_id,
-                    phase="experimentation",
-                    progress=iteration_progress_start + per_iteration_increment * iteration,
-                    message="Experimental phase completed",
-                    metadata={
-                        "iterations": result.iteration_count,
-                        "confidence": max_confidence_achieved
-                    },
-                    parent_phase="hypothesis_generation"
-                )
-
-            # Phase 4: Synthesis and Final Analysis
-            self.logger.info("Phase 4: Synthesizing results and generating conclusions")
+            # Phase 2: Synthesis and Final Analysis based on selected idea
+            self.logger.info("Phase 2: Synthesizing results and generating conclusions")
 
             await self._log_progress(
                 session_id,
@@ -1037,14 +1626,14 @@ class ScientificResearchEngine:
                 message="Synthesizing research findings",
                 metadata={
                     "executions": len(result.executions),
-                    "results": len(result.results)
+                    "results": len(result.results),
+                    "selected_idea": result.selected_idea_id,
                 },
-                parent_phase="experimentation"
+                parent_phase="ideation",
             )
 
             result.synthesis = await self._synthesize_research_results(result)
             result.final_conclusions = result.synthesis.get("conclusions", [])
-            result.confidence_score = max_confidence_achieved
             result.reproducibility_report = await self._generate_reproducibility_report(result)
             result.publication_draft = await self._generate_publication_draft(result)
             result.recommendations = await self._generate_research_recommendations(result)
@@ -1054,29 +1643,50 @@ class ScientificResearchEngine:
                     await self._log_progress(
                         session_id,
                         phase=f"conclusion_{idx + 1}",
-                        progress=95.0,
+                        progress=94.0,
                         message=f"Conclusion {idx + 1}",
                         metadata={
                             "title": conclusion,
                             "parent_id": self._session_phase_nodes.get(session_id, {}).get("synthesis"),
                         },
                         parent_phase="synthesis",
-                        node_type="result"
+                        node_type="result",
                     )
 
-            self.logger.info(f"Scientific research completed: {research_id}")
+            self.logger.info("Scientific research completed: %s", research_id)
 
             await self._log_progress(
                 session_id,
                 phase="synthesis",
-                progress=95.0,
+                progress=96.0,
                 message="Final analysis prepared",
                 metadata={
                     "conclusions": len(result.final_conclusions),
-                    "recommendations": len(result.recommendations)
+                    "recommendations": len(result.recommendations),
+                    "selected_idea": result.selected_idea_id,
                 },
-                parent_phase="experimentation"
+                parent_phase="ideation",
             )
+
+            if session_id:
+                summary_text = result.synthesis.get("overall_findings") if result.synthesis else "Scientific research completed"
+                await progress_tracker.log_research_completed(
+                    session_id=session_id,
+                    engine="scientific_research",
+                    result_summary=summary_text or "Scientific research completed",
+                    metadata={
+                        "selected_idea": result.selected_idea_id,
+                        "idea_rankings": [
+                            {
+                                "idea_id": idea.id,
+                                "title": idea.title,
+                                "overall_score": idea.evaluation.overall_score if idea.evaluation else None,
+                                "confidence": idea.confidence_score,
+                            }
+                            for idea in ranking
+                        ],
+                    },
+                )
 
         except Exception as e:
             self.logger.error(f"Error in scientific research: {e}")
@@ -1148,10 +1758,10 @@ class ScientificResearchEngine:
 
         hypothesis.evidence.extend(result.conclusions)
 
-    async def _refine_hypotheses_for_next_iteration(self, result: ScientificResearchResult, iteration_results: List[ExperimentResult]):
+    async def _refine_hypotheses_for_next_iteration(self, hypotheses: List[ResearchHypothesis], iteration_results: List[ExperimentResult]):
         """Refine hypotheses based on experimental results"""
 
-        for hypothesis in result.hypotheses:
+        for hypothesis in hypotheses:
             if hypothesis.status == HypothesisStatus.INCONCLUSIVE:
                 # Find relevant experimental results
                 relevant_results = [r for r in iteration_results if r.hypothesis_id == hypothesis.id]
@@ -1177,6 +1787,17 @@ class ScientificResearchEngine:
     async def _synthesize_research_results(self, result: ScientificResearchResult) -> Dict[str, Any]:
         """Synthesize all research results into comprehensive analysis"""
 
+        idea_lines = []
+        for idea in result.ideas:
+            evaluation = result.idea_evaluations.get(idea.id)
+            score_display = evaluation.overall_score if evaluation else "N/A"
+            decision_display = evaluation.decision if evaluation else "unknown"
+            idea_lines.append(
+                f"- {idea.title} (id: {idea.id}, overall score: {score_display}, decision: {decision_display}, confidence: {idea.confidence_score:.2f})"
+            )
+
+        idea_summary = "\n".join(idea_lines) if idea_lines else "- No alternative ideas evaluated"
+
         synthesis_prompt = f"""
         Synthesize the following scientific research results:
 
@@ -1184,6 +1805,10 @@ class ScientificResearchEngine:
         Hypotheses Tested: {len(result.hypotheses)}
         Experiments Conducted: {len(result.experiments)}
         Iterations Completed: {result.iteration_count}
+
+        Selected Idea ID: {result.selected_idea_id}
+        Idea Evaluations:
+{idea_summary}
 
         Literature Review Available: {result.literature_review is not None}
         Code Analysis Available: {result.code_analysis is not None}

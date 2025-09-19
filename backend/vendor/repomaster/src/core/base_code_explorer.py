@@ -80,11 +80,14 @@ class BaseCodeExplorer:
         if not self.is_cleanup_venv:
             # If environment cleanup is not needed (persistent environment), try to load existing environment
             activate_script = os.path.join(self.venv_path, "bin", "activate")
-            if os.path.exists(self.venv_path) and os.path.exists(activate_script):
+            if self._is_valid_venv(self.venv_path) and os.path.exists(activate_script):
                 self._print_venv_status("loading")
                 env_builder = venv.EnvBuilder(with_pip=True)
                 self.venv_context = env_builder.ensure_directories(self.venv_path)
             else:
+                if os.path.exists(self.venv_path) and not self._is_valid_venv(self.venv_path):
+                    print(f"⚠️  Detected incomplete virtual environment at {self.venv_path}, rebuilding from scratch...")
+                    shutil.rmtree(self.venv_path, ignore_errors=True)
                 self._print_venv_setup_notice("persistent")
                 self.venv_context = self._create_virtual_env(self.venv_path)
         else:
@@ -186,6 +189,38 @@ class BaseCodeExplorer:
         print("║ 🚀 You can now run your LLM applications!".ljust(69) + "║")
         print("╚" + "═" * 68 + "╝\n")
         return self.venv_context
+
+    def _is_valid_venv(self, venv_path):
+        """Lightweight validation to ensure the virtual environment is usable."""
+
+        if not os.path.isdir(venv_path):
+            return False
+
+        possible_bins = [
+            os.path.join(venv_path, "bin", "python"),
+            os.path.join(venv_path, "Scripts", "python.exe"),
+        ]
+        if not any(os.path.exists(path) for path in possible_bins):
+            return False
+
+        lib_candidates = [
+            os.path.join(venv_path, "lib"),
+            os.path.join(venv_path, "Lib"),
+        ]
+
+        for lib_dir in lib_candidates:
+            if not os.path.isdir(lib_dir):
+                continue
+            try:
+                if any(
+                    os.path.isdir(os.path.join(lib_dir, entry)) and entry.startswith("python")
+                    for entry in os.listdir(lib_dir)
+                ):
+                    return True
+            except FileNotFoundError:
+                continue
+
+        return False
     
     def cleanup_venv(self):
         """Clean up virtual environment"""

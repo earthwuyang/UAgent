@@ -144,7 +144,15 @@ class GlobalCodeTreeBuilder:
                     continue
                 
                 # Add before processing files
-                file_size = os.path.getsize(file_path)
+                try:
+                    file_size = os.path.getsize(file_path)
+                except FileNotFoundError:
+                    logger.warning(f"File disappeared during scan, skipping: {rel_path}")
+                    continue
+                except OSError as exc:
+                    logger.warning(f"Unable to read file size for {rel_path}: {exc}")
+                    continue
+
                 if file_size > 10 * 1024 * 1024:  # Skip files larger than 10MB
                     # logger.info(f"File {rel_path} is too large ({file_size/1024/1024:.2f}MB), skipping")
                     continue

@@ -13,6 +13,7 @@ from datetime import datetime
 import asyncio
 from src.utils.utils_config import AppConfig
 from configs.oai_config import get_llm_config
+from src.core.repo_environment import ensure_repo_virtual_envs
 
 
 # ======================== Utility Classes and Functions ========================
@@ -122,6 +123,9 @@ class DataProcessor:
             if not os.path.exists(target_repo_path):
                 clone_cmd = f"git clone {repo_url} {target_repo_path}"
                 subprocess.run(clone_cmd, shell=True, check=True)
+
+        if target_repo_path:
+            ensure_repo_virtual_envs(target_repo_path)
         
         # Set input and output paths
         target_input_path = PathManager.create_unique_dir(f"{work_dir}", "input_dataset")
@@ -389,4 +393,3 @@ if __name__ == "__main__":
     else:
         print("Running in non-parallel mode...")
         AgentRunner.run_sequential(args)
-

@@ -8,7 +8,7 @@ from autogen.code_utils import create_virtual_env
 
 from typing import Annotated
 import json
-ignored_dirs = ['__pycache__', '.git', '.vscode', 'venv', 'env', 'node_modules', '.pytest_cache', 'build', 'dist', '.github', 'logs']
+ignored_dirs = ['__pycache__', '.git', '.vscode', 'venv', 'env', '.venvs', 'node_modules', '.pytest_cache', 'build', 'dist', '.github', 'logs']
 ignored_file_patterns = [r'.*\.pyc$', r'.*\.pyo$', r'.*\.pyd$', r'.*\.so$', r'.*\.dll$', r'.*\.class$', r'.*\.egg-info$', r'.*~$', r'.*\.swp$']
 
     
