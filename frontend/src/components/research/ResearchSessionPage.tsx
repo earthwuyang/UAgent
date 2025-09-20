@@ -31,6 +31,7 @@ const ResearchSessionPage: React.FC = () => {
   const [events, setEvents] = useState<any[]>([])
   const [hasFetchedReport, setHasFetchedReport] = useState(false)
   const [isFetchingReport, setIsFetchingReport] = useState(false)
+  const [autoStartTriggered, setAutoStartTriggered] = useState(false)
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const storageKey = useMemo(() => `${STORAGE_PREFIX}${sessionId}`, [sessionId])
@@ -155,6 +156,39 @@ const ResearchSessionPage: React.FC = () => {
       fetchReport()
     }
   }, [events, sessionId, fetchReport])
+
+  useEffect(() => {
+    if (!sessionId || autoStartTriggered) return
+    if (!requestSummary?.trim()) return
+    if (classification) return
+
+    let cancelled = false
+
+    const triggerAutoStart = async () => {
+      try {
+        setAutoStartTriggered(true)
+        const ack = await UAgentAPI.routeAndExecute({
+          user_request: requestSummary,
+          session_id: sessionId,
+          context: { source: 'session_auto_start' }
+        })
+        if (cancelled) return
+        setClassification(ack.classification as ClassificationResult)
+        persistSessionData(null, ack.classification as ClassificationResult)
+      } catch (error) {
+        console.error('Auto-start research failed', error)
+        if (!cancelled) {
+          setAutoStartTriggered(false)
+        }
+      }
+    }
+
+    triggerAutoStart()
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, requestSummary, classification, autoStartTriggered, persistSessionData])
 
   return (
     <div className="min-h-screen bg-slate-50">

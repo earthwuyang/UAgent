@@ -130,6 +130,23 @@ async def route_and_execute(request: RouterRequest):
             engine=classification_result.primary_engine
         )
 
+        # Seed a minimal root node so late-joining clients can build a tree immediately
+        try:
+            await progress_tracker.log_research_progress(
+                session_id=session_id,
+                engine=classification_result.primary_engine.lower(),
+                phase="session_initialized",
+                progress=1.0,
+                message="Session initialized",
+                metadata={
+                    "node_type": "engine",
+                    "title": f"{classification_result.primary_engine.replace('_', ' ').title()} Engine",
+                },
+            )
+        except Exception:
+            # Non-fatal: if seeding fails, normal engine events will still build the tree
+            pass
+
         await session_manager.create_session(
             session_id=session_id,
             request=request.user_request,

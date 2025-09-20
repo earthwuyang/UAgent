@@ -99,16 +99,17 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
         try {
           const data = JSON.parse(event.data);
 
-          if (data.type === 'research_event') {
+          if (data.type === 'research_event' || data.type === 'event_replay') {
+            const evt = data.type === 'event_replay' ? data.event : data.event;
             setEvents(prev => {
-              const newEvents = [...prev, data.event];
+              const newEvents = [...prev, evt];
               onEventsUpdate?.(newEvents);
               return newEvents;
             });
 
             // Update overall progress
-            if (data.event.progress_percentage !== undefined) {
-              setOverallProgress(data.event.progress_percentage);
+            if (evt.progress_percentage !== undefined) {
+              setOverallProgress(evt.progress_percentage);
             }
           } else if (data.type === 'journal_entry') {
             setJournalEntries(prev => [...prev, data.entry]);

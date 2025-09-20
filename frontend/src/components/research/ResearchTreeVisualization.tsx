@@ -21,7 +21,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import LLMConversationLogs from './LLMConversationLogs';
-import { WS_BASE_URL } from '../../config';
+import { WS_BASE_URL, HTTP_BASE_URL } from '../../config';
 
 // Research process node interfaces
 interface ResearchNode {
@@ -660,8 +660,9 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === 'research_event') {
-            setInternalEvents(prev => [...prev, data.event]);
+          if (data.type === 'research_event' || data.type === 'event_replay') {
+            const evt = data.type === 'event_replay' ? data.event : data.event;
+            setInternalEvents(prev => [...prev, evt]);
           }
         } catch (error) {
           console.error('Error parsing tree WebSocket message:', error);
@@ -700,11 +701,60 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
     };
   }, [sessionId, propEvents]);
 
+  // Fallback: if no events arrive shortly after connect, synthesize a minimal root from REST session info
+  useEffect(() => {
+    if (propEvents || !sessionId) return;
+
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const seedFromRest = async () => {
+      try {
+        const res = await fetch(`${HTTP_BASE_URL}/api/research/sessions/${sessionId}/full`, {
+          credentials: 'omit'
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+
+        if ((!internalEvents || internalEvents.length === 0)) {
+          const engine = (data?.classification?.primary_engine || 'smart_router').toLowerCase();
+          const evt: ProgressEvent = {
+            event_type: 'research_started',
+            session_id: sessionId,
+            timestamp: new Date().toISOString(),
+            data: {
+              engine,
+              phase: 'initialization',
+              metadata: { title: 'Session started', node_type: 'engine' }
+            },
+            source: engine,
+            progress_percentage: 0,
+            message: data?.classification?.user_request || 'Session initialized'
+          };
+          setInternalEvents([evt]);
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    // Give the WS a moment; then attempt fallback seed
+    timer = window.setTimeout(seedFromRest, 1200);
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [sessionId, propEvents, internalEvents]);
+
   const flowData = useMemo(() => {
+    console.debug('ResearchTree events count', events?.length ?? 0);
     if (!events || events.length === 0) return { nodes: [], edges: [] };
 
     try {
       const researchNodes = convertToResearchNodes(events);
+      console.debug('ResearchTree converted nodes', researchNodes.length);
       const flowNodes = convertToFlowNodes(researchNodes).map(flowNode => ({
         ...flowNode,
         data: {
