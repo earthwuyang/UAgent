@@ -21,6 +21,7 @@ from ...integrations.openhands_bridge import (
     GoalPlan,
     GoalPlanStep,
 )
+from ...utils.json_utils import JsonParseError, safe_json_loads
 
 
 class ExperimentStatus(Enum):
@@ -183,6 +184,7 @@ class HypothesisGenerator:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
+        self.max_json_retries = 3
 
     async def generate_hypotheses(
         self,
@@ -213,23 +215,47 @@ class HypothesisGenerator:
         Respond with JSON array of hypothesis objects.
         """
 
-        try:
+        prompt = hypothesis_prompt.rstrip() + "\n\nRespond with a valid JSON array only. Do not include code fences or prose."
+
+        for attempt in range(1, self.max_json_retries + 1):
             response = await self.llm_client.generate(
-                hypothesis_prompt,
+                prompt,
                 max_tokens=900,
-                temperature=0.4,
+                temperature=0.3 if attempt > 1 else 0.4,
             )
-            self.logger.debug("Hypothesis prompt response: %r", response)
+            self.logger.debug(
+                "Hypothesis prompt response (attempt %s): %r",
+                attempt,
+                response,
+            )
 
-            import json
-            hypotheses_data = json.loads(response)
+            try:
+                hypotheses_data = safe_json_loads(response)
+                break
+            except JsonParseError as exc:
+                self.logger.warning(
+                    "Failed to parse hypothesis JSON on attempt %s: %s",
+                    attempt,
+                    exc,
+                    extra={"raw_response": response},
+                )
+                if attempt == self.max_json_retries:
+                    raise RuntimeError(
+                        f"Hypothesis generation returned invalid JSON after {self.max_json_retries} attempts: {exc}"
+                    ) from exc
 
-        except Exception as exc:
-            self.logger.warning("Error generating hypotheses, falling back: %s", exc)
-            hypotheses_data = self._fallback_hypotheses(research_question)
+                prompt = (
+                    hypothesis_prompt
+                    + "\n\nIMPORTANT: Your previous answer was not valid JSON and raised the following parsing error\n"
+                    f"{exc}.\n"
+                    "Return ONLY a valid JSON array (no backticks, no extra commentary) following the schema above."
+                )
 
         if not isinstance(hypotheses_data, list):
-            hypotheses_data = self._fallback_hypotheses(research_question)
+            raise RuntimeError(
+                "Hypothesis generation did not return a list; received type "
+                f"{type(hypotheses_data).__name__}"
+            )
 
         hypotheses = []
         for i, hyp_data in enumerate(hypotheses_data):
@@ -246,16 +272,10 @@ class HypothesisGenerator:
             except Exception as item_exc:
                 self.logger.debug("Failed to parse hypothesis item %s: %s", hyp_data, item_exc)
 
-        return hypotheses or [
-            ResearchHypothesis(
-                id=f"hyp_{uuid.uuid4().hex[:8]}",
-                statement=f"Primary hypothesis for: {research_question}",
-                reasoning="Generated from fallback template",
-                testable_predictions=["Outcome improves over baseline", "Variance stays within limits"],
-                success_criteria={"confidence_threshold": 0.8, "effect_size": 0.5},
-                variables={"independent": ["intervention"], "dependent": ["primary_metric"]},
-            )
-        ]
+        if not hypotheses:
+            raise RuntimeError("Hypothesis generation produced zero valid hypotheses")
+
+        return hypotheses
 
     def _fallback_hypotheses(self, research_question: str) -> List[Dict[str, Any]]:
         """Fallback structure when the LLM response is invalid."""
@@ -431,6 +451,23 @@ class ExperimentExecutor:
         self.openhands_client = openhands_client  # For actual code execution
         self.logger = logging.getLogger(__name__)
         self.config = config or {}
+        self.allow_simulation = bool(self.config.get("allow_simulated_experiments", False))
+        self.forbidden_code_tokens: List[str] = [
+            token.lower()
+            for token in self.config.get(
+                "forbidden_code_tokens",
+                [
+                    "simulate",
+                    "simulation",
+                    "mock",
+                    "placeholder",
+                    "synthetic",
+                    "random.uniform",
+                    "random.gauss",
+                    "np.random",
+                ],
+            )
+        ]
 
     @staticmethod
     def _clean_code_block(raw_code: str) -> str:
@@ -441,6 +478,17 @@ class ExperimentExecutor:
         if fenced:
             cleaned = fenced[0].strip()
         return cleaned
+
+    def _validate_generated_code(self, code: str) -> None:
+        if not code:
+            raise RuntimeError("Generated experiment code is empty")
+        lower = code.lower()
+        flagged = [token for token in self.forbidden_code_tokens if token in lower]
+        if flagged and not self.allow_simulation:
+            raise RuntimeError(
+                "Generated experiment code contains disallowed simulation markers: "
+                + ", ".join(flagged)
+            )
 
     async def execute_experiment(
         self,
@@ -462,6 +510,11 @@ class ExperimentExecutor:
 
         prior_errors = list(prior_errors or [])
         try:
+            if not self.openhands_client and not self.allow_simulation:
+                raise RuntimeError(
+                    "OpenHands client not configured; enable 'allow_simulated_experiments' to run without it"
+                )
+
             self.logger.info(f"Starting experiment execution: {design.name}")
             if session_context:
                 self.logger.debug(
@@ -482,8 +535,11 @@ class ExperimentExecutor:
                 setup_result = await self._setup_experiment_environment(design, session_context)
                 execution.logs.append(f"Environment setup: {setup_result}")
             else:
-                # Simulate setup
-                execution.logs.append("Simulated environment setup completed")
+                if not self.allow_simulation:
+                    raise RuntimeError(
+                        "OpenHands session unavailable for experiment execution and simulated runs are disabled"
+                    )
+                execution.logs.append("Simulated environment setup completed (simulation mode enabled)")
 
             execution.progress = 0.3
 
@@ -502,10 +558,13 @@ class ExperimentExecutor:
             else:
                 if self.openhands_client and not session_context:
                     self.logger.debug(
-                        "No OpenHands session context available for %s; falling back to simulated data collection",
+                        "OpenHands client configured but no session context supplied for %s",
                         design.name,
                     )
-                # Simulate data collection
+                if not self.allow_simulation:
+                    raise RuntimeError(
+                        "Experiment execution requires OpenHands session; received none and simulations are disabled"
+                    )
                 data_result = await self._simulate_data_collection(design)
                 execution.output_data.update(data_result)
 
@@ -675,7 +734,7 @@ class ExperimentExecutor:
             )
 
         data_collection_prompt = f"""
-Generate pure Python (no markdown fences) that collects experimental data for the following study.
+Generate pure Python (no markdown fences) that collects **real** experimental data for the following study.
 
 Experiment: {design.name}
 Description: {design.description}
@@ -684,13 +743,16 @@ Variables: {design.variables}
 Controls: {design.controls}
 Data Collection Plan: {design.data_collection_plan}
 
-Constraints:
-- Use only python standard library, numpy, pandas.
-- Provide functions that return structured dicts containing collected measurements.
-- Avoid external network calls.
+Non-negotiable constraints:
+1. Interact with the actual workspace or databases (PostgreSQL, DuckDB, etc.); do not fabricate or simulate results.
+2. Do not use random generators, synthetic stubs, or placeholder measurements.
+3. Run real commands or database queries to gather metrics, logging each step.
+4. Save collected metrics under 'experiments/{design.id}/results'.
+5. Use only standard libraries or dependencies already available.
+6. Avoid external network calls.
 {error_context}
 
-The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics.
+The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics derived from actual execution.
 """
 
         # Prefer CodeAct toolchain if enabled and available
@@ -757,39 +819,13 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                 return ""
 
         cleaned_code = await _gen_code(data_collection_prompt)
-
-        fallback_code = (
-            "import random\n"
-            "measurements = [round(random.uniform(0.8, 1.2), 4) for _ in range(12)]\n"
-            "summary = {\n"
-            "    'min': min(measurements),\n"
-            "    'max': max(measurements),\n"
-            "    'mean': sum(measurements) / len(measurements),\n"
-            "}\n"
-            "results_payload = {\n"
-            "    'measurements': measurements,\n"
-            "    'summary': summary,\n"
-            "}\n"
-            "output_dir = Path('output')\n"
-            "output_dir.mkdir(parents=True, exist_ok=True)\n"
-            "with open(output_dir / 'result.json', 'w', encoding='utf-8') as fh:\n"
-            "    json.dump(results_payload, fh, indent=2)\n"
-            "with open(RESULTS_DIR / 'measurements.json', 'w', encoding='utf-8') as fh:\n"
-            "    json.dump(results_payload, fh, indent=2)\n"
-            "print('Generated placeholder measurements')\n"
-        )
-
         if not cleaned_code:
-            cleaned_code = fallback_code
-        else:
-            try:
-                compile(cleaned_code, "<generated_experiment>", "exec")
-            except SyntaxError as exc:
-                self.logger.debug(
-                    "Generated experiment code failed syntax check; using fallback: %s",
-                    exc,
-                )
-                cleaned_code = fallback_code
+            raise RuntimeError("Experiment code generation returned no code")
+        self._validate_generated_code(cleaned_code)
+        try:
+            compile(cleaned_code, "<generated_experiment>", "exec")
+        except SyntaxError as exc:
+            raise RuntimeError(f"Generated experiment code failed syntax check: {exc}") from exc
 
         indented_code = textwrap.indent(cleaned_code, "    ")
 
@@ -835,40 +871,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         # Validate that the composed script compiles; otherwise, fallback to safe stub
         try:
             compile(framework_code, '<framework_script>', 'exec')
-        except SyntaxError:
-            indented_code = textwrap.indent(fallback_code, "    ")
-            script_core = (
-                "import json\n"
-                "import numpy as np\n"
-                "import pandas as pd\n"
-                "from pathlib import Path\n"
-                "import time\n"
-                "from datetime import datetime\n\n"
-                f"EXPERIMENT_DIR = Path('experiments/{design.name}')\n"
-                "DATA_DIR = EXPERIMENT_DIR / 'data'\n"
-                "RESULTS_DIR = EXPERIMENT_DIR / 'results'\n\n"
-                "DATA_DIR.mkdir(parents=True, exist_ok=True)\n"
-                "RESULTS_DIR.mkdir(parents=True, exist_ok=True)\n\n"
-                "def collect_data():\n"
-                f"    print('Starting data collection for: {design.name}')\n"
-                "    start_time = time.time()\n\n"
-                "    # Generated experiment code (safe fallback)\n"
-                f"{indented_code}\n\n"
-                "    execution_log = {\n"
-                f"        'experiment_id': '{design.id}',\n"
-                f"        'execution_id': '{execution.id}',\n"
-                f"        'start_time': '{execution.start_time}',\n"
-                f"        'methodology': {methodology_json},\n"
-                f"        'variables': {variables_json},\n"
-                f"        'data_collection_plan': {data_plan_json},\n"
-                "        'execution_time_seconds': time.time() - start_time\n"
-                "    }\n\n"
-                "    with open(RESULTS_DIR / 'execution_log.json', 'w') as f:\n"
-                "        json.dump(execution_log, f, indent=2)\n\n"
-                "    return execution_log\n\n"
-            ).strip()
-            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
-            ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
+        except SyntaxError as exc:
+            raise RuntimeError(f"Generated experiment script invalid: {exc}") from exc
         # Minimal repair loop leveraging OpenHands execution feedback
         base_action_timeout = int(self.config.get("codeact_action_timeout", 1800))
         timeout_cap = int(self.config.get("codeact_timeout_cap", base_action_timeout * 4))
@@ -964,16 +968,14 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             error_snippet = (execution_result.stderr or stdout_text)[-2000:]
             prior_errors.append(error_snippet)
             fix_prompt = data_collection_prompt + "\n\nObserved error to fix:\n" + error_snippet + "\n\nRegenerate a corrected version."
-            cleaned_code = await _gen_code(fix_prompt) or fallback_code
-            if cleaned_code != fallback_code:
-                try:
-                    compile(cleaned_code, "<generated_experiment_retry>", "exec")
-                except SyntaxError as exc:
-                    self.logger.debug(
-                        "Regenerated experiment code still invalid; reverting to fallback: %s",
-                        exc,
-                    )
-                    cleaned_code = fallback_code
+            cleaned_code = await _gen_code(fix_prompt)
+            if not cleaned_code:
+                raise RuntimeError("Experiment code regeneration returned no code")
+            self._validate_generated_code(cleaned_code)
+            try:
+                compile(cleaned_code, "<generated_experiment_retry>", "exec")
+            except SyntaxError as exc:
+                raise RuntimeError(f"Regenerated experiment code invalid: {exc}") from exc
             indented_code = textwrap.indent(cleaned_code, "    ")
             script_core = (
                 "import json\n"
@@ -1011,40 +1013,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             # Validate compilation for the retried script; fallback to safe stub if needed
             try:
                 compile(framework_code, '<framework_script_retry>', 'exec')
-            except SyntaxError:
-                indented_code = textwrap.indent(fallback_code, "    ")
-                script_core = (
-                    "import json\n"
-                    "import numpy as np\n"
-                    "import pandas as pd\n"
-                    "from pathlib import Path\n"
-                    "import time\n"
-                    "from datetime import datetime\n\n"
-                    f"EXPERIMENT_DIR = Path('experiments/{design.name}')\n"
-                    "DATA_DIR = EXPERIMENT_DIR / 'data'\n"
-                    "RESULTS_DIR = EXPERIMENT_DIR / 'results'\n\n"
-                    "DATA_DIR.mkdir(parents=True, exist_ok=True)\n"
-                    "RESULTS_DIR.mkdir(parents=True, exist_ok=True)\n\n"
-                    "def collect_data():\n"
-                    f"    print('Starting data collection for: {design.name}')\n"
-                    "    start_time = time.time()\n\n"
-                    "    # Generated experiment code (safe fallback)\n"
-                    f"{indented_code}\n\n"
-                    "    execution_log = {\n"
-                    f"        'experiment_id': '{design.id}',\n"
-                    f"        'execution_id': '{execution.id}',\n"
-                    f"        'start_time': '{execution.start_time}',\n"
-                    f"        'methodology': {methodology_json},\n"
-                    f"        'variables': {variables_json},\n"
-                    f"        'data_collection_plan': {data_plan_json},\n"
-                    "        'execution_time_seconds': time.time() - start_time\n"
-                    "    }\n\n"
-                    "    with open(RESULTS_DIR / 'execution_log.json', 'w') as f:\n"
-                    "        json.dump(execution_log, f, indent=2)\n\n"
-                    "    return execution_log\n\n"
-                ).strip()
-            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
-            ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
+            except SyntaxError as exc:
+                raise RuntimeError(f"Experiment script retry invalid: {exc}") from exc
 
             # Exponential increase of allowed attempts (up to cap) on repeated failures
             attempt += 1
@@ -1068,6 +1038,21 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         payload["execution_command"] = execution.output_data.get("execution_command", "")
         payload["files_created_total"] = execution.output_data.get("all_files_created", [])
         payload["files_modified_total"] = execution.output_data.get("all_files_modified", [])
+
+        command_success = (
+            execution_result is not None
+            and execution_result.success
+            and bool(execution_result.command)
+            and execution_result.exit_code == 0
+        )
+        artifact_success = bool(payload["files_created_total"])
+        result_artifacts = bool(payload.get("measurements")) or bool(payload.get("summary"))
+        if not (command_success and (artifact_success or result_artifacts)):
+            payload["success"] = False
+            payload.setdefault(
+                "error",
+                "Experiment did not produce verifiable command execution and artifacts",
+            )
 
         if execution_result and execution_result.success:
             try:
@@ -1097,10 +1082,13 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         return payload
 
     async def _simulate_data_collection(self, design: ExperimentDesign) -> Dict[str, Any]:
-        """Simulate data collection for testing"""
+        """Simulate data collection for testing when explicitly enabled."""
+
+        if not self.allow_simulation:
+            raise RuntimeError("Simulated experiments are disabled")
+
         import random
 
-        # Simulate realistic experimental data
         data_points = design.data_collection_plan.get("samples", 100)
         measurements = [random.gauss(50, 10) for _ in range(data_points)]
 
@@ -1111,8 +1099,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             "metadata": {
                 "collection_method": "simulated",
                 "timestamp": datetime.now().isoformat(),
-                "variables": design.variables
-            }
+                "variables": design.variables,
+            },
         }
 
     async def _analyze_experimental_data(self, design: ExperimentDesign, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2317,7 +2305,9 @@ Return JSON only.
             result.recommendations = await self._generate_research_recommendations(result)
 
             successful_results = [
-                res for res in result.results if res.status == ExperimentStatus.COMPLETED
+                res
+                for res in result.results
+                if res.status == ExperimentStatus.COMPLETED and res.data.get("success")
             ]
 
             if successful_results:
@@ -2337,41 +2327,46 @@ Return JSON only.
                             parent_phase="synthesis",
                             node_type="result",
                         )
+            else:
+                result.final_conclusions = []
 
-                self.logger.info("Scientific research completed: %s", research_id)
+            if not successful_results:
+                result.confidence_score = min(result.confidence_score, 0.2)
 
-                await self._log_progress(
-                    session_id,
-                    phase="synthesis",
-                    progress=96.0,
-                    message="Final analysis prepared",
+            self.logger.info("Scientific research completed: %s", research_id)
+
+            await self._log_progress(
+                session_id,
+                phase="synthesis",
+                progress=96.0,
+                message="Final analysis prepared",
+                metadata={
+                    "conclusions": len(result.final_conclusions),
+                    "recommendations": len(result.recommendations),
+                    "selected_idea": result.selected_idea_id,
+                },
+                parent_phase="ideation",
+            )
+
+            if session_id:
+                summary_text = result.synthesis.get("overall_findings") if result.synthesis else "Scientific research completed"
+                await progress_tracker.log_research_completed(
+                    session_id=session_id,
+                    engine="scientific_research",
+                    result_summary=summary_text or "Scientific research completed",
                     metadata={
-                        "conclusions": len(result.final_conclusions),
-                        "recommendations": len(result.recommendations),
                         "selected_idea": result.selected_idea_id,
+                        "idea_rankings": [
+                            {
+                                "idea_id": idea.id,
+                                "title": idea.title,
+                                "overall_score": idea.evaluation.overall_score if idea.evaluation else None,
+                                "confidence": idea.confidence_score,
+                            }
+                            for idea in ranking
+                        ],
                     },
-                    parent_phase="ideation",
                 )
-
-                if session_id:
-                    summary_text = result.synthesis.get("overall_findings") if result.synthesis else "Scientific research completed"
-                    await progress_tracker.log_research_completed(
-                        session_id=session_id,
-                        engine="scientific_research",
-                        result_summary=summary_text or "Scientific research completed",
-                        metadata={
-                            "selected_idea": result.selected_idea_id,
-                            "idea_rankings": [
-                                {
-                                    "idea_id": idea.id,
-                                    "title": idea.title,
-                                    "overall_score": idea.evaluation.overall_score if idea.evaluation else None,
-                                    "confidence": idea.confidence_score,
-                                }
-                                for idea in ranking
-                            ],
-                        },
-                    )
             else:
                 failure_message = "All experimental attempts failed; research remains incomplete."
                 result.final_conclusions = [failure_message]
@@ -2531,6 +2526,43 @@ Return JSON only.
     async def _synthesize_research_results(self, result: ScientificResearchResult) -> Dict[str, Any]:
         """Synthesize all research results into comprehensive analysis"""
 
+        successful_executions = [
+            exec_record
+            for exec_record in result.executions
+            if exec_record.status == ExperimentStatus.COMPLETED
+            and bool(exec_record.output_data.get("success"))
+        ]
+        successful_results = [
+            res
+            for res in result.results
+            if res.status == ExperimentStatus.COMPLETED
+            and res.data.get("success")
+        ]
+
+        if not successful_executions and not successful_results:
+            self.logger.info(
+                "No successful experiments with verifiable artifacts for research %s",
+                result.research_id,
+            )
+            return {
+                "overall_findings": "No experiments produced verifiable artifacts or successful command executions. The research question remains unanswered.",
+                "evidence_strength": "None",
+                "conclusions": [
+                    "Insufficient evidence gathered; rerun experiments with proper instrumentation and artifact collection."
+                ],
+                "implications": [
+                    "Collect and verify build/run artifacts before attempting synthesis.",
+                    "Ensure computational steps execute successfully (rc=0) and persist outputs under the workspace.",
+                ],
+                "limitations": [
+                    "All attempts failed or produced no artifacts",
+                ],
+                "future_research": [
+                    "Review execution logs, fix errors, and rerun with stricter assertions.",
+                ],
+                "confidence_assessment": "Very low",
+            }
+
         idea_lines = []
         for idea in result.ideas:
             evaluation = result.idea_evaluations.get(idea.id)
@@ -2635,7 +2667,11 @@ Return JSON only.
                 for exec_record in result.executions
                 if exec_record.status == ExperimentStatus.COMPLETED
             ]
-            successful_results = [res for res in result.results if res.status == ExperimentStatus.COMPLETED]
+            successful_results = [
+                res
+                for res in result.results
+                if res.status == ExperimentStatus.COMPLETED and res.data.get("success")
+            ]
 
             fallback_overview = (
                 "Automated synthesis unavailable; summarising recorded execution results."
