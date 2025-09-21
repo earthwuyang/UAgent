@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, AsyncGenerator
 import logging
@@ -25,6 +25,9 @@ class ExecutionResult:
     execution_time: float
     files_created: List[str]
     files_modified: List[str]
+    command: str = ""
+    working_directory: str = "."
+    env: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -49,17 +52,27 @@ class CodeExecutor:
         """
         self.workspace_manager = workspace_manager
         self.allowed_commands = {
-            "python", "python3", "pip", "pip3",
-            "ls", "cat", "head", "tail", "grep", "find",
-            "mkdir", "touch", "cp", "mv", "rm",
+            # Python and package managers
+            "python", "python3", "pip", "pip3", "ipython", "jupyter",
+            # Shell and file ops
+            "bash", "sh", "ls", "cat", "head", "tail", "grep", "find", "sed", "awk",
+            "mkdir", "touch", "cp", "mv", "rm", "tar", "unzip",
+            # VCS and network fetch
             "git", "wget", "curl",
-            "jupyter", "ipython",
-            "npm", "node", "yarn"
+            # Build tools
+            "make", "cmake", "ninja", "gcc", "g++", "clang",
+            # Node ecosystem (if needed)
+            "npm", "node", "yarn",
         }
         self.forbidden_patterns = [
-            "rm -rf /", "sudo", "su", "chmod +x",
-            "wget", "curl", "nc", "netcat", "/etc/",
-            "../../", "../etc", "format", "fdisk"
+            # keep destructive or privilege-escalation patterns blocked
+            "rm -rf /", "sudo", "su",
+            # absolute sensitive paths
+            "/etc/",
+            # path traversal
+            "../../", "../etc",
+            # disk formatting
+            "format", "fdisk", "chmod +x",
         ]
 
     def _is_command_safe(self, command: str) -> bool:
@@ -121,7 +134,10 @@ class CodeExecutor:
                 stderr="Failed to write code file",
                 execution_time=0.0,
                 files_created=[],
-                files_modified=[]
+                files_modified=[],
+                command=f"write:{code_path}",
+                working_directory=".",
+                env={}
             )
 
         # Execute the code
@@ -156,7 +172,10 @@ class CodeExecutor:
                 stderr=f"Command not allowed: {command}",
                 execution_time=0.0,
                 files_created=[],
-                files_modified=[]
+                files_modified=[],
+                command=command,
+                working_directory=".",
+                env={}
             )
 
         exec_command = ExecutionCommand(
@@ -189,7 +208,10 @@ class CodeExecutor:
                 stderr=f"Workspace {workspace_id} not found",
                 execution_time=0.0,
                 files_created=[],
-                files_modified=[]
+                files_modified=[],
+                command=command.command,
+                working_directory=command.working_directory,
+                env=command.env_vars or {}
             )
 
         # Get file states before execution
@@ -280,6 +302,11 @@ class CodeExecutor:
         logger.info(f"Executed command in {workspace_id}: {command.command} "
                    f"(exit_code={exit_code}, time={execution_time:.2f}s)")
 
+        try:
+            rel_work_dir = str(work_dir.relative_to(workspace_path)) if work_dir != workspace_path else "."
+        except Exception:
+            rel_work_dir = command.working_directory
+
         return ExecutionResult(
             success=success,
             exit_code=exit_code,
@@ -287,7 +314,10 @@ class CodeExecutor:
             stderr=stderr_data,
             execution_time=execution_time,
             files_created=files_created,
-            files_modified=files_modified
+            files_modified=files_modified,
+            command=command.command,
+            working_directory=rel_work_dir,
+            env=command.env_vars or {},
         )
 
     async def execute_jupyter_notebook(
@@ -316,7 +346,10 @@ class CodeExecutor:
                 stderr=f"Invalid notebook JSON: {e}",
                 execution_time=0.0,
                 files_created=[],
-                files_modified=[]
+                files_modified=[],
+                command="notebook:load",
+                working_directory=".",
+                env={}
             )]
 
         results = []

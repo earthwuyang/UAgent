@@ -565,6 +565,14 @@ class ExperimentExecutor:
         try:
             workspace_id = session_context.workspace_id
             workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
+            if not workspace_path:
+                # Attempt to recreate the workspace via ensure_session
+                await self.openhands_client.ensure_session(
+                    research_type="scientific_research",
+                    session_id=session_context.session_id,
+                    config=session_context.resource_requirements,
+                )
+                workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
 
             if not workspace_path:
                 raise RuntimeError(f"Workspace not found for OpenHands session {session_context.session_id}")
@@ -618,13 +626,24 @@ class ExperimentExecutor:
                 setup_code[:4000],
             )
 
-            # Execute setup code
-            setup_result = await self.openhands_client.code_executor.execute_python_code(
-                workspace_id=workspace_id,
-                code=setup_code,
-                file_name="setup_environment.py",
-                timeout=120
-            )
+            # Prefer OpenHands action runtime for setup
+            workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
+            if workspace_path and self.openhands_client.action_runner.is_available:
+                session = await self.openhands_client.action_runner.open_session(workspace_path)
+                try:
+                    from openhands.events.action.commands import IPythonRunCellAction  # type: ignore
+                    action = IPythonRunCellAction(code=setup_code)
+                    action_result = await session.send_action(action, timeout=180)
+                    setup_result = action_result.execution_result
+                finally:
+                    await session.close()
+            else:
+                setup_result = await self.openhands_client.code_executor.execute_python_code(
+                    workspace_id=workspace_id,
+                    code=setup_code,
+                    file_name="setup_environment.py",
+                    timeout=120
+                )
 
             if setup_result.success:
                 return f"Environment configured for {design.name}: {setup_result.stdout}"
@@ -707,10 +726,10 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                     )
                     execution.intermediate_results["codeact"] = result
                     obs_text = "\n".join([step.get("observation", "") for step in result.get("steps", [])]) if isinstance(result, dict) else ""
-                    if "Final result:" in obs_text:
+                    if ("Final result:" in obs_text) or ("Result:" in obs_text):
                         try:
-                            line = next(l for l in obs_text.splitlines() if "Final result:" in l)
-                            json_str = line.split("Final result:", 1)[1].strip()
+                            line = next((l for l in obs_text.splitlines() if "Final result:" in l), None) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
+                            json_str = line.split(":", 1)[1].strip()
                             payload = {"success": True}
                             payload.update(json.loads(json_str))
                             return payload
@@ -751,6 +770,10 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             "    'measurements': measurements,\n"
             "    'summary': summary,\n"
             "}\n"
+            "output_dir = Path('output')\n"
+            "output_dir.mkdir(parents=True, exist_ok=True)\n"
+            "with open(output_dir / 'result.json', 'w', encoding='utf-8') as fh:\n"
+            "    json.dump(results_payload, fh, indent=2)\n"
             "with open(RESULTS_DIR / 'measurements.json', 'w', encoding='utf-8') as fh:\n"
             "    json.dump(results_payload, fh, indent=2)\n"
             "print('Generated placeholder measurements')\n"
@@ -758,6 +781,15 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
 
         if not cleaned_code:
             cleaned_code = fallback_code
+        else:
+            try:
+                compile(cleaned_code, "<generated_experiment>", "exec")
+            except SyntaxError as exc:
+                self.logger.debug(
+                    "Generated experiment code failed syntax check; using fallback: %s",
+                    exc,
+                )
+                cleaned_code = fallback_code
 
         indented_code = textwrap.indent(cleaned_code, "    ")
 
@@ -797,8 +829,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         ).strip()
 
         # Two variants: a script (with main guard) and an IPython cell (explicit call)
-        framework_code = script_core + "\n\nif __name__ == '__main__':\n    print(f'Final result: {collect_data()}')\n"
-        ipython_cell = script_core + "\n\nprint(f'Final result: {collect_data()}')\n"
+        framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
+        ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
 
         # Validate that the composed script compiles; otherwise, fallback to safe stub
         try:
@@ -835,17 +867,25 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                 "        json.dump(execution_log, f, indent=2)\n\n"
                 "    return execution_log\n\n"
             ).strip()
-            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print(f'Final result: {collect_data()}')\n"
-            ipython_cell = script_core + "\n\nprint(f'Final result: {collect_data()}')\n"
+            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
+            ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
         # Minimal repair loop leveraging OpenHands execution feedback
-        attempts = max(1, int(self.config.get("experiment_repair_attempts", 3)))
+        base_action_timeout = int(self.config.get("codeact_action_timeout", 1800))
+        timeout_cap = int(self.config.get("codeact_timeout_cap", base_action_timeout * 4))
+        base_attempts = max(1, int(self.config.get("experiment_repair_attempts", 3)))
+        max_attempts_cap = max(base_attempts, int(self.config.get("experiment_repair_attempts_max", 8)))
+
         last_result = None
-        for attempt in range(1, attempts + 1):
+        attempt = 1
+        allowed_attempts = base_attempts
+        execution.output_data.setdefault("attempts", [])
+        while attempt <= allowed_attempts:
             try:
                 workspace_path = self.openhands_client.workspace_manager.get_workspace_path(
                     session_context.workspace_id
                 )
                 execution_result = None
+                attempt_source = "code_executor"
                 if (
                     workspace_path
                     and getattr(self.openhands_client.action_runner, "is_available", False)
@@ -854,9 +894,10 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         action_result = await self.openhands_client.action_runner.execute_ipython_code(
                             workspace_path=workspace_path,
                             code=ipython_cell,
-                            timeout=300,
+                            timeout=min(base_action_timeout * (2 ** (attempt - 1)), timeout_cap),
                         )
                         execution_result = action_result.execution_result
+                        attempt_source = "openhands_action_runner"
                     except Exception as exc:
                         self.logger.warning(
                             "OpenHands IPython execution failed, fallback to direct execution: %s",
@@ -868,7 +909,7 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         workspace_id=session_context.workspace_id,
                         code=framework_code,
                         file_name=f"collect_data_{execution.id}.py",
-                        timeout=300,
+                        timeout=min(300 * (2 ** (attempt - 1)), 3600),
                     )
             except Exception as exc:
                 self.logger.error("OpenHands execution failure: %s", exc)
@@ -884,6 +925,36 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             if execution_result.stderr:
                 execution.errors.append(execution_result.stderr)
 
+            execution.output_data.setdefault("last_stdout", execution_result.stdout if execution_result else "")
+            execution.output_data.setdefault("last_stderr", execution_result.stderr if execution_result else "")
+            execution.output_data["last_stdout"] = execution_result.stdout if execution_result else ""
+            execution.output_data["last_stderr"] = execution_result.stderr if execution_result else ""
+            execution.output_data.setdefault("execution_command", execution_result.command if execution_result else "")
+            execution.output_data["execution_command"] = execution_result.command if execution_result else ""
+            if execution_result:
+                created_agg = execution.output_data.setdefault("all_files_created", [])
+                for path in execution_result.files_created:
+                    if path not in created_agg:
+                        created_agg.append(path)
+                modified_agg = execution.output_data.setdefault("all_files_modified", [])
+                for path in execution_result.files_modified:
+                    if path not in modified_agg:
+                        modified_agg.append(path)
+
+            execution.output_data.setdefault("attempts", []).append(
+                {
+                    "attempt": attempt,
+                    "source": attempt_source,
+                    "command": execution_result.command if execution_result else "",
+                    "working_directory": execution_result.working_directory if execution_result else "",
+                    "exit_code": execution_result.exit_code if execution_result else None,
+                    "stdout_tail": (execution_result.stdout or "")[-2000:] if execution_result else "",
+                    "stderr_tail": (execution_result.stderr or "")[-2000:] if execution_result else "",
+                    "files_created": execution_result.files_created if execution_result else [],
+                    "files_modified": execution_result.files_modified if execution_result else [],
+                }
+            )
+
             stdout_text = execution_result.stdout or ""
             failure_signal = (not execution_result.success) or ("Traceback" in stdout_text) or ("SyntaxError" in stdout_text)
             if not failure_signal:
@@ -894,6 +965,15 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             prior_errors.append(error_snippet)
             fix_prompt = data_collection_prompt + "\n\nObserved error to fix:\n" + error_snippet + "\n\nRegenerate a corrected version."
             cleaned_code = await _gen_code(fix_prompt) or fallback_code
+            if cleaned_code != fallback_code:
+                try:
+                    compile(cleaned_code, "<generated_experiment_retry>", "exec")
+                except SyntaxError as exc:
+                    self.logger.debug(
+                        "Regenerated experiment code still invalid; reverting to fallback: %s",
+                        exc,
+                    )
+                    cleaned_code = fallback_code
             indented_code = textwrap.indent(cleaned_code, "    ")
             script_core = (
                 "import json\n"
@@ -925,8 +1005,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                 "        json.dump(execution_log, f, indent=2)\n\n"
                 "    return execution_log\n\n"
             ).strip()
-            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print(f'Final result: {collect_data()}')\n"
-            ipython_cell = script_core + "\n\nprint(f'Final result: {collect_data()}')\n"
+            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
+            ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
 
             # Validate compilation for the retried script; fallback to safe stub if needed
             try:
@@ -963,8 +1043,13 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                     "        json.dump(execution_log, f, indent=2)\n\n"
                     "    return execution_log\n\n"
                 ).strip()
-                framework_code = script_core + "\n\nif __name__ == '__main__':\n    print(f'Final result: {collect_data()}')\n"
-                ipython_cell = script_core + "\n\nprint(f'Final result: {collect_data()}')\n"
+            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
+            ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
+
+            # Exponential increase of allowed attempts (up to cap) on repeated failures
+            attempt += 1
+            if attempt > allowed_attempts and allowed_attempts < max_attempts_cap:
+                allowed_attempts = min(max_attempts_cap, allowed_attempts * 2)
 
         execution_result = last_result or execution_result  # type: ignore[name-defined]
         payload: Dict[str, Any] = {
@@ -977,14 +1062,32 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             "session_id": session_id,
             "generated_code": cleaned_code,
         }
+        payload["attempts"] = execution.output_data.get("attempts", [])
+        payload["last_stdout"] = execution.output_data.get("last_stdout", "")
+        payload["last_stderr"] = execution.output_data.get("last_stderr", "")
+        payload["execution_command"] = execution.output_data.get("execution_command", "")
+        payload["files_created_total"] = execution.output_data.get("all_files_created", [])
+        payload["files_modified_total"] = execution.output_data.get("all_files_modified", [])
 
         if execution_result and execution_result.success:
             try:
                 if execution_result.stdout:
                     for line in execution_result.stdout.splitlines():
-                        if "Final result:" in line:
-                            json_str = line.split("Final result:", 1)[1].strip()
+                        if ("Final result:" in line) or ("Result:" in line):
+                            json_str = line.split(":", 1)[1].strip()
                             payload.update(json.loads(json_str))
+                # Prefer reading structured artifact if available
+                if session_context and session_context.workspace_id and self.openhands_client:
+                    artifact_text = await self.openhands_client.workspace_manager.read_file(
+                        session_context.workspace_id,
+                        "output/result.json",
+                    )
+                    if artifact_text:
+                        try:
+                            payload.update(json.loads(artifact_text))
+                            payload["artifact"] = "output/result.json"
+                        except Exception:
+                            pass
             except Exception as parse_exc:
                 self.logger.debug("Failed to parse experiment output JSON: %s", parse_exc)
             return payload
@@ -1036,35 +1139,59 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         try:
             response = await self.llm_client.generate(analysis_prompt)
 
-            import json
-            analysis = json.loads(response)
+            import json, re, statistics
+            analysis = None
+            try:
+                analysis = json.loads(response)
+            except Exception:
+                m = re.search(r"\{[\s\S]*\}\s*$", str(response))
+                if m:
+                    try:
+                        analysis = json.loads(m.group(0))
+                    except Exception:
+                        analysis = None
+            if analysis is None:
+                analysis = {}
 
             # Add computed statistics if we have actual data
-            if "measurements" in data:
-                measurements = data["measurements"]
-                if measurements:
-                    import statistics
-                    analysis["computed_stats"] = {
-                        "mean": statistics.mean(measurements),
-                        "median": statistics.median(measurements),
-                        "stdev": statistics.stdev(measurements) if len(measurements) > 1 else 0,
-                        "min": min(measurements),
-                        "max": max(measurements),
-                        "count": len(measurements)
-                    }
+            measurements = data.get("measurements") if isinstance(data, dict) else None
+            if isinstance(measurements, list) and measurements:
+                analysis.setdefault("descriptive_stats", {})
+                analysis["descriptive_stats"].update({
+                    "count": len(measurements),
+                    "min": min(measurements),
+                    "max": max(measurements),
+                    "mean": statistics.fmean(measurements),
+                })
 
             return analysis
 
         except Exception as e:
             self.logger.error(f"Error in data analysis: {e}")
-            # Fallback analysis
+            # Fallback analysis computed from data if possible
+            import statistics
+            measurements = data.get("measurements") if isinstance(data, dict) else None
+            if isinstance(measurements, list) and measurements:
+                return {
+                    "descriptive_stats": {
+                        "count": len(measurements),
+                        "min": min(measurements),
+                        "max": max(measurements),
+                        "mean": statistics.fmean(measurements),
+                    },
+                    "statistical_tests": {},
+                    "effect_size": None,
+                    "confidence_interval": None,
+                    "p_value": None,
+                    "interpretation": "LLM analysis failed; returning descriptive stats only.",
+                }
             return {
-                "descriptive_stats": {"mean": 50.0, "std": 10.0},
-                "statistical_tests": {"t_test": {"statistic": 2.5, "p_value": 0.013}},
-                "effect_size": 0.4,
-                "confidence_interval": [45.2, 54.8],
-                "p_value": 0.013,
-                "interpretation": "Statistically significant result observed"
+                "descriptive_stats": {},
+                "statistical_tests": {},
+                "effect_size": None,
+                "confidence_interval": None,
+                "p_value": None,
+                "interpretation": "LLM analysis failed and no measurements available.",
             }
 
 
@@ -2484,28 +2611,77 @@ Return JSON only.
         try:
             response = await self.llm_client.generate(synthesis_prompt)
 
-            import json
-            synthesis = json.loads(response)
+            import json, re
+            parsed = None
+            try:
+                parsed = json.loads(response)
+            except Exception:
+                match = re.search(r"\{[\s\S]*\}\s*$", str(response))
+                if match:
+                    try:
+                        parsed = json.loads(match.group(0))
+                    except Exception:
+                        parsed = None
+            if parsed is not None:
+                return parsed
 
-            return synthesis
+            raise ValueError("LLM synthesis response was not valid JSON")
 
         except Exception as e:
             self.logger.error(f"Error in synthesis: {e}")
+
+            completed_executions = [
+                exec_record
+                for exec_record in result.executions
+                if exec_record.status == ExperimentStatus.COMPLETED
+            ]
+            successful_results = [res for res in result.results if res.status == ExperimentStatus.COMPLETED]
+
+            fallback_overview = (
+                "Automated synthesis unavailable; summarising recorded execution results."
+                if successful_results or completed_executions
+                else "Automated synthesis unavailable; experiments did not yield parseable results."
+            )
+
+            conclusions: List[str] = []
+            for res in successful_results:
+                if res.conclusions:
+                    conclusions.extend(res.conclusions[:1])
+            if not conclusions:
+                if completed_executions:
+                    conclusions.append(
+                        "Experiments executed successfully, but narrative synthesis failed; review execution summary for details."
+                    )
+                else:
+                    conclusions.append(
+                        "Research question remains unanswered because experiments failed to complete."
+                    )
+
+            implications = [
+                "Execution summary:\n" + execution_summary,
+                "Experiment result summary:\n" + result_summary,
+            ]
+
+            limitations = failure_notes or ["Synthesis LLM failed to produce JSON output"]
+
+            future_research = [
+                "Address synthesis pipeline failure so structured results can be generated automatically",
+            ]
+            if not successful_results:
+                future_research.append("Collect additional experimental evidence before drawing conclusions")
+
+            confidence_label = (
+                "Moderate" if successful_results else "Low"
+            )
+
             return {
-                "overall_findings": "Automated synthesis unavailable; experiments did not yield parseable results.",
-                "evidence_strength": "Insufficient evidence collected",
-                "conclusions": [
-                    "Research question remains unanswered because experiments failed or produced no usable data"
-                ],
-                "implications": [
-                    "Resolve execution errors and rerun experiments before drawing conclusions"
-                ],
-                "limitations": failure_notes or ["No successful experiments"],
-                "future_research": [
-                    "Repair experiment pipeline and obtain empirical results",
-                    "Re-run data collection with logging to confirm modifications",
-                ],
-                "confidence_assessment": "Very low",
+                "overall_findings": fallback_overview,
+                "evidence_strength": "See execution summary",
+                "conclusions": conclusions,
+                "implications": implications,
+                "limitations": limitations,
+                "future_research": future_research,
+                "confidence_assessment": confidence_label,
             }
 
     async def _generate_reproducibility_report(self, result: ScientificResearchResult) -> Dict[str, Any]:

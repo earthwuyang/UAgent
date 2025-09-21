@@ -271,6 +271,9 @@ class OpenHandsActionServerRunner:
         metadata = observation.get("metadata", {}) or {}
         exit_code = metadata.get("exit_code", -1)
         output = observation.get("content", "")
+        command_text = metadata.get("command") or metadata.get("action", "")
+        working_dir = metadata.get("cwd", ".")
+        env_snapshot = metadata.get("env", {}) if isinstance(metadata.get("env"), dict) else {}
 
         return ExecutionResult(
             success=exit_code == 0,
@@ -280,6 +283,9 @@ class OpenHandsActionServerRunner:
             execution_time=0.0,
             files_created=[],
             files_modified=[],
+            command=command_text,
+            working_directory=working_dir,
+            env=env_snapshot,
         )
 
     async def execute_ipython_code(

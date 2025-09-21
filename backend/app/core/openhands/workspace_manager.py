@@ -261,7 +261,8 @@ Created: {asyncio.get_event_loop().time()}
             bool: Success status
         """
         if workspace_id not in self.workspaces:
-            logger.error(f"Workspace {workspace_id} not found")
+            # Workspace may have been cleaned up after session completion; treat as non-fatal
+            logger.warning(f"Workspace {workspace_id} not found (write_file)")
             return False
 
         config = self.workspaces[workspace_id]
@@ -308,7 +309,7 @@ Created: {asyncio.get_event_loop().time()}
             str: File content or None if not found
         """
         if workspace_id not in self.workspaces:
-            logger.error(f"Workspace {workspace_id} not found")
+            logger.warning(f"Workspace {workspace_id} not found (read_file)")
             return None
 
         config = self.workspaces[workspace_id]

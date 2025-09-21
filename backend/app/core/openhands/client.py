@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass, asdict
@@ -152,9 +153,20 @@ class OpenHandsClient:
         config: Optional[Dict[str, Any]] = None,
     ) -> SessionConfig:
         """Return existing session or create a new one if it does not exist."""
-
         existing = self.sessions.get(session_id)
         if existing:
+            ws_id = existing.workspace_config.get("workspace_id") if existing.workspace_config else None
+            # Recreate workspace if it was cleaned up or missing
+            if not ws_id or not self.workspace_manager.get_workspace_path(ws_id):
+                workspace_config = await self.workspace_manager.create_workspace(
+                    research_id=session_id,
+                    config=self.workspace_manager._sanitize_config(config or {}),
+                )
+                existing.workspace_config = {**existing.workspace_config, **asdict(workspace_config)} if existing.workspace_config else asdict(workspace_config)  # type: ignore[name-defined]
+                state = self.session_states.get(session_id)
+                if state:
+                    state.workspace_id = workspace_config.workspace_id
+                logger.info(f"Recreated missing workspace for session {session_id}")
             return existing
 
         return await self.create_session(
@@ -219,105 +231,79 @@ class OpenHandsClient:
         session_state.last_activity = asyncio.get_event_loop().time()
 
         try:
-            # Generate code using LLM
+            # Generate code using LLM (generic, engine-agnostic)
             code_generation_prompt = self._create_code_generation_prompt(request)
-
             if llm_client:
-                # Use LLM to generate code
-                generated_code = await self._generate_code_with_llm(
-                    llm_client,
-                    code_generation_prompt,
-                    request
-                )
+                generated_code = await self._generate_code_with_llm(llm_client, code_generation_prompt, request)
             else:
-                # Fallback: create template code
                 generated_code = self._create_template_code(request)
-
             generated_code = self._clean_generated_code(generated_code)
-            # Ensure we do not save obviously broken scripts; replace with a stub on syntax error
             try:
                 compile(generated_code, f"<generated_{request.session_id}>", "exec")
             except SyntaxError as exc:
                 logger.warning("Generated code failed to compile: %s; substituting stub", exc)
                 generated_code = self._create_template_code(request)
 
-            # Save generated code to workspace
             code_filename = f"generated_{request.session_id}_{session_state.current_step}.py"
-            await self.workspace_manager.write_file(
-                session_state.workspace_id,
-                f"code/{code_filename}",
-                generated_code
-            )
 
             execution_result: Optional[ExecutionResult] = None
-            if request.execute_immediately:
-                workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
-                if (
-                    workspace_path
-                    and self.action_runner.is_available
-                ):
-                    try:
-                        action_result = await self.action_runner.execute_python_file(
-                            workspace_path=workspace_path,
-                            script_relative_path=f"code/{code_filename}",
-                            timeout=request.timeout or 300,
-                        )
-                        execution_result = action_result.execution_result
-                        setattr(
-                            execution_result,
-                            "metadata",
-                            {
-                                "openhands_observation": action_result.raw_observation,
-                                "openhands_logs": action_result.server_logs,
-                            },
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "OpenHands runtime execution failed, falling back to built-in executor: %s",
-                            exc,
-                        )
-                        execution_result = await self.code_executor.execute_python_code(
-                            workspace_id=session_state.workspace_id,
-                            code=generated_code,
-                            file_name=code_filename,
-                            timeout=request.timeout,
-                        )
-                else:
-                    execution_result = await self.code_executor.execute_python_code(
-                        workspace_id=session_state.workspace_id,
-                        code=generated_code,
-                        file_name=code_filename,
-                        timeout=request.timeout,
-                    )
+            workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
+            if request.execute_immediately and workspace_path and self.action_runner.is_available:
+                # Hand over file write + execution to OpenHands action runtime
+                session = await self.action_runner.open_session(workspace_path)
+                try:
+                    from openhands.events.action.files import FileEditAction  # type: ignore
+                    from openhands.events.event import FileEditSource  # type: ignore
+                    from openhands.events.action.commands import CmdRunAction  # type: ignore
 
-            # Single repair attempt on obvious syntax errors
-            if execution_result and not execution_result.success:
-                stderr_text = getattr(execution_result, 'stderr', '') or ''
-                stdout_text = execution_result.stdout or ''
-                if ('SyntaxError' in stderr_text) or ('SyntaxError' in stdout_text):
-                    repair_prompt = self._create_code_generation_prompt(request) + "\n\nObserved error to fix (no markdown fences, no placeholders, valid Python only):\n" + (stderr_text or stdout_text)[-1200:]
-                    retry = await self._generate_code_with_llm(llm_client or self, repair_prompt, request)
-                    retry = self._clean_generated_code(retry)
-                    try:
-                        compile(retry, f"<generated_retry_{request.session_id}>", "exec")
-                    except SyntaxError:
-                        retry = self._create_template_code(request)
-                    await self.workspace_manager.write_file(session_state.workspace_id, f"code/{code_filename}", retry)
-                    if workspace_path and self.action_runner.is_available:
-                        try:
-                            action_result = await self.action_runner.execute_python_file(
-                                workspace_path=workspace_path,
-                                script_relative_path=f"code/{code_filename}",
-                                timeout=request.timeout or 300,
+                    write_action = FileEditAction(
+                        path=f"code/{code_filename}",
+                        command="write",
+                        content=generated_code,
+                        impl_source=FileEditSource.OH_ACI,
+                    )
+                    await session.send_action(write_action, timeout=request.timeout or 300)
+
+                    # Exponential backoff retries on failure
+                    base_timeout = int(request.timeout or 300)
+                    timeout_cap = int(os.getenv('CODEGEN_TIMEOUT_CAP', '1800'))
+                    max_retries = int(os.getenv('CODEGEN_MAX_RETRIES', '2'))
+
+                    for retry_idx in range(0, max_retries + 1):
+                        run_action = CmdRunAction(command=f"python3 code/{code_filename}")
+                        action_result = await session.send_action(run_action, timeout=min(base_timeout * (2 ** retry_idx), timeout_cap))
+                        execution_result = action_result.execution_result
+                        if execution_result.success:
+                            break
+
+                        # Generate corrected code on the next iteration
+                        if retry_idx < max_retries:
+                            stderr_text = getattr(execution_result, 'stderr', '') or ''
+                            stdout_text = execution_result.stdout or ''
+                            repair_prompt = self._create_code_generation_prompt(request) + "\n\nObserved error to fix (no markdown fences, no placeholders, valid code only):\n" + (stderr_text or stdout_text)[-1200:]
+                            retry_code = await self._generate_code_with_llm(llm_client or self, repair_prompt, request)
+                            retry_code = self._clean_generated_code(retry_code)
+                            try:
+                                compile(retry_code, f"<generated_retry_{request.session_id}>", "exec")
+                            except SyntaxError:
+                                retry_code = self._create_template_code(request)
+                            write_retry = FileEditAction(
+                                path=f"code/{code_filename}", command="write", content=retry_code, impl_source=FileEditSource.OH_ACI
                             )
-                            execution_result = action_result.execution_result
-                        except Exception:
-                            execution_result = await self.code_executor.execute_python_code(
-                                workspace_id=session_state.workspace_id,
-                                code=retry,
-                                file_name=code_filename,
-                                timeout=request.timeout,
-                            )
+                            await session.send_action(write_retry, timeout=min(base_timeout * (2 ** retry_idx), timeout_cap))
+                finally:
+                    await session.close()
+            else:
+                # Fallback to internal executor (kept as safety net)
+                await self.workspace_manager.write_file(
+                    session_state.workspace_id, f"code/{code_filename}", generated_code
+                )
+                execution_result = await self.code_executor.execute_python_code(
+                    workspace_id=session_state.workspace_id,
+                    code=generated_code,
+                    file_name=code_filename,
+                    timeout=request.timeout,
+                )
 
             # Analyze results
             analysis = self._analyze_execution_result(execution_result, generated_code)
@@ -423,8 +409,10 @@ class OpenHandsClient:
         try:
             session_state = self.session_states.get(session_id)
             if session_state:
-                # Cleanup workspace
-                await self.workspace_manager.cleanup_workspace(session_state.workspace_id)
+                # Optionally retain workspace for debugging/long-lived experiments
+                retain = os.getenv("UAGENT_RETAIN_WORKSPACES", "false").lower() == "true"
+                if not retain:
+                    await self.workspace_manager.cleanup_workspace(session_state.workspace_id)
 
             # Remove session
             del self.sessions[session_id]
@@ -459,14 +447,10 @@ Task: {request.task_description}
 
 Requirements (MANDATORY):
 1. Write clean, well-documented code with a clear entry point (main() and if __name__ == '__main__').
-2. Include robust error handling; avoid referencing variables before assignment. Initialize resources (e.g., conn = None) and close them in finally blocks.
-3. Never hard-code credentials or placeholders; for databases, read from environment variables only:
-   - PostgreSQL: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD. If any are missing, skip PostgreSQL gracefully and log a clear message.
-   - DuckDB: DUCKDB_PATH (path to .duckdb file). If missing, skip DuckDB gracefully.
-4. On errors, print a clear message but do not raise unhandled exceptions; return a structured result dict.
-5. Make the code executable and testable; produce valid {request.language} code only (no markdown fences).
-
-Output: Print one line with a JSON summary (e.g., print('Result: ' + json.dumps(obj))).
+2. Include robust error handling; avoid referencing variables before assignment. Initialize external resources to None and close them in finally blocks.
+3. Read all configuration from environment variables; if any required configuration is missing, skip that step gracefully and log a clear message. Never hard-code credentials or endpoints.
+4. Do not use placeholders or partial statements; emit valid, runnable code only. No markdown fences.
+5. At the end, print a single line containing a JSON summary (e.g., print('Result: ' + json.dumps(obj))).
 """
 
     async def _generate_code_with_llm(

@@ -53,8 +53,8 @@ async def lifespan(app: FastAPI):
     # Initialize cache
     cache = create_cache("memory")
 
-    # Initialize OpenHands client
-    workspace_dir = os.getenv("WORKSPACE_DIR", "/tmp/uagent_workspaces")
+    # Initialize OpenHands client with persistent workspace base
+    workspace_dir = os.getenv("UAGENT_WORKSPACE_DIR", "/home/wuy/AI/uagent-workspace")
     openhands_client = OpenHandsClient(base_workspace_dir=workspace_dir)
 
     # Initialize session manager
@@ -62,7 +62,16 @@ async def lifespan(app: FastAPI):
 
     # Initialize research engines
     deep_engine = DeepResearchEngine(llm_client)
-    code_engine = CodeResearchEngine(llm_client, openhands_client=openhands_client)
+    code_engine = CodeResearchEngine(
+        llm_client,
+        openhands_client=openhands_client,
+        config={
+            "use_codeact_in_code_engine": True,
+            "codeact_max_steps": int(os.getenv("CODEACT_MAX_STEPS", "20")),
+            "codeact_action_timeout": int(os.getenv("CODEACT_ACTION_TIMEOUT", "1800")),
+            "default_openhands_resources": {},
+        },
+    )
     scientific_engine = ScientificResearchEngine(
         llm_client=llm_client,
         deep_research_engine=deep_engine,
@@ -70,7 +79,12 @@ async def lifespan(app: FastAPI):
         openhands_client=openhands_client,
         config={
             "max_iterations": int(os.getenv("MAX_ITERATIONS", "3")),
-            "confidence_threshold": float(os.getenv("CONFIDENCE_THRESHOLD", "0.8"))
+            "confidence_threshold": float(os.getenv("CONFIDENCE_THRESHOLD", "0.8")),
+            "use_codeact": True,
+            "codeact_max_steps": int(os.getenv("CODEACT_MAX_STEPS", "20")),
+            "codeact_action_timeout": int(os.getenv("CODEACT_ACTION_TIMEOUT", "1800")),
+            "experiment_repair_attempts": int(os.getenv("EXPERIMENT_REPAIR_ATTEMPTS", "3")),
+            "default_openhands_resources": {},
         }
     )
 
