@@ -334,26 +334,13 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps.
                     )
 
             else:
-                request = CodeGenerationRequest(
-                    session_id=session_config.session_id,
-                    task_description=f"{step.description}\nExpected Output: {step.expected_output}",
-                    context={"plan_goal": plan.goal, **execution_context},
-                    execute_immediately=True,
-                    language="python",
-                    timeout=execution_context.get("timeout", 300),
-                )
-
-                result = await self._client.generate_and_execute_code(
-                    request,
-                    llm_client=self._llm_client,
-                )
-                step.code_result = result
-                step.notes.append(result.analysis or "")
-                step.status = "completed" if result.success else "failed"
-                step_success = result.success
-                if result.execution_result:
-                    step_stdout = result.execution_result.stdout or ""
-                    step_stderr = result.execution_result.stderr or ""
+                # Enforce CodeAct-only execution for goal steps. If the runtime or workspace
+                # is unavailable, mark the step as failed so the caller can provision it
+                # rather than silently generating placeholder code.
+                step.status = "failed"
+                step_success = False
+                step_stderr = "CodeAct runtime or workspace not available; refusing legacy LLM codegen"
+                step.notes.append(step_stderr)
 
             if progress_callback:
                 await progress_callback(

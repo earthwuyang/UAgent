@@ -155,9 +155,12 @@ class CodeActRunner:
         history = "\n\n".join(transcript[-6:]) if transcript else ""
         instructions = (
             "You are a CodeAct agent working in a Linux workspace. "
-            "Use tools to create/edit files and run bash. Ensure code is runnable. "
+            "Use tools to create/edit files and run bash. Ensure code is runnable and executed. "
             "When executing Python, prefer `python3 ...` from bash. "
             "If an error occurs, inspect files/logs and fix by editing. "
+            "No Simulation Policy: Do NOT fabricate or simulate results. Do NOT use 'simulate', 'simulation', 'mock', 'placeholder', "
+            "'synthetic', 'random.uniform', 'np.random' or similar. Collect real outputs by running real commands/programs. "
+            "Every step must operate on the actual workspace and produce verifiable artifacts/logs."
         )
         return (
             f"{instructions}\n\nGoal:\n{goal}\n\n"
@@ -190,6 +193,22 @@ class CodeActRunner:
             if func == "str_replace_editor":
                 command = params.get("command", "").strip()
                 path = params.get("path", "").strip()
+                # No-simulation policy: block writes that contain mock/simulation tokens
+                if command in {"create", "write", "str_replace", "insert"}:
+                    candidate = (
+                        params.get("file_text")
+                        or params.get("content")
+                        or params.get("new_str")
+                        or ""
+                    )
+                    lower = candidate.lower()
+                    banned = ("simulate", "simulation", "mock", "placeholder", "synthetic", "random.uniform", "np.random")
+                    if any(tok in lower for tok in banned):
+                        return (
+                            "Policy violation: write/create content contains disallowed simulation tokens. "
+                            "Remove simulation/mocking and produce real execution code.",
+                            False,
+                        )
                 if command == "view":
                     action = FileReadAction(path=path, impl_source=FileReadSource.OH_ACI)
                     res = await session.send_action(action, timeout=timeout)

@@ -231,6 +231,40 @@ class OpenHandsClient:
         session_state.last_activity = asyncio.get_event_loop().time()
 
         try:
+            # Prefer CodeAct runtime when available; fully hand over codegen/exec/debug
+            workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
+            if request.execute_immediately and workspace_path and self.action_runner.is_available and llm_client is not None:
+                try:
+                    from ...services.codeact_runner import CodeActRunner  # type: ignore
+                    runner = CodeActRunner(llm_client, self.action_runner)
+                    goal = (
+                        f"Generate real, runnable code to accomplish: {request.task_description}. "
+                        f"No Simulation Policy: do NOT use simulate/simulation/mock/placeholder/synthetic/random.uniform/np.random. "
+                        f"Create a Python file under code/, run it with bash (python3 path.py), and print a single line 'Result: ' + JSON."
+                    )
+                    result = await runner.run(
+                        workspace_path=workspace_path,
+                        goal=goal,
+                        max_steps=int(os.getenv("CODEACT_MAX_STEPS", "12")),
+                        timeout_per_action=int(request.timeout or int(os.getenv("CODEACT_ACTION_TIMEOUT", "300"))),
+                        progress_cb=None,
+                    )
+                    success = bool(result.get("success")) if isinstance(result, dict) else False
+                    analysis = "CodeAct run completed" if success else (result.get("error", "CodeAct failed") if isinstance(result, dict) else "CodeAct failed")
+                    # Do not write any template code; return CodeAct outcome
+                    return CodeGenerationResult(
+                        session_id=request.session_id,
+                        task_description=request.task_description,
+                        generated_code="",
+                        execution_result=None,
+                        analysis=analysis,
+                        success=success,
+                        next_steps=[],
+                    )
+                except Exception as exc:
+                    logger.warning("CodeAct path error; falling back to legacy LLM codegen: %s", exc)
+
+            # Legacy LLM codegen path (used only if CodeAct unavailable)
             # Generate code using LLM (generic, engine-agnostic)
             code_generation_prompt = self._create_code_generation_prompt(request)
             if llm_client:
@@ -241,13 +275,20 @@ class OpenHandsClient:
             try:
                 compile(generated_code, f"<generated_{request.session_id}>", "exec")
             except SyntaxError as exc:
-                logger.warning("Generated code failed to compile: %s; substituting stub", exc)
-                generated_code = self._create_template_code(request)
+                logger.warning("Generated code failed to compile: %s", exc)
+                return CodeGenerationResult(
+                    session_id=request.session_id,
+                    task_description=request.task_description,
+                    generated_code=generated_code,
+                    execution_result=None,
+                    analysis=f"Compilation failed: {exc}",
+                    success=False,
+                    next_steps=["Fix compilation errors and retry via CodeAct runtime"],
+                )
 
             code_filename = f"generated_{request.session_id}_{session_state.current_step}.py"
 
             execution_result: Optional[ExecutionResult] = None
-            workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
             if request.execute_immediately and workspace_path and self.action_runner.is_available:
                 # Hand over file write + execution to OpenHands action runtime
                 session = await self.action_runner.open_session(workspace_path)

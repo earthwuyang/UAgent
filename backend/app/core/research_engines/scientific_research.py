@@ -652,63 +652,29 @@ class ExperimentExecutor:
             }
             design_json = json.dumps(design_payload)
 
-            # Setup experiment workspace with required directories and metadata
-            setup_code = textwrap.dedent(
-                f"""
-                import json
-                from pathlib import Path
+            # Perform setup by writing files directly into the workspace (no hardcoded script)
+            workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
+            if not workspace_path:
+                raise RuntimeError("Workspace path missing after ensure_session")
 
-                experiment_dir = Path("experiments/{design.id}")
-                data_dir = experiment_dir / "data"
-                results_dir = experiment_dir / "results"
-                logs_dir = experiment_dir / "logs"
-
-                for path in (experiment_dir, data_dir, results_dir, logs_dir):
-                    path.mkdir(parents=True, exist_ok=True)
-
-                design_data = json.loads('''{design_json}''')
-
-                with open(experiment_dir / "design.json", "w", encoding="utf-8") as f:
-                    json.dump(design_data, f, indent=2)
-
-                print(f"Experiment environment setup completed for: {design_payload['name']}")
-                print(f"Base directory: {{experiment_dir.resolve()}}")
-                print(f"Data directory: {{data_dir.resolve()}}")
-                print(f"Results directory: {{results_dir.resolve()}}")
-                """
-            ).strip()
-
-            self.logger.debug(
-                "[OpenHands:%s] Setup script prepared for %s:\n%s",
-                session_context.session_id,
-                design.id,
-                setup_code[:4000],
+            base_dir = f"experiments/{design.id}"
+            # Ensure directories exist by writing .gitkeep files
+            await self.openhands_client.workspace_manager.write_file(workspace_id, f"{base_dir}/.gitkeep", "")
+            await self.openhands_client.workspace_manager.write_file(workspace_id, f"{base_dir}/data/.gitkeep", "")
+            await self.openhands_client.workspace_manager.write_file(workspace_id, f"{base_dir}/results/.gitkeep", "")
+            await self.openhands_client.workspace_manager.write_file(workspace_id, f"{base_dir}/logs/.gitkeep", "")
+            # Write design.json
+            await self.openhands_client.workspace_manager.write_file(
+                workspace_id,
+                f"{base_dir}/design.json",
+                json.dumps(design_payload, indent=2),
+                overwrite=True,
             )
 
-            # Prefer OpenHands action runtime for setup
-            workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
-            if workspace_path and self.openhands_client.action_runner.is_available:
-                session = await self.openhands_client.action_runner.open_session(workspace_path)
-                try:
-                    from openhands.events.action.commands import IPythonRunCellAction  # type: ignore
-                    action = IPythonRunCellAction(code=setup_code)
-                    action_result = await session.send_action(action, timeout=180)
-                    setup_result = action_result.execution_result
-                finally:
-                    await session.close()
-            else:
-                setup_result = await self.openhands_client.code_executor.execute_python_code(
-                    workspace_id=workspace_id,
-                    code=setup_code,
-                    file_name="setup_environment.py",
-                    timeout=120
-                )
-
-            if setup_result.success:
-                return f"Environment configured for {design.name}: {setup_result.stdout}"
-            else:
-                self.logger.error(f"Setup failed: {setup_result.stderr}")
-                return f"Environment setup failed: {setup_result.stderr}"
+            return (
+                f"Environment configured for {design.name}: "
+                f"{workspace_path / base_dir}"
+            )
 
         except Exception as e:
             self.logger.error(f"Error setting up experiment environment: {e}")
@@ -755,18 +721,28 @@ Non-negotiable constraints:
 The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics derived from actual execution.
 """
 
-        # Prefer CodeAct toolchain if enabled and available
+        # Prefer CodeAct toolchain if enabled and available. If available, do NOT fall back
+        # to direct LLM codegen; instead, iterate CodeAct rounds with error feedback.
         if self.config.get("use_codeact", True) and self.openhands_client and getattr(self.openhands_client, 'action_runner', None) and self.openhands_client.action_runner.is_available:
             try:
                 workspace_path = self.openhands_client.workspace_manager.get_workspace_path(session_context.workspace_id)
                 if workspace_path:
                     from ...services.codeact_runner import CodeActRunner  # lazy import
-                    goal_text = (
-                        f"Create a Python script at code/collect_data_{execution.id}.py that implements a function collect_data() "
-                        f"to collect measurements per the plan, and on execution prints a single line starting with 'Final result: ' "
-                        f"followed by a compact JSON dict of results. Then run it using bash and verify successful output."
-                    )
                     runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
+
+                    def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                        obs_text = "\n".join([step.get("observation", "") for step in steps_dict.get("steps", [])]) if isinstance(steps_dict, dict) else ""
+                        if ("Final result:" in obs_text) or ("Result:" in obs_text):
+                            line = next((l for l in obs_text.splitlines() if "Final result:" in l), None) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
+                            if line:
+                                try:
+                                    json_str = line.split(":", 1)[1].strip()
+                                    data = json.loads(json_str)
+                                    return data if isinstance(data, dict) else None
+                                except Exception:
+                                    return None
+                        return None
+
                     async def _cb(event: str, data: Dict[str, Any]):
                         try:
                             await progress_tracker.log_research_progress(
@@ -779,26 +755,53 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                             )
                         except Exception:
                             pass
-                    result = await runner.run(
-                        workspace_path=workspace_path,
-                        goal=goal_text,
-                        max_steps=int(self.config.get("codeact_max_steps", 10)),
-                        timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
-                        progress_cb=_cb,
+
+                    base_goal = (
+                        f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
+                        f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
+                        f"followed by a compact JSON dict of results. Do not simulate, mock, or fabricate metrics. Do not use the words 'simulate', 'simulation', 'mock', 'placeholder', 'synthetic', 'random.uniform', or 'np.random'. "
+                        f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
+                        f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run."
                     )
-                    execution.intermediate_results["codeact"] = result
-                    obs_text = "\n".join([step.get("observation", "") for step in result.get("steps", [])]) if isinstance(result, dict) else ""
-                    if ("Final result:" in obs_text) or ("Result:" in obs_text):
-                        try:
-                            line = next((l for l in obs_text.splitlines() if "Final result:" in l), None) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
-                            json_str = line.split(":", 1)[1].strip()
+
+                    outer_rounds = int(self.config.get("codeact_rounds", 3))
+                    last_obs_preview = ""
+                    for round_idx in range(1, outer_rounds + 1):
+                        goal_text = base_goal
+                        if last_obs_preview:
+                            goal_text += (
+                                "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
+                                + "\nAddress these issues explicitly before running again."
+                            )
+                        result = await runner.run(
+                            workspace_path=workspace_path,
+                            goal=goal_text,
+                            max_steps=int(self.config.get("codeact_max_steps", 10)),
+                            timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
+                            progress_cb=_cb,
+                        )
+                        execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
+                        final_data = _extract_final_result(result)
+                        if final_data:
                             payload = {"success": True}
-                            payload.update(json.loads(json_str))
+                            payload.update(final_data)
                             return payload
+                        # Summarize last observations for next round refinement
+                        try:
+                            obs_list = [s.get("observation", "") for s in result.get("steps", [])]
+                            last_obs_preview = "\n".join(obs_list[-5:]) if obs_list else ""
                         except Exception:
-                            pass
+                            last_obs_preview = ""
+
+                    # If we get here, CodeAct didn’t produce a final result.
+                    return {
+                        "success": False,
+                        "error": "CodeAct did not reach a final result after retries",
+                        "codeact": execution.intermediate_results.get("codeact_rounds", []),
+                    }
             except Exception as exc:
-                self.logger.warning("CodeAct flow failed; falling back to direct generation: %s", exc)
+                # If CodeAct is available but errored, return failure rather than falling back to LLM.
+                return {"success": False, "error": f"CodeAct flow error: {exc}"}
 
         async def _gen_code(prompt: str) -> str:
             try:
@@ -818,7 +821,7 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                 self.logger.error("Failed to generate experimental code: %s", exc)
                 return ""
 
-        cleaned_code = await _gen_code(data_collection_prompt)
+        cleaned_code = await _gen_code(data_collection_prompt + "\n\nIMPORTANT: Do not simulate or mock; avoid the tokens: simulate, simulation, mock, placeholder, synthetic, random.uniform, np.random. Return code that collects real metrics.")
         if not cleaned_code:
             raise RuntimeError("Experiment code generation returned no code")
         self._validate_generated_code(cleaned_code)
@@ -967,7 +970,11 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             # Prepare next attempt with error feedback
             error_snippet = (execution_result.stderr or stdout_text)[-2000:]
             prior_errors.append(error_snippet)
-            fix_prompt = data_collection_prompt + "\n\nObserved error to fix:\n" + error_snippet + "\n\nRegenerate a corrected version."
+            fix_prompt = (
+                data_collection_prompt
+                + "\n\nObserved issue to fix (including syntax/lint):\n" + error_snippet
+                + "\n\nRegenerate a corrected version that compiles and runs. Do not simulate or mock; avoid the tokens: simulate, simulation, mock, placeholder, synthetic, random.uniform, np.random."
+            )
             cleaned_code = await _gen_code(fix_prompt)
             if not cleaned_code:
                 raise RuntimeError("Experiment code regeneration returned no code")
