@@ -3,7 +3,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,10 +19,11 @@ from .core.research_engines import (
 )
 from .core.openhands import OpenHandsClient
 from .core.session_manager import ResearchSessionManager
-from .core.app_state import set_app_state, clear_app_state
+from .core.app_state import clear_app_state, get_app_state, set_app_state
 from .connectors import ArxivClient, CrossrefClient, OpenAlexClient, PubMedClient
 from .pipelines import ClaimVerifier, EvidenceRetriever, EvidenceSynthesizer
 from .services import ArtifactStore, PlaywrightCaptureService, QwenVisionAnalyzer, ResearchGraphService
+from .integrations.openhands_adapter import OpenHandsAppClient
 
 
 # Configure logging
@@ -56,6 +57,17 @@ async def lifespan(app: FastAPI):
     # Initialize OpenHands client with persistent workspace base
     workspace_dir = os.getenv("UAGENT_WORKSPACE_DIR", "/home/wuy/AI/uagent-workspace")
     openhands_client = OpenHandsClient(base_workspace_dir=workspace_dir)
+
+    openhands_app_client: Optional[OpenHandsAppClient] = None
+    openhands_app_base_url = os.getenv("OPENHANDS_APP_BASE_URL")
+    if openhands_app_base_url:
+        try:
+            openhands_app_client = OpenHandsAppClient(base_url=openhands_app_base_url)
+            await openhands_app_client.ensure_app_ready()
+            logger.info("Connected to external OpenHands app at %s", openhands_app_base_url)
+        except Exception as exc:  # pragma: no cover - optional dependency
+            openhands_app_client = None
+            logger.warning("OpenHands app health check failed: %s", exc)
 
     # Initialize session manager
     session_manager = ResearchSessionManager()
@@ -123,6 +135,7 @@ async def lifespan(app: FastAPI):
         },
         "smart_router": smart_router,
         "session_manager": session_manager,
+        "openhands_app": openhands_app_client,
         "science_tools": {
             "connectors": connectors,
             "retriever_factory": EvidenceRetriever,
@@ -144,6 +157,9 @@ async def lifespan(app: FastAPI):
     if cache:
         await cache.clear()
     await session_manager.shutdown()
+    openhands_app_client = get_app_state().get("openhands_app")
+    if isinstance(openhands_app_client, OpenHandsAppClient):
+        await openhands_app_client.shutdown()
     clear_app_state()
     logger.info("UAgent system shutdown complete")
 
@@ -205,17 +221,25 @@ async def root():
         "endpoints": {
             "research": "/api/research/",
             "router": "/api/router/",
+            "openhands": "/api/openhands/",
             "engines": "/api/engines/"
         }
     }
 
 
 # Import and include routers after app creation to avoid circular imports
-from .routers import research, science, smart_router as router_endpoints, websocket
+from .routers import (
+    openhands as openhands_router,
+    research,
+    science,
+    smart_router as router_endpoints,
+    websocket,
+)
 
 app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(science.router, prefix="/api/science", tags=["science"])
 app.include_router(router_endpoints.router, prefix="/api/router", tags=["smart_router"])
+app.include_router(openhands_router.router, prefix="/api/openhands", tags=["openhands"])
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 

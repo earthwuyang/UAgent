@@ -262,6 +262,22 @@ class WebSocketConnectionManager:
                 message
             )
 
+    async def broadcast_openhands_event(self, session_id: str, event_payload: Dict[str, Any]):
+        """Broadcast raw OpenHands agent events to connected clients."""
+        if session_id not in self.openhands_connections:
+            return
+
+        message = {
+            "type": "openhands_event",
+            "session_id": session_id,
+            "event": event_payload,
+            "timestamp": datetime.now().isoformat(),
+        }
+        await self._broadcast_to_connections(
+            self.openhands_connections[session_id],
+            message,
+        )
+
     async def broadcast_metrics_update(self, metrics: Dict[str, Any]):
         """Broadcast live metrics update"""
         message = {
