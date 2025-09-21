@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import uuid
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, AsyncGenerator
@@ -9,6 +10,7 @@ import logging
 
 from .workspace_manager import WorkspaceManager, WorkspaceConfig, WorkspaceStatus
 from .code_executor import CodeExecutor, ExecutionResult, ExecutionCommand
+from ...integrations.openhands_runtime import OpenHandsActionServerRunner
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,18 @@ class OpenHandsClient:
         self.code_executor = CodeExecutor(self.workspace_manager)
         self.sessions: Dict[str, SessionConfig] = {}
         self.session_states: Dict[str, SessionState] = {}
+        self.action_runner = OpenHandsActionServerRunner()
         logger.info("OpenHandsClient initialized")
+
+    @staticmethod
+    def _clean_generated_code(raw_code: str) -> str:
+        if not raw_code:
+            return ""
+        cleaned = raw_code.strip()
+        fenced = re.findall(r"```(?:python|py)?\s*(.*?)```", cleaned, re.DOTALL)
+        if fenced:
+            cleaned = fenced[0].strip()
+        return cleaned
 
     async def create_session(
         self,
@@ -94,18 +107,25 @@ class OpenHandsClient:
         if not session_id:
             session_id = f"session_{uuid.uuid4().hex[:8]}"
 
-        # Create workspace for the session
+        raw_config = dict(config or {})
+        workspace_overrides = self.workspace_manager._sanitize_config(raw_config)
+
         workspace_config = await self.workspace_manager.create_workspace(
             research_id=session_id,
-            config=config
+            config=workspace_overrides
         )
 
-        # Create session configuration
+        session_kwargs = {
+            key: raw_config[key]
+            for key in ("max_iterations", "timeout_per_step", "enable_code_execution")
+            if key in raw_config
+        }
+
         session_config = SessionConfig(
             session_id=session_id,
             research_type=research_type,
-            workspace_config=config or {},
-            **(config or {})
+            workspace_config={**workspace_overrides, **asdict(workspace_config)},
+            **session_kwargs
         )
 
         # Initialize session state
@@ -124,6 +144,24 @@ class OpenHandsClient:
 
         logger.info(f"Created OpenHands session: {session_id} for {research_type}")
         return session_config
+
+    async def ensure_session(
+        self,
+        research_type: str,
+        session_id: str,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> SessionConfig:
+        """Return existing session or create a new one if it does not exist."""
+
+        existing = self.sessions.get(session_id)
+        if existing:
+            return existing
+
+        return await self.create_session(
+            research_type=research_type,
+            session_id=session_id,
+            config=config,
+        )
 
     async def get_session_state(self, session_id: str) -> Optional[SessionState]:
         """Get current state of a session
@@ -195,6 +233,14 @@ class OpenHandsClient:
                 # Fallback: create template code
                 generated_code = self._create_template_code(request)
 
+            generated_code = self._clean_generated_code(generated_code)
+            # Ensure we do not save obviously broken scripts; replace with a stub on syntax error
+            try:
+                compile(generated_code, f"<generated_{request.session_id}>", "exec")
+            except SyntaxError as exc:
+                logger.warning("Generated code failed to compile: %s; substituting stub", exc)
+                generated_code = self._create_template_code(request)
+
             # Save generated code to workspace
             code_filename = f"generated_{request.session_id}_{session_state.current_step}.py"
             await self.workspace_manager.write_file(
@@ -203,15 +249,75 @@ class OpenHandsClient:
                 generated_code
             )
 
-            execution_result = None
+            execution_result: Optional[ExecutionResult] = None
             if request.execute_immediately:
-                # Execute the generated code
-                execution_result = await self.code_executor.execute_python_code(
-                    workspace_id=session_state.workspace_id,
-                    code=generated_code,
-                    file_name=code_filename,
-                    timeout=request.timeout
-                )
+                workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
+                if (
+                    workspace_path
+                    and self.action_runner.is_available
+                ):
+                    try:
+                        action_result = await self.action_runner.execute_python_file(
+                            workspace_path=workspace_path,
+                            script_relative_path=f"code/{code_filename}",
+                            timeout=request.timeout or 300,
+                        )
+                        execution_result = action_result.execution_result
+                        setattr(
+                            execution_result,
+                            "metadata",
+                            {
+                                "openhands_observation": action_result.raw_observation,
+                                "openhands_logs": action_result.server_logs,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "OpenHands runtime execution failed, falling back to built-in executor: %s",
+                            exc,
+                        )
+                        execution_result = await self.code_executor.execute_python_code(
+                            workspace_id=session_state.workspace_id,
+                            code=generated_code,
+                            file_name=code_filename,
+                            timeout=request.timeout,
+                        )
+                else:
+                    execution_result = await self.code_executor.execute_python_code(
+                        workspace_id=session_state.workspace_id,
+                        code=generated_code,
+                        file_name=code_filename,
+                        timeout=request.timeout,
+                    )
+
+            # Single repair attempt on obvious syntax errors
+            if execution_result and not execution_result.success:
+                stderr_text = getattr(execution_result, 'stderr', '') or ''
+                stdout_text = execution_result.stdout or ''
+                if ('SyntaxError' in stderr_text) or ('SyntaxError' in stdout_text):
+                    repair_prompt = self._create_code_generation_prompt(request) + "\n\nObserved error to fix (no markdown fences, no placeholders, valid Python only):\n" + (stderr_text or stdout_text)[-1200:]
+                    retry = await self._generate_code_with_llm(llm_client or self, repair_prompt, request)
+                    retry = self._clean_generated_code(retry)
+                    try:
+                        compile(retry, f"<generated_retry_{request.session_id}>", "exec")
+                    except SyntaxError:
+                        retry = self._create_template_code(request)
+                    await self.workspace_manager.write_file(session_state.workspace_id, f"code/{code_filename}", retry)
+                    if workspace_path and self.action_runner.is_available:
+                        try:
+                            action_result = await self.action_runner.execute_python_file(
+                                workspace_path=workspace_path,
+                                script_relative_path=f"code/{code_filename}",
+                                timeout=request.timeout or 300,
+                            )
+                            execution_result = action_result.execution_result
+                        except Exception:
+                            execution_result = await self.code_executor.execute_python_code(
+                                workspace_id=session_state.workspace_id,
+                                code=retry,
+                                file_name=code_filename,
+                                timeout=request.timeout,
+                            )
 
             # Analyze results
             analysis = self._analyze_execution_result(execution_result, generated_code)
@@ -351,14 +457,16 @@ Generate {request.language} code for the following task:
 Task: {request.task_description}
 {context_str}
 
-Requirements:
-1. Write clean, well-documented code
-2. Include error handling
-3. Add comments explaining the logic
-4. Use appropriate libraries and best practices
-5. Make the code executable and testable
+Requirements (MANDATORY):
+1. Write clean, well-documented code with a clear entry point (main() and if __name__ == '__main__').
+2. Include robust error handling; avoid referencing variables before assignment. Initialize resources (e.g., conn = None) and close them in finally blocks.
+3. Never hard-code credentials or placeholders; for databases, read from environment variables only:
+   - PostgreSQL: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD. If any are missing, skip PostgreSQL gracefully and log a clear message.
+   - DuckDB: DUCKDB_PATH (path to .duckdb file). If missing, skip DuckDB gracefully.
+4. On errors, print a clear message but do not raise unhandled exceptions; return a structured result dict.
+5. Make the code executable and testable; produce valid {request.language} code only (no markdown fences).
 
-Please provide only the code without explanations or markdown formatting.
+Output: Print one line with a JSON summary (e.g., print('Result: ' + json.dumps(obj))).
 """
 
     async def _generate_code_with_llm(
@@ -379,6 +487,11 @@ Please provide only the code without explanations or markdown formatting.
         """
         try:
             # Use the LLM client's generation method
+            logger.debug(
+                "[OpenHands:%s] Qwen prompt (codegen): %s",
+                request.session_id,
+                prompt[:4000],
+            )
             if hasattr(llm_client, 'generate'):
                 response = await llm_client.generate(prompt)
             elif hasattr(llm_client, 'chat'):
@@ -392,7 +505,13 @@ Please provide only the code without explanations or markdown formatting.
             if isinstance(response, dict):
                 code = response.get('content', response.get('text', str(response)))
 
-            return str(code).strip()
+            rendered = str(code).strip()
+            logger.debug(
+                "[OpenHands:%s] Qwen response (codegen): %s",
+                request.session_id,
+                rendered[:4000],
+            )
+            return rendered
 
         except Exception as e:
             logger.warning(f"LLM code generation failed: {e}, using template")

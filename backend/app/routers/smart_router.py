@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import asdict
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, status
@@ -179,7 +180,7 @@ async def route_and_execute(request: RouterRequest):
             await progress_tracker.log_research_completed(
                 session_id=session_id,
                 engine="deep_research",
-                result_summary=execution_result.summary,
+                result_summary=execution_result.summary or "",
                 metadata={
                     "sources_count": len(execution_result.sources),
                     "confidence_score": execution_result.confidence_score
@@ -290,6 +291,34 @@ async def route_and_execute(request: RouterRequest):
             finally:
                 engine.llm_client = original_llm_client
 
+            def _serialize_execution(exec_obj):
+                return {
+                    "execution_id": exec_obj.id,
+                    "design_id": exec_obj.design_id,
+                    "status": exec_obj.status.value,
+                    "start_time": exec_obj.start_time.isoformat(),
+                    "end_time": exec_obj.end_time.isoformat() if exec_obj.end_time else None,
+                    "progress": exec_obj.progress,
+                    "output_data": exec_obj.output_data,
+                    "logs": exec_obj.logs,
+                    "errors": exec_obj.errors,
+                }
+
+            def _serialize_result(res_obj):
+                return {
+                    "execution_id": res_obj.execution_id,
+                    "hypothesis_id": res_obj.hypothesis_id,
+                    "status": res_obj.status.value,
+                    "data": res_obj.data,
+                    "analysis": res_obj.analysis,
+                    "statistical_tests": res_obj.statistical_tests,
+                    "conclusions": res_obj.conclusions,
+                    "confidence_score": res_obj.confidence_score,
+                    "reproducibility_score": res_obj.reproducibility_score,
+                    "limitations": res_obj.limitations,
+                    "next_steps": res_obj.next_steps,
+                }
+
             await progress_tracker.log_research_completed(
                 session_id=session_id,
                 engine="scientific_research",
@@ -312,29 +341,72 @@ async def route_and_execute(request: RouterRequest):
                 if isinstance(execution_result.synthesis, str)
                 else str(execution_result.synthesis)
             )
+            report_lines = ["# Scientific Research Report", ""]
+            report_lines.append(f"## Research Question\n{execution_result.query}\n")
 
-            report_markdown = """# Scientific Research Report\n\n"""
-            report_markdown += f"## Research Question\n{execution_result.query}\n\n"
             if execution_result.hypotheses:
-                report_markdown += "## Hypotheses\n" + "\n".join(
+                report_lines.append("## Hypotheses")
+                report_lines.extend(
                     f"- {hyp.statement}" for hyp in execution_result.hypotheses[:10]
-                ) + "\n\n"
+                )
+                report_lines.append("")
+
             if execution_result.experiments:
-                report_markdown += "## Experiments\n" + "\n".join(
-                    f"- {exp.name}: {exp.description}" for exp in execution_result.experiments[:10]
-                ) + "\n\n"
-            if summary_value:
-                report_markdown += f"## Synthesis\n{summary_value}\n\n"
+                report_lines.append("## Experiments")
+                for exp in execution_result.experiments[:10]:
+                    report_lines.append(f"- **{exp.name}** — {exp.description}")
+                report_lines.append("")
+
+            serialized_execs = [
+                _serialize_execution(exec_obj)
+                for exec_obj in execution_result.executions or []
+            ]
+            if serialized_execs:
+                report_lines.append("## Execution Details")
+                for exec_dict in serialized_execs:
+                    workspace = exec_dict["output_data"].get("workspace_id") if exec_dict.get("output_data") else None
+                    report_lines.append(
+                        f"- Execution `{exec_dict['execution_id']}` ({exec_dict['status']})"
+                    )
+                    if workspace:
+                        report_lines.append(f"  - Workspace: `{workspace}`")
+                    if exec_dict.get("output_data", {}).get("generated_code"):
+                        snippet = exec_dict["output_data"]["generated_code"][:200].replace("\n", " ")
+                        report_lines.append(f"  - Generated code snippet: `{snippet}`…")
+                    if exec_dict.get("errors"):
+                        report_lines.append(f"  - Errors: {exec_dict['errors'][:1]}")
+                report_lines.append("")
+
+            serialized_results = [
+                _serialize_result(res_obj)
+                for res_obj in execution_result.results or []
+            ]
+            if serialized_results:
+                report_lines.append("## Experiment Results")
+                for res in serialized_results[:5]:
+                    report_lines.append(
+                        f"- Result `{res['execution_id']}` ({res['status']}) — Conclusions: { '; '.join(res['conclusions'] or []) or 'Pending' }"
+                    )
+                report_lines.append("")
+
             if isinstance(execution_result.synthesis, dict):
-                conclusions = execution_result.synthesis.get("conclusions")
-                if conclusions:
-                    report_markdown += "## Conclusions\n" + "\n".join(
-                        f"- {conclusion}" for conclusion in conclusions
-                    ) + "\n\n"
+                report_lines.append("## Synthesis")
+                for key, value in execution_result.synthesis.items():
+                    if isinstance(value, list):
+                        report_lines.append(f"- **{key.replace('_', ' ').title()}**:")
+                        report_lines.extend(f"  - {item}" for item in value)
+                    else:
+                        report_lines.append(f"- **{key.replace('_', ' ').title()}**: {value}")
+                report_lines.append("")
+            elif summary_value:
+                report_lines.append(f"## Synthesis\n{summary_value}\n")
+
             if execution_result.recommendations:
-                report_markdown += "## Recommendations\n" + "\n".join(
-                    f"- {rec}" for rec in execution_result.recommendations
-                ) + "\n\n"
+                report_lines.append("## Recommendations")
+                report_lines.extend(f"- {rec}" for rec in execution_result.recommendations)
+                report_lines.append("")
+
+            report_markdown = "\n".join(report_lines).strip() + "\n"
 
             return {
                 "engine_used": "scientific_research",
@@ -348,7 +420,13 @@ async def route_and_execute(request: RouterRequest):
                 "summary": summary_value,
                 "synthesis": execution_result.synthesis,
                 "recommendations": execution_result.recommendations,
-                "report_markdown": report_markdown
+                "report_markdown": report_markdown,
+                "executions": serialized_execs,
+                "experiment_results": serialized_results,
+                "idea_evaluations": {
+                    idea_id: asdict(eval_obj) if eval_obj else None
+                    for idea_id, eval_obj in (execution_result.idea_evaluations or {}).items()
+                },
             }
 
         async def execute_research() -> None:

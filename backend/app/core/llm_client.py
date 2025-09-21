@@ -277,19 +277,26 @@ class DashScopeClient(LLMClient):
             # Try to parse JSON response
             try:
                 result = json.loads(content)
-                # Validate required fields
-                required_fields = ["engine", "confidence_score", "reasoning", "sub_components"]
-                if all(field in result for field in required_fields):
+                if "confidence_score" not in result and "confidence" in result:
+                    result["confidence_score"] = result.pop("confidence")
+                result.setdefault("sub_components", {})
+                result.setdefault("reasoning", "")
+                if "engine" in result and "confidence_score" in result:
                     return result
-                else:
-                    raise ValueError(f"Missing required fields in response: {result}")
+                raise ValueError(f"Missing required fields in response: {result}")
             except json.JSONDecodeError:
                 # Fallback: extract JSON from text
                 import re
                 json_match = re.search(r'\{.*\}', content, re.DOTALL)
                 if json_match:
                     result = json.loads(json_match.group())
-                    return result
+                    if "confidence_score" not in result and "confidence" in result:
+                        result["confidence_score"] = result.pop("confidence")
+                    result.setdefault("sub_components", {})
+                    result.setdefault("reasoning", "")
+                    if "engine" in result and "confidence_score" in result:
+                        return result
+                    raise ValueError(f"Missing required fields in response: {result}")
                 else:
                     self.logger.error(f"Could not parse JSON from DashScope response: {content}")
                     raise ValueError(f"Could not parse JSON from response: {content}")
@@ -388,7 +395,7 @@ class DashScopeClient(LLMClient):
         """Async streaming generation for DashScope"""
         import asyncio
         import threading
-        from queue import Queue
+        from queue import Queue, Empty
 
         def _sync_stream():
             """Synchronous streaming generator"""
@@ -432,20 +439,18 @@ class DashScopeClient(LLMClient):
             while True:
                 # Wait for data with timeout
                 try:
-                    item_type, item_data = queue.get(timeout=30)  # 30 second timeout
+                    item_type, item_data = queue.get(timeout=1.0)
+                except Empty:
+                    if thread.is_alive():
+                        continue
+                    break
 
-                    if item_type == 'data':
-                        yield item_data
-                    elif item_type == 'done':
-                        break
-                    elif item_type == 'error':
-                        raise item_data
-
-                except:
-                    # Check if thread is still alive
-                    if not thread.is_alive():
-                        break
-                    raise
+                if item_type == 'data':
+                    yield item_data
+                elif item_type == 'done':
+                    break
+                elif item_type == 'error':
+                    raise item_data
 
         finally:
             # Ensure thread is cleaned up

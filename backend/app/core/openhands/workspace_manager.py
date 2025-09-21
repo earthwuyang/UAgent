@@ -40,6 +40,20 @@ class WorkspaceStatus:
 class WorkspaceManager:
     """Manages isolated workspaces for code execution"""
 
+    _ALLOWED_CONFIG_KEYS = {
+        "max_file_size",
+        "max_total_size",
+        "timeout",
+        "python_path",
+        "allowed_commands",
+    }
+
+    @classmethod
+    def _sanitize_config(cls, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+        return {key: config[key] for key in cls._ALLOWED_CONFIG_KEYS if key in config}
+
     def __init__(self, base_workspace_dir: str = None):
         """Initialize workspace manager
 
@@ -77,10 +91,12 @@ class WorkspaceManager:
         (workspace_path / "logs").mkdir()
 
         # Create workspace configuration
+        sanitized_config = self._sanitize_config(config)
+
         workspace_config = WorkspaceConfig(
             workspace_id=workspace_id,
             base_path=str(workspace_path),
-            **(config or {})
+            **sanitized_config
         )
 
         # Initialize workspace with basic files

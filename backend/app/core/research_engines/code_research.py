@@ -290,7 +290,7 @@ class CodePatternEngine:
 class CodeResearchEngine:
     """Code Research Engine for repository analysis and code understanding"""
 
-    def __init__(self, llm_client: LLMClient, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, llm_client: LLMClient, openhands_client: Optional[Any] = None, config: Optional[Dict[str, Any]] = None):
         """Initialize code research engine
 
         Args:
@@ -300,6 +300,7 @@ class CodeResearchEngine:
         self.llm_client = llm_client
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
+        self.openhands_client = openhands_client
 
         # Initialize sub-engines
         self.github_engine = GitHubSearchEngine(llm_client)
@@ -806,6 +807,60 @@ class CodeResearchEngine:
                 message="Prepared integration guidance and recommendations",
                 metadata={"guide_length": len(integration_guide)}
             )
+
+            # Optionally run a CodeAct demo that builds a tiny example based on the integration guide
+            if self.config.get("use_codeact_in_code_engine", True) and self.openhands_client and session_id:
+                try:
+                    session_cfg = await self.openhands_client.ensure_session(
+                        research_type="code_research",
+                        session_id=f"openhands_code_{session_id}",
+                        config=self.config.get("default_openhands_resources", {}),
+                    )
+                    workspace_path = self.openhands_client.workspace_manager.get_workspace_path(session_cfg.workspace_config["workspace_id"])  # type: ignore[index]
+                    if workspace_path and self.openhands_client.action_runner.is_available:
+                        await self._log_progress(
+                            session_id,
+                            phase="codeact_demo_start",
+                            progress=84.0,
+                            message="Starting CodeAct demo execution",
+                            metadata={"workspace": str(workspace_path)},
+                            parent_phase="synthesizing_guidance",
+                        )
+                        from ...services.codeact_runner import CodeActRunner  # lazy import
+                        goal = (
+                            "Create a Python file at code/integration_demo.py that prints 'Integration demo OK' and then run it "
+                            "using bash. If it fails, inspect files and fix. Finish when the output is correct."
+                        )
+                        runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
+                        async def _cb(event: str, data: Dict[str, Any]):
+                            try:
+                                await self._log_progress(
+                                    session_id,
+                                    phase=f"codeact_{event}",
+                                    progress=86.0,
+                                    message=f"CodeAct {event}",
+                                    metadata=data,
+                                    parent_phase="codeact_demo_start",
+                                )
+                            except Exception:
+                                pass
+                        codeact_result = await runner.run(
+                            workspace_path=workspace_path,
+                            goal=goal,
+                            max_steps=int(self.config.get("codeact_max_steps", 8)),
+                            timeout_per_action=int(self.config.get("codeact_action_timeout", 120)),
+                            progress_cb=_cb,
+                        )
+                        await self._log_progress(
+                            session_id,
+                            phase="codeact_demo_complete",
+                            progress=88.0,
+                            message="Completed CodeAct demo execution",
+                            metadata={"success": bool(codeact_result.get("success"))},
+                            parent_phase="codeact_demo_start",
+                        )
+                except Exception as exc:
+                    self.logger.warning("CodeAct demo failed: %s", exc)
 
             # Generate recommendations
             recommendations = await self._generate_recommendations(query, repositories, analyses, best_practices)

@@ -92,11 +92,14 @@ class StreamingLLMClient:
         if not self.session_id:
             return
 
+        provider_name = getattr(self.llm_client, "__class__", type(self.llm_client)).__name__
+        engine_label = provider_name.replace("Client", "").lower()
+
         message = {
             "type": "llm_prompt_start",
             "session_id": self.session_id,
             "prompt": prompt,
-            "engine": "qwen",
+            "engine": engine_label,
             "timestamp": datetime.now().isoformat()
         }
 
@@ -142,10 +145,17 @@ class StreamingLLMClient:
         if not self.session_id:
             return
 
+        preview = None
+        if isinstance(response, str):
+            preview = response[:200]
+            if len(response) > 200:
+                preview += "..."
+
         message = {
             "type": "llm_prompt_complete",
             "session_id": self.session_id,
             "response": response,
+            "response_preview": preview if preview is not None else response,
             "timestamp": datetime.now().isoformat()
         }
 

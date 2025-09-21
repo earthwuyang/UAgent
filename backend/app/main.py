@@ -20,6 +20,9 @@ from .core.research_engines import (
 from .core.openhands import OpenHandsClient
 from .core.session_manager import ResearchSessionManager
 from .core.app_state import set_app_state, clear_app_state
+from .connectors import ArxivClient, CrossrefClient, OpenAlexClient, PubMedClient
+from .pipelines import ClaimVerifier, EvidenceRetriever, EvidenceSynthesizer
+from .services import ArtifactStore, PlaywrightCaptureService, QwenVisionAnalyzer, ResearchGraphService
 
 
 # Configure logging
@@ -59,7 +62,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize research engines
     deep_engine = DeepResearchEngine(llm_client)
-    code_engine = CodeResearchEngine(llm_client)
+    code_engine = CodeResearchEngine(llm_client, openhands_client=openhands_client)
     scientific_engine = ScientificResearchEngine(
         llm_client=llm_client,
         deep_research_engine=deep_engine,
@@ -70,6 +73,27 @@ async def lifespan(app: FastAPI):
             "confidence_threshold": float(os.getenv("CONFIDENCE_THRESHOLD", "0.8"))
         }
     )
+
+    # Initialize scientific research helpers
+    claim_verifier = ClaimVerifier(llm_client)
+    synthesizer = EvidenceSynthesizer(llm_client)
+    artifact_root = os.getenv("ARTIFACT_STORE_ROOT", "./artifacts")
+    artifact_store = ArtifactStore(artifact_root)
+    research_graph_path = os.getenv("RESEARCH_GRAPH_PATH", "./data/research_graph.db")
+    research_graph = ResearchGraphService(research_graph_path)
+    playwright_headless = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
+    browser_service = PlaywrightCaptureService(headless=playwright_headless)
+    vision_analyzer = None
+    try:
+        vision_analyzer = QwenVisionAnalyzer(api_key=dashscope_key)
+    except Exception as vision_exc:
+        logger.warning("Qwen-VL analyzer unavailable: %s", vision_exc)
+    connectors = {
+        "arxiv": ArxivClient(),
+        "openalex": OpenAlexClient(mailto=os.getenv("OPENALEX_MAILTO")),
+        "pubmed": PubMedClient(api_key=os.getenv("PUBMED_API_KEY"), email=os.getenv("PUBMED_EMAIL")),
+        "crossref": CrossrefClient(),
+    }
 
     # Initialize smart router
     smart_router = SmartRouter(llm_client=llm_client, cache=cache)
@@ -84,7 +108,17 @@ async def lifespan(app: FastAPI):
             "scientific": scientific_engine
         },
         "smart_router": smart_router,
-        "session_manager": session_manager
+        "session_manager": session_manager,
+        "science_tools": {
+            "connectors": connectors,
+            "retriever_factory": EvidenceRetriever,
+            "claim_verifier": claim_verifier,
+            "synthesizer": synthesizer,
+            "artifact_store": artifact_store,
+            "research_graph": research_graph,
+            "browser_service": browser_service,
+            "vision_analyzer": vision_analyzer,
+        },
     })
 
     logger.info("UAgent system started successfully")
@@ -163,9 +197,10 @@ async def root():
 
 
 # Import and include routers after app creation to avoid circular imports
-from .routers import research, smart_router as router_endpoints, websocket
+from .routers import research, science, smart_router as router_endpoints, websocket
 
 app.include_router(research.router, prefix="/api/research", tags=["research"])
+app.include_router(science.router, prefix="/api/science", tags=["science"])
 app.include_router(router_endpoints.router, prefix="/api/router", tags=["smart_router"])
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
