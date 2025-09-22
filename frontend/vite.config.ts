@@ -7,17 +7,17 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
       '/health': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
       // Proxy WebSocket traffic during development so the frontend can use
       // same-origin WS URLs (ws://localhost:3000/ws/...) and still reach the backend.
       '/ws': {
-        target: 'ws://127.0.0.1:8000',
+        target: 'ws://127.0.0.1:8001',
         changeOrigin: true,
         ws: true,
       },

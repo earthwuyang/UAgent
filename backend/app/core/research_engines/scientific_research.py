@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import textwrap
 import uuid
 from typing import Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass, field
@@ -724,7 +723,6 @@ class ExperimentExecutor:
         prior_errors: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Collect experimental data using OpenHands code execution."""
-        session_id = session_context.session_id
         prior_errors = prior_errors or []
 
         error_context = ""
@@ -756,344 +754,102 @@ Non-negotiable constraints:
 
 The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics derived from actual execution.
 """
+        execution.intermediate_results.setdefault("data_collection_prompt", data_collection_prompt)
 
-        # Prefer CodeAct toolchain if enabled and available. If available, do NOT fall back
-        # to direct LLM codegen; instead, iterate CodeAct rounds with error feedback.
-        if self.config.get("use_codeact", True) and self.openhands_client and getattr(self.openhands_client, 'action_runner', None) and self.openhands_client.action_runner.is_available:
-            try:
-                workspace_path = self.openhands_client.workspace_manager.get_workspace_path(session_context.workspace_id)
-                if workspace_path:
-                    from ...services.codeact_runner import CodeActRunner  # lazy import
-                    runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
-
-                    def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-                        obs_text = "\n".join([step.get("observation", "") for step in steps_dict.get("steps", [])]) if isinstance(steps_dict, dict) else ""
-                        if ("Final result:" in obs_text) or ("Result:" in obs_text):
-                            line = next((l for l in obs_text.splitlines() if "Final result:" in l), None) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
-                            if line:
-                                try:
-                                    json_str = line.split(":", 1)[1].strip()
-                                    data = json.loads(json_str)
-                                    return data if isinstance(data, dict) else None
-                                except Exception:
-                                    return None
-                        return None
-
-                    async def _cb(event: str, data: Dict[str, Any]):
-                        try:
-                            await progress_tracker.log_research_progress(
-                                session_id=session_context.session_id,
-                                engine="scientific_research",
-                                phase=f"codeact_{event}",
-                                progress=62.0,
-                                message=f"CodeAct {event}",
-                                metadata=data,
-                            )
-                        except Exception:
-                            pass
-
-                    base_goal = (
-                        f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
-                        f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
-                        f"followed by a compact JSON dict of results. Do not simulate, mock, or fabricate metrics. Do not use the words 'simulate', 'simulation', 'mock', 'placeholder', 'synthetic', 'random.uniform', or 'np.random'. "
-                        f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
-                        f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run."
-                    )
-
-                    outer_rounds = int(self.config.get("codeact_rounds", 3))
-                    last_obs_preview = ""
-                    for round_idx in range(1, outer_rounds + 1):
-                        goal_text = base_goal
-                        if last_obs_preview:
-                            goal_text += (
-                                "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
-                                + "\nAddress these issues explicitly before running again."
-                            )
-                        result = await runner.run(
-                            workspace_path=workspace_path,
-                            goal=goal_text,
-                            max_steps=int(self.config.get("codeact_max_steps", 10)),
-                            timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
-                            progress_cb=_cb,
-                        )
-                        execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
-                        final_data = _extract_final_result(result)
-                        if final_data:
-                            payload = {"success": True}
-                            payload.update(final_data)
-                            return payload
-                        # Summarize last observations for next round refinement
-                        try:
-                            obs_list = [s.get("observation", "") for s in result.get("steps", [])]
-                            last_obs_preview = "\n".join(obs_list[-5:]) if obs_list else ""
-                        except Exception:
-                            last_obs_preview = ""
-
-                    # If we get here, CodeAct didn’t produce a final result.
-                    return {
-                        "success": False,
-                        "error": "CodeAct did not reach a final result after retries",
-                        "codeact": execution.intermediate_results.get("codeact_rounds", []),
-                    }
-            except Exception as exc:
-                # If CodeAct is available but errored, return failure rather than falling back to LLM.
-                return {"success": False, "error": f"CodeAct flow error: {exc}"}
-
-        # If CodeAct was not available or did not produce a final result, refuse legacy
-        # direct LLM code generation for experiments. Require CodeAct to handle retries.
-        raise RuntimeError(
-            "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
+        codeact_enabled = (
+            self.config.get("use_codeact", True)
+            and self.openhands_client
+            and getattr(self.openhands_client, "action_runner", None)
+            and self.openhands_client.action_runner.is_available
         )
 
-        # Unreachable after the change above; kept for context but not executed.
-        cleaned_code = ""
-
-        indented_code = textwrap.indent(cleaned_code, "    ")
-
-        methodology_json = json.dumps(design.methodology)
-        variables_json = json.dumps(design.variables)
-        data_plan_json = json.dumps(design.data_collection_plan)
-
-        script_core = (
-            "import json\n"
-            "import numpy as np\n"
-            "import pandas as pd\n"
-            "from pathlib import Path\n"
-            "import time\n"
-            "from datetime import datetime\n\n"
-            f"EXPERIMENT_DIR = Path('experiments/{design.name}')\n"
-            "DATA_DIR = EXPERIMENT_DIR / 'data'\n"
-            "RESULTS_DIR = EXPERIMENT_DIR / 'results'\n\n"
-            "DATA_DIR.mkdir(parents=True, exist_ok=True)\n"
-            "RESULTS_DIR.mkdir(parents=True, exist_ok=True)\n\n"
-            "def collect_data():\n"
-            f"    print('Starting data collection for: {design.name}')\n"
-            "    start_time = time.time()\n\n"
-            "    # Generated experiment code\n"
-            f"{indented_code}\n\n"
-            "    execution_log = {\n"
-            f"        'experiment_id': '{design.id}',\n"
-            f"        'execution_id': '{execution.id}',\n"
-            f"        'start_time': '{execution.start_time}',\n"
-            f"        'methodology': {methodology_json},\n"
-            f"        'variables': {variables_json},\n"
-            f"        'data_collection_plan': {data_plan_json},\n"
-            "        'execution_time_seconds': time.time() - start_time\n"
-            "    }\n\n"
-            "    with open(RESULTS_DIR / 'execution_log.json', 'w') as f:\n"
-            "        json.dump(execution_log, f, indent=2)\n\n"
-            "    return execution_log\n\n"
-        ).strip()
-
-        # Two variants: a script (with main guard) and an IPython cell (explicit call)
-        framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
-        ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
-
-        # Validate that the composed script compiles; otherwise, fallback to safe stub
-        try:
-            compile(framework_code, '<framework_script>', 'exec')
-        except SyntaxError as exc:
-            raise RuntimeError(f"Generated experiment script invalid: {exc}") from exc
-        # Minimal repair loop leveraging OpenHands execution feedback
-        base_action_timeout = int(self.config.get("codeact_action_timeout", 1800))
-        timeout_cap = int(self.config.get("codeact_timeout_cap", base_action_timeout * 4))
-        base_attempts = max(1, int(self.config.get("experiment_repair_attempts", 3)))
-        max_attempts_cap = max(base_attempts, int(self.config.get("experiment_repair_attempts_max", 8)))
-
-        last_result = None
-        attempt = 1
-        allowed_attempts = base_attempts
-        execution.output_data.setdefault("attempts", [])
-        while attempt <= allowed_attempts:
+        if codeact_enabled:
             try:
                 workspace_path = self.openhands_client.workspace_manager.get_workspace_path(
                     session_context.workspace_id
                 )
-                execution_result = None
-                attempt_source = "code_executor"
-                if (
-                    workspace_path
-                    and getattr(self.openhands_client.action_runner, "is_available", False)
-                ):
+                if not workspace_path:
+                    raise RuntimeError("OpenHands workspace path unavailable for CodeAct execution")
+
+                from ...services.codeact_runner import CodeActRunner  # lazy import
+
+                runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
+
+                def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                    obs_text = "\n".join(
+                        [step.get("observation", "") for step in steps_dict.get("steps", [])]
+                    ) if isinstance(steps_dict, dict) else ""
+                    if ("Final result:" in obs_text) or ("Result:" in obs_text):
+                        line = next(
+                            (l for l in obs_text.splitlines() if "Final result:" in l),
+                            None,
+                        ) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
+                        if line:
+                            try:
+                                json_str = line.split(":", 1)[1].strip()
+                                data = json.loads(json_str)
+                                return data if isinstance(data, dict) else None
+                            except Exception:
+                                return None
+                    return None
+
+                async def _cb(event: str, data: Dict[str, Any]) -> None:
                     try:
-                        action_result = await self.openhands_client.action_runner.execute_ipython_code(
-                            workspace_path=workspace_path,
-                            code=ipython_cell,
-                            timeout=min(base_action_timeout * (2 ** (attempt - 1)), timeout_cap),
+                        await progress_tracker.log_research_progress(
+                            session_id=session_context.session_id,
+                            engine="scientific_research",
+                            phase=f"codeact_{event}",
+                            progress=62.0,
+                            message=f"CodeAct {event}",
+                            metadata=data,
                         )
-                        execution_result = action_result.execution_result
-                        attempt_source = "openhands_action_runner"
-                    except Exception as exc:
-                        self.logger.warning(
-                            "OpenHands IPython execution failed, fallback to direct execution: %s",
-                            exc,
-                        )
+                    except Exception:
+                        pass
 
-                if execution_result is None:
-                    execution_result = await self.openhands_client.code_executor.execute_python_code(
-                        workspace_id=session_context.workspace_id,
-                        code=framework_code,
-                        file_name=f"collect_data_{execution.id}.py",
-                        timeout=min(300 * (2 ** (attempt - 1)), 3600),
+                base_goal = (
+                    f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
+                    f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
+                    f"followed by a compact JSON dict of results. Do not simulate, mock, or fabricate metrics. Do not use the words 'simulate', 'simulation', 'mock', 'placeholder', 'synthetic', 'random.uniform', or 'np.random'. "
+                    f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
+                    f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run."
+                )
+
+                outer_rounds = int(self.config.get("codeact_rounds", 3))
+                last_obs_preview = ""
+                for round_idx in range(1, outer_rounds + 1):
+                    goal_text = base_goal
+                    if last_obs_preview:
+                        goal_text += (
+                            "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
+                            + "\nAddress these issues explicitly before running again."
+                        )
+                    result = await runner.run(
+                        workspace_path=workspace_path,
+                        goal=goal_text,
+                        max_steps=int(self.config.get("codeact_max_steps", 10)),
+                        timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
+                        progress_cb=_cb,
                     )
+                    execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
+                    final_data = _extract_final_result(result)
+                    if final_data:
+                        payload: Dict[str, Any] = {"success": True}
+                        payload.update(final_data)
+                        return payload
+
+                    try:
+                        obs_list = [s.get("observation", "") for s in result.get("steps", [])]
+                        last_obs_preview = "\n".join(obs_list[-5:]) if obs_list else ""
+                    except Exception:
+                        last_obs_preview = ""
+
+                raise RuntimeError("CodeAct did not reach a final result after retries")
             except Exception as exc:
-                self.logger.error("OpenHands execution failure: %s", exc)
-                execution.errors.append(str(exc))
-                return {
-                    "error": str(exc),
-                    "success": False,
-                    "generated_code": cleaned_code,
-                }
+                raise RuntimeError(f"CodeAct flow error: {exc}") from exc
 
-            last_result = execution_result
-            execution.logs.append(execution_result.stdout or "")
-            if execution_result.stderr:
-                execution.errors.append(execution_result.stderr)
-
-            execution.output_data.setdefault("last_stdout", execution_result.stdout if execution_result else "")
-            execution.output_data.setdefault("last_stderr", execution_result.stderr if execution_result else "")
-            execution.output_data["last_stdout"] = execution_result.stdout if execution_result else ""
-            execution.output_data["last_stderr"] = execution_result.stderr if execution_result else ""
-            execution.output_data.setdefault("execution_command", execution_result.command if execution_result else "")
-            execution.output_data["execution_command"] = execution_result.command if execution_result else ""
-            if execution_result:
-                created_agg = execution.output_data.setdefault("all_files_created", [])
-                for path in execution_result.files_created:
-                    if path not in created_agg:
-                        created_agg.append(path)
-                modified_agg = execution.output_data.setdefault("all_files_modified", [])
-                for path in execution_result.files_modified:
-                    if path not in modified_agg:
-                        modified_agg.append(path)
-
-            execution.output_data.setdefault("attempts", []).append(
-                {
-                    "attempt": attempt,
-                    "source": attempt_source,
-                    "command": execution_result.command if execution_result else "",
-                    "working_directory": execution_result.working_directory if execution_result else "",
-                    "exit_code": execution_result.exit_code if execution_result else None,
-                    "stdout_tail": (execution_result.stdout or "")[-2000:] if execution_result else "",
-                    "stderr_tail": (execution_result.stderr or "")[-2000:] if execution_result else "",
-                    "files_created": execution_result.files_created if execution_result else [],
-                    "files_modified": execution_result.files_modified if execution_result else [],
-                }
-            )
-
-            stdout_text = execution_result.stdout or ""
-            failure_signal = (not execution_result.success) or ("Traceback" in stdout_text) or ("SyntaxError" in stdout_text)
-            if not failure_signal:
-                break
-
-            # Prepare next attempt with error feedback
-            error_snippet = (execution_result.stderr or stdout_text)[-2000:]
-            prior_errors.append(error_snippet)
-            # Direct regeneration disabled; CodeAct should be responsible for retries
-            raise RuntimeError("Experiment repair requires CodeAct; legacy regeneration disabled")
-            indented_code = textwrap.indent(cleaned_code, "    ")
-            script_core = (
-                "import json\n"
-                "import numpy as np\n"
-                "import pandas as pd\n"
-                "from pathlib import Path\n"
-                "import time\n"
-                "from datetime import datetime\n\n"
-                f"EXPERIMENT_DIR = Path('experiments/{design.name}')\n"
-                "DATA_DIR = EXPERIMENT_DIR / 'data'\n"
-                "RESULTS_DIR = EXPERIMENT_DIR / 'results'\n\n"
-                "DATA_DIR.mkdir(parents=True, exist_ok=True)\n"
-                "RESULTS_DIR.mkdir(parents=True, exist_ok=True)\n\n"
-                "def collect_data():\n"
-                f"    print('Starting data collection for: {design.name}')\n"
-                "    start_time = time.time()\n\n"
-                "    # Generated experiment code\n"
-                f"{indented_code}\n\n"
-                "    execution_log = {\n"
-                f"        'experiment_id': '{design.id}',\n"
-                f"        'execution_id': '{execution.id}',\n"
-                f"        'start_time': '{execution.start_time}',\n"
-                f"        'methodology': {methodology_json},\n"
-                f"        'variables': {variables_json},\n"
-                f"        'data_collection_plan': {data_plan_json},\n"
-                "        'execution_time_seconds': time.time() - start_time\n"
-                "    }\n\n"
-                "    with open(RESULTS_DIR / 'execution_log.json', 'w') as f:\n"
-                "        json.dump(execution_log, f, indent=2)\n\n"
-                "    return execution_log\n\n"
-            ).strip()
-            framework_code = script_core + "\n\nif __name__ == '__main__':\n    print('Final result: ' + json.dumps(collect_data(), default=str))\n"
-            ipython_cell = script_core + "\n\nprint('Final result: ' + json.dumps(collect_data(), default=str))\n"
-
-            # Validate compilation for the retried script; fallback to safe stub if needed
-            try:
-                compile(framework_code, '<framework_script_retry>', 'exec')
-            except SyntaxError as exc:
-                raise RuntimeError(f"Experiment script retry invalid: {exc}") from exc
-
-            # Exponential increase of allowed attempts (up to cap) on repeated failures
-            attempt += 1
-            if attempt > allowed_attempts and allowed_attempts < max_attempts_cap:
-                allowed_attempts = min(max_attempts_cap, allowed_attempts * 2)
-
-        execution_result = last_result or execution_result  # type: ignore[name-defined]
-        payload: Dict[str, Any] = {
-            "raw_output": execution_result.stdout if execution_result else "",
-            "execution_time": execution_result.execution_time if execution_result else 0.0,
-            "files_created": execution_result.files_created if execution_result else [],
-            "files_modified": execution_result.files_modified if execution_result else [],
-            "success": bool(execution_result and execution_result.success),
-            "workspace_id": session_context.workspace_id,
-            "session_id": session_id,
-            "generated_code": cleaned_code,
-        }
-        payload["attempts"] = execution.output_data.get("attempts", [])
-        payload["last_stdout"] = execution.output_data.get("last_stdout", "")
-        payload["last_stderr"] = execution.output_data.get("last_stderr", "")
-        payload["execution_command"] = execution.output_data.get("execution_command", "")
-        payload["files_created_total"] = execution.output_data.get("all_files_created", [])
-        payload["files_modified_total"] = execution.output_data.get("all_files_modified", [])
-
-        command_success = (
-            execution_result is not None
-            and execution_result.success
-            and bool(execution_result.command)
-            and execution_result.exit_code == 0
+        raise RuntimeError(
+            "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
         )
-        artifact_success = bool(payload["files_created_total"])
-        result_artifacts = bool(payload.get("measurements")) or bool(payload.get("summary"))
-        if not (command_success and (artifact_success or result_artifacts)):
-            payload["success"] = False
-            payload.setdefault(
-                "error",
-                "Experiment did not produce verifiable command execution and artifacts",
-            )
-
-        if execution_result and execution_result.success:
-            try:
-                if execution_result.stdout:
-                    for line in execution_result.stdout.splitlines():
-                        if ("Final result:" in line) or ("Result:" in line):
-                            json_str = line.split(":", 1)[1].strip()
-                            payload.update(json.loads(json_str))
-                # Prefer reading structured artifact if available
-                if session_context and session_context.workspace_id and self.openhands_client:
-                    artifact_text = await self.openhands_client.workspace_manager.read_file(
-                        session_context.workspace_id,
-                        "output/result.json",
-                    )
-                    if artifact_text:
-                        try:
-                            payload.update(json.loads(artifact_text))
-                            payload["artifact"] = "output/result.json"
-                        except Exception:
-                            pass
-            except Exception as parse_exc:
-                self.logger.debug("Failed to parse experiment output JSON: %s", parse_exc)
-            return payload
-
-        stderr_or_empty = getattr(execution_result, 'stderr', '') if execution_result else ''
-        payload.setdefault("error", stderr_or_empty or (execution_result.stdout if execution_result else "Execution failed"))
-        return payload
 
     async def _simulate_data_collection(self, design: ExperimentDesign) -> Dict[str, Any]:
         """Simulate data collection for testing when explicitly enabled."""

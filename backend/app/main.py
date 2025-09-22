@@ -270,10 +270,12 @@ app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.getenv("UAGENT_BACKEND_PORT", os.getenv("PORT", "8000")))
+    host = os.getenv("UAGENT_BACKEND_HOST", "0.0.0.0")
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
-        port=8000,
+        host=host,
+        port=port,
         reload=True,
         log_level="info"
     )

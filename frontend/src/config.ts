@@ -1,5 +1,12 @@
 const trimTrailingSlash = (value: string): string => value.replace(/\/$/, '');
 
+const resolveConfiguredPort = (): string | undefined => {
+  const raw = import.meta.env.VITE_BACKEND_PORT as string | undefined;
+  if (!raw || typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : undefined;
+};
+
 const runtimeDetectHttpBase = (): string => {
   // 1) Explicit override from env wins
   const envUrl = import.meta.env.VITE_BACKEND_HTTP_URL as string | undefined;
@@ -8,15 +15,15 @@ const runtimeDetectHttpBase = (): string => {
   // 2) Derive from current location to support remote hosts
   try {
     const loc = window.location;
+    const configuredPort = resolveConfiguredPort();
+    const locationPort = loc.port && loc.port !== '3000' ? loc.port : undefined;
+    const port = configuredPort ?? locationPort ?? '8000';
     const host = loc.hostname;
-    const isLocal = host === 'localhost' || host === '127.0.0.1';
-    // Allow optional port override; default to 8000
-    const configuredPort = (import.meta.env.VITE_BACKEND_PORT as string | undefined) || '8000';
-    const port = isLocal ? '8000' : configuredPort;
     return trimTrailingSlash(`${loc.protocol}//${host}:${port}`);
   } catch {
     // 3) Final fallback for SSR/build contexts
-    return 'http://localhost:8000';
+    const fallbackPort = resolveConfiguredPort() ?? '8000';
+    return `http://localhost:${fallbackPort}`;
   }
 };
 
@@ -28,7 +35,8 @@ const deriveWsUrl = (httpUrl: string): string => {
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     return trimTrailingSlash(url.toString());
   } catch {
-    return 'ws://localhost:8000';
+    const fallbackPort = resolveConfiguredPort() ?? '8000';
+    return `ws://localhost:${fallbackPort}`;
   }
 };
 
