@@ -96,7 +96,7 @@ class OpenHandsActionServerRunner:
         async def send_action(self, action_dict: dict, timeout: int = 300) -> 'OpenHandsActionResult':
             if not self.is_running:
                 raise RuntimeError("OpenHands action server session is not running")
-            payload = {"action": action_dict}
+            # Work on a shallow copy of the action payload so we can safely rewrite paths
             action_name = action_dict.get("action")
             args = dict(action_dict.get("args", {}))
 
@@ -137,6 +137,11 @@ class OpenHandsActionServerRunner:
                 if "\n" in command_text or stripped.startswith("#") or stripped.startswith("{") or stripped.startswith("["):
                     command_text = "bash -lc " + json.dumps(stripped)
                 args["command"] = command_text
+
+            # Persist any rewrites made above back onto the outgoing payload
+            rewritten_action = dict(action_dict)
+            rewritten_action["args"] = args
+            payload = {"action": rewritten_action}
 
             preview = {}
             for key in ("command", "path", "code", "file_text", "content"):
