@@ -23,8 +23,6 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.venv/
-venv/
 env/
 ENV/
 .env
