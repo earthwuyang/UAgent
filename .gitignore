@@ -59,6 +59,10 @@ dist/
 build/
 *.log
 
+
+.venv/
+venv/
+
 # Database
 *.db
 *.sqlite
