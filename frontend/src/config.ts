@@ -10,13 +10,13 @@ const runtimeDetectHttpBase = (): string => {
     const loc = window.location;
     const host = loc.hostname;
     const isLocal = host === 'localhost' || host === '127.0.0.1';
-    // Allow optional port override; default to 8000
-    const configuredPort = (import.meta.env.VITE_BACKEND_PORT as string | undefined) || '8000';
-    const port = isLocal ? '8000' : configuredPort;
+    // Allow optional port override; default to 8001
+    const configuredPort = (import.meta.env.VITE_BACKEND_PORT as string | undefined) || '8001';
+    const port = isLocal ? '8001' : configuredPort;
     return trimTrailingSlash(`${loc.protocol}//${host}:${port}`);
   } catch {
     // 3) Final fallback for SSR/build contexts
-    return 'http://localhost:8000';
+    return 'http://localhost:8001';
   }
 };
 
@@ -28,7 +28,7 @@ const deriveWsUrl = (httpUrl: string): string => {
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     return trimTrailingSlash(url.toString());
   } catch {
-    return 'ws://localhost:8000';
+    return 'ws://localhost:8001';
   }
 };
 

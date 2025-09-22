@@ -279,7 +279,7 @@ async def run_cli(args: argparse.Namespace) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CLI research monitor for UAgent")
-    parser.add_argument("--host", default="http://127.0.0.1:8000", help="Backend host URL (HTTP)")
+    parser.add_argument("--host", default="http://127.0.0.1:8001", help="Backend host URL (HTTP)")
     parser.add_argument("--session", help="Attach to an existing session id")
     parser.add_argument("--query", help="Start a new research session with the provided prompt")
     args = parser.parse_args(argv)
