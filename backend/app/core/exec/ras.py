@@ -12,6 +12,7 @@ StepKind = Literal[
     "evaluate_artifacts",
     "write_report",
     "code_edit",
+    "multi_agent_debate",
 ]
 
 
@@ -27,4 +28,3 @@ class ResearchActionSpec(BaseModel):
     steps: List[Step]
     matrix: Optional[Dict[str, List[object]]] = None
     assertions: Optional[List[Dict[str, object]]] = None
-

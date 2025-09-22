@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import textwrap
 import uuid
@@ -22,6 +23,40 @@ from ...integrations.openhands_bridge import (
     GoalPlanStep,
 )
 from ...utils.json_utils import JsonParseError, safe_json_loads
+from ...debate import (
+    DebateManager,
+    DebateConfig,
+    DebaterConfig,
+    DebatePolicy,
+    should_debate,
+)
+from ...debate.debate_manager import DEFAULT_RUBRIC as DEFAULT_DEBATE_RUBRIC
+from ...memory import AgentMemory
+
+IDEA_PROMPT_TEMPLATE = (
+    "Generate up to {max_ideas} distinct, high-impact research ideas that could address the "
+    "following scientific problem:\n\n\"{research_question}\"\n\n"
+    "Respond **only** with JSON array. Each idea object must provide:\n"
+    "- \"id\": short slug (lowercase, hyphen/underscore allowed)\n"
+    "- \"title\": concise descriptive title\n"
+    "- \"summary\": 2-3 sentence overview\n"
+    "- \"objective\": primary scientific objective or hypothesis\n"
+    "- \"plan\": proposed experimental or analytical plan in 3-4 bullet sentences\n"
+    "- \"search_queries\": list of 2-4 search queries that should be investigated further\n\n"
+    "Ensure ideas are mutually distinct and feasible for an academic research lab. Do not include "
+    "narrative outside JSON."
+)
+
+try:  # GEPA is optional and only instantiated when dependencies exist
+    from ...optim.gepa_optimizer import GEPAOptimizer, GEPAConfig
+    from ...optim.meta_optimizer import MetaOptimizer, MetaOptConfig
+except ImportError:  # pragma: no cover - graceful fallback when dspy/gepa absent
+    GEPAOptimizer = None  # type: ignore
+    GEPAConfig = None  # type: ignore
+    MetaOptimizer = None  # type: ignore
+    MetaOptConfig = None  # type: ignore
+
+IdeaGenerationProgram = None
 
 
 class ExperimentStatus(Enum):
@@ -172,7 +207,8 @@ class ScientificResearchResult:
     reproducibility_report: Dict[str, Any]
     publication_draft: str
     iteration_count: int
-    recommendations: List[str]
+    debates: List[Dict[str, Any]] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
     ideas: List[ResearchIdea] = field(default_factory=list)
     idea_evaluations: Dict[str, IdeaEvaluation] = field(default_factory=dict)
     selected_idea_id: Optional[str] = None
@@ -1198,6 +1234,49 @@ class ScientificResearchEngine:
             else None
         )
 
+        # Optional GEPA meta-optimizer (requires dspy/gepa packages)
+        self.meta_optimizer = None
+        self._gepa_enabled = self._to_bool(self._env_or_config("gepa_enabled", "GEPA_ENABLED", False))
+        if self._gepa_enabled and all(x is not None for x in (GEPAOptimizer, GEPAConfig, MetaOptimizer, MetaOptConfig)):
+            try:
+                gepa_cfg = GEPAConfig(
+                    max_metric_calls=self._to_int(
+                        self._env_or_config("gepa_max_metric_calls", "GEPA_MAX_METRIC_CALLS", 150)
+                    ),
+                    reflection_lm=str(
+                        self._env_or_config("gepa_reflection_lm", "GEPA_REFLECTION_LM", "openai/gpt-5")
+                    ),
+                    task_lm=str(self._env_or_config("gepa_task_lm", "GEPA_TASK_LM", "openai/gpt-4.1-mini")),
+                    min_delta=self._to_float(
+                        self._env_or_config("gepa_min_delta", "GEPA_MIN_DELTA", 0.02)
+                    ),
+                )
+                meta_cfg = MetaOptConfig(
+                    trigger_threshold=self._to_float(
+                        self._env_or_config("gepa_trigger_threshold", "GEPA_TRIGGER_THRESHOLD", 0.5)
+                    ),
+                    enabled=True,
+                )
+                self.meta_optimizer = MetaOptimizer(GEPAOptimizer(gepa_cfg), meta_cfg)
+                self.logger.info(
+                    "GEPA meta-optimizer initialised (max_metric_calls=%s, min_delta=%.3f)",
+                    gepa_cfg.max_metric_calls,
+                    gepa_cfg.min_delta,
+                )
+            except Exception as exc:  # pragma: no cover - defensive, dependency issues
+                self.logger.warning("GEPA optimizer unavailable: %s", exc)
+                self.meta_optimizer = None
+        elif self._gepa_enabled:
+            self.logger.warning(
+                "GEPA requested but dependencies missing; install dspy-ai>=2.6.0 and gepa>=0.2.0"
+            )
+
+        self._idea_prompt_template = IDEA_PROMPT_TEMPLATE
+        self._idea_program = None
+        self._gepa_traces: Dict[str, List[Dict[str, Any]]] = {"idea_generation": []}
+        self._gepa_last_reward: Dict[str, float] = {"idea_generation": 1.0}
+        self._gepa_dataset_limit = self._to_int(self.config.get("gepa_dataset_limit", 64))
+
         # Configuration
         self.max_iterations = self.config.get("max_iterations", 3)
         self.confidence_threshold = self.config.get("confidence_threshold", 0.8)
@@ -1215,6 +1294,30 @@ class ScientificResearchEngine:
         self._openhands_session_lock = asyncio.Lock()
         self._openhands_session_semaphore = asyncio.Semaphore(max(1, pool_limit))
         self._openhands_sessions: Dict[str, OpenHandsSessionContext] = {}
+
+        # Debate & memory integration
+        memory_store = self.config.get("memory_store")
+        self.memory_store: Optional[AgentMemory] = memory_store if isinstance(memory_store, AgentMemory) else None
+
+        self._debate_enabled = self._to_bool(self.config.get("debate_enabled", True))
+        self._debate_policy = DebatePolicy(
+            min_confidence=float(self.config.get("debate_trigger_confidence", 0.65)),
+            stakes=str(self.config.get("debate_trigger_stakes", "high")),
+        )
+        self._debate_defaults = {
+            "num_agents": int(self.config.get("debate_max_agents", 4)),
+            "num_rounds": int(self.config.get("debate_max_rounds", 2)),
+            "groups": int(self.config.get("debate_groups", 1)),
+        }
+        try:
+            self.debate_manager: Optional[DebateManager] = DebateManager(
+                self.llm_client,
+                memory=self.memory_store,
+                websocket_manager=None,
+            ) if self._debate_enabled else None
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning("Debate manager unavailable: %s", exc)
+            self.debate_manager = None
 
     def _get_root_node_id(self, session_id: Optional[str]) -> str:
         if not session_id:
@@ -1355,58 +1458,90 @@ class ScientificResearchEngine:
             base = fallback or f"idea-{uuid.uuid4().hex[:6]}"
         return base[:40]
 
-    def _max_parallel_ideas(self, total: int) -> int:
-        configured = int(self.config.get("max_parallel_ideas", 2))
-        return max(1, min(configured, max(1, total)))
+    def _env_or_config(self, key: str, env_key: str, default: Any) -> Any:
+        if isinstance(self.config, dict) and key in self.config:
+            return self.config[key]
+        env_val = os.getenv(env_key)
+        return env_val if env_val is not None else default
 
-    async def _generate_research_ideas(
-        self,
-        research_question: str,
-        session_id: Optional[str],
-    ) -> List[ResearchIdea]:
-        max_ideas = int(self.config.get("max_ideas", 3))
-        idea_prompt = f"""
-Generate up to {max_ideas} distinct, high-impact research ideas that could address the following scientific problem:
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
 
-"{research_question}"
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
-Respond **only** with JSON array. Each idea object must provide:
-- "id": short slug (lowercase, hyphen/underscore allowed)
-- "title": concise descriptive title
-- "summary": 2-3 sentence overview
-- "objective": primary scientific objective or hypothesis
-- "plan": proposed experimental or analytical plan in 3-4 bullet sentences
-- "search_queries": list of 2-4 search queries that should be investigated further
+    @staticmethod
+    def _to_float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
-Ensure ideas are mutually distinct and feasible for an academic research lab. Do not include narrative outside JSON.
-"""
-
-        response = await self.llm_client.generate(
-            idea_prompt,
-            max_tokens=1200,
-            temperature=self.config.get("idea_generation_temperature", 0.6),
+    def _format_idea_prompt(self, question: str, max_ideas: int) -> str:
+        return self._idea_prompt_template.format(
+            max_ideas=max(1, max_ideas),
+            research_question=question,
         )
 
-        parsed = self._safe_parse_json_block(response)
-
-        ideas: List[ResearchIdea] = []
+    @staticmethod
+    def _idea_response_to_dicts(response: str, max_ideas: int) -> List[Dict[str, Any]]:
+        parsed = ScientificResearchEngine._safe_parse_json_block(response)
+        if not isinstance(parsed, list):
+            try:
+                parsed = json.loads(response)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+        ideas_raw: List[Dict[str, Any]] = []
         if isinstance(parsed, list):
             for item in parsed[:max_ideas]:
-                if not isinstance(item, dict):
-                    continue
-                raw_id = item.get("id") or item.get("title") or item.get("summary")
-                idea_id = self._normalize_idea_id(raw_id or research_question, fallback=f"idea-{len(ideas)+1}")
-                idea = ResearchIdea(
+                if isinstance(item, dict):
+                    ideas_raw.append({
+                        "id": item.get("id"),
+                        "title": item.get("title"),
+                        "summary": item.get("summary"),
+                        "objective": item.get("objective"),
+                        "plan": item.get("plan"),
+                        "search_queries": item.get("search_queries"),
+                    })
+        return ideas_raw
+
+    def _build_research_ideas_from_dicts(
+        self,
+        idea_dicts: List[Dict[str, Any]],
+        research_question: str,
+        max_ideas: int,
+    ) -> List[ResearchIdea]:
+        ideas: List[ResearchIdea] = []
+        for idx, item in enumerate(idea_dicts[:max_ideas], start=1):
+            raw_id = item.get("id") or item.get("title") or item.get("summary")
+            idea_id = self._normalize_idea_id(raw_id or research_question, fallback=f"idea-{idx}")
+            raw_queries = item.get("search_queries")
+            if not isinstance(raw_queries, list):
+                raw_queries = []
+            queries = [str(q).strip() for q in raw_queries if str(q).strip()]
+            if not queries:
+                queries = [item.get("title") or research_question]
+            ideas.append(
+                ResearchIdea(
                     id=idea_id,
-                    title=item.get("title", f"Idea {len(ideas)+1}"),
+                    title=item.get("title", f"Idea {idx}"),
                     summary=item.get("summary", "Proposed research direction"),
                     objective=item.get("objective", research_question),
                     plan=item.get("plan", ""),
-                    search_queries=[q.strip() for q in item.get("search_queries", []) if isinstance(q, str) and q.strip()],
+                    search_queries=queries,
                 )
-                if not idea.search_queries:
-                    idea.search_queries = [idea.title, research_question]
-                ideas.append(idea)
+            )
 
         if not ideas:
             fallback_id = self._normalize_idea_id(research_question, fallback="idea-core")
@@ -1420,6 +1555,204 @@ Ensure ideas are mutually distinct and feasible for an academic research lab. Do
                     search_queries=[research_question, f"state of the art {research_question}"],
                 )
             ]
+        return ideas
+
+    @staticmethod
+    def _idea_to_dict(idea: ResearchIdea) -> Dict[str, Any]:
+        return {
+            "title": idea.title,
+            "summary": idea.summary,
+            "objective": idea.objective,
+            "plan": idea.plan,
+            "search_queries": list(idea.search_queries),
+        }
+
+    @staticmethod
+    def _score_research_ideas(ideas: List[ResearchIdea], max_ideas: int) -> float:
+        if not ideas:
+            return 0.0
+        max_ideas = max(1, max_ideas)
+        quantity = min(1.0, len(ideas) / max_ideas)
+        plan_coverage = sum(1 for idea in ideas if idea.plan and idea.plan.strip()) / len(ideas)
+        query_coverage = sum(1 for idea in ideas if idea.search_queries) / len(ideas)
+        summary_quality = sum(
+            1 for idea in ideas if idea.summary and len(idea.summary.split()) >= 10
+        ) / len(ideas)
+        uniqueness = len({idea.title.lower() for idea in ideas if idea.title}) / len(ideas)
+        score = (
+            0.35 * quantity
+            + 0.25 * plan_coverage
+            + 0.20 * summary_quality
+            + 0.20 * uniqueness
+        )
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _score_idea_dicts(ideas: List[Dict[str, Any]], max_ideas: int) -> float:
+        temp_ideas = [
+            ResearchIdea(
+                id=f"tmp-{idx}",
+                title=data.get("title", ""),
+                summary=data.get("summary", ""),
+                objective=data.get("objective", ""),
+                plan=data.get("plan", ""),
+                search_queries=[
+                    str(q).strip() for q in data.get("search_queries", []) if str(q).strip()
+                ],
+            )
+            for idx, data in enumerate(ideas, start=1)
+        ]
+        return ScientificResearchEngine._score_research_ideas(temp_ideas, max_ideas)
+
+    def _record_gepa_example(
+        self,
+        stage: str,
+        question: str,
+        prompt_used: str,
+        ideas: List[Dict[str, Any]],
+        score: float,
+    ) -> None:
+        if not self.meta_optimizer:
+            return
+        entry = {
+            "question": question,
+            "prompt": prompt_used,
+            "ideas": ideas,
+            "score": float(score),
+        }
+        traces = self._gepa_traces.setdefault(stage, [])
+        traces.append(entry)
+        if len(traces) > self._gepa_dataset_limit:
+            del traces[0 : len(traces) - self._gepa_dataset_limit]
+
+    async def _generate_ideas_with_prompt(
+        self,
+        question: str,
+        max_ideas: int,
+    ) -> Tuple[str, str, bool]:
+        if self._idea_program is not None:
+            try:
+                result = await asyncio.to_thread(self._idea_program_forward, question)
+                if isinstance(result, dict):
+                    raw = result.get("raw", "")
+                    prompt_used = result.get("prompt", self._idea_prompt_template)
+                else:
+                    raw = str(result)
+                    prompt_used = self._idea_prompt_template
+                if raw:
+                    return raw, prompt_used, True
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.warning("GEPA idea program failed, falling back: %s", exc)
+
+        prompt_used = self._format_idea_prompt(question, max_ideas)
+        response = await self.llm_client.generate(
+            prompt_used,
+            max_tokens=1200,
+            temperature=self.config.get("idea_generation_temperature", 0.6),
+        )
+        return response, prompt_used, False
+
+    def _idea_program_forward(self, question: str) -> Dict[str, Any]:
+        sample = {"question": question}
+        result = self._idea_program(sample)  # type: ignore[operator]
+        if isinstance(result, dict):
+            return result
+        return {"raw": str(result), "prompt": self._idea_prompt_template, "ideas": []}
+
+    def _run_gepa_opt(
+        self,
+        stage: str,
+        dataset: List[Dict[str, Any]],
+        last_reward: float,
+        max_ideas: int,
+    ) -> None:
+        if not self.meta_optimizer or stage != "idea_generation":
+            return
+        min_examples = self._to_int(self.config.get("gepa_min_examples", 6))
+        if len(dataset) < min_examples:
+            return
+
+        val_size = max(1, len(dataset) // 5)
+        valset = dataset[:val_size]
+        trainset = dataset[val_size:]
+        if not trainset or not valset:
+            return
+
+        def program_ctor():
+            if IdeaGenerationProgram is None:
+                raise RuntimeError("GEPA optimizer unavailable (dspy not installed)")
+            return IdeaGenerationProgram(self.llm_client, max_ideas, self._idea_prompt_template)
+
+        def metric_fn(example: Any, prediction: Any) -> float:
+            ideas = prediction.get("ideas", []) if isinstance(prediction, dict) else []
+            return ScientificResearchEngine._score_idea_dicts(ideas, max_ideas)
+
+        compiled, info = self.meta_optimizer.maybe_improve_program(
+            last_reward=last_reward,
+            program_ctor=program_ctor,
+            trainset=trainset,
+            valset=valset,
+            metric_fn=metric_fn,
+            lm_conf={},
+        )
+        if compiled is not None and info and info.get("accepted"):
+            self._idea_program = compiled
+            self.logger.info(
+                "[GEPA] Adopted idea-generation program (val_gain=%.4f)",
+                float(info.get("val_gain", 0.0)),
+            )
+
+    async def _maybe_run_gepa(self, stage: str, last_reward: float, max_ideas: int) -> None:
+        """Trigger GEPA optimisation asynchronously when sufficient traces exist."""
+
+        if not self.meta_optimizer:
+            return
+
+        dataset = self._gepa_traces.get(stage)
+        if not dataset:
+            return
+
+        if len(dataset) < self._to_int(self.config.get("gepa_min_examples", 6)):
+            return
+
+        await asyncio.to_thread(
+            self._run_gepa_opt,
+            stage,
+            list(dataset),
+            float(last_reward),
+            max_ideas,
+        )
+
+    def _max_parallel_ideas(self, total: int) -> int:
+        configured = int(self.config.get("max_parallel_ideas", 2))
+        return max(1, min(configured, max(1, total)))
+
+    async def _generate_research_ideas(
+        self,
+        research_question: str,
+        session_id: Optional[str],
+    ) -> List[ResearchIdea]:
+        max_ideas = int(self.config.get("max_ideas", 3))
+        await self._maybe_run_gepa(
+            stage="idea_generation",
+            last_reward=self._gepa_last_reward.get("idea_generation", 0.0),
+            max_ideas=max_ideas,
+        )
+
+        response, prompt_used, _ = await self._generate_ideas_with_prompt(research_question, max_ideas)
+        idea_dicts = self._idea_response_to_dicts(response, max_ideas)
+        ideas = self._build_research_ideas_from_dicts(idea_dicts, research_question, max_ideas)
+
+        idea_dataset_entry = [self._idea_to_dict(idea) for idea in ideas]
+        idea_score = self._score_research_ideas(ideas, max_ideas)
+        self._gepa_last_reward["idea_generation"] = idea_score
+        self._record_gepa_example(
+            "idea_generation",
+            research_question,
+            prompt_used,
+            idea_dataset_entry,
+            idea_score,
+        )
 
         if session_id:
             parent_id = await self._log_progress(
@@ -1999,6 +2332,38 @@ Return JSON only.
         evaluated.sort(key=_idea_sort_key, reverse=True)
         return evaluated[0]
 
+    def _compute_disagreement(self, ideas: List[ResearchIdea]) -> float:
+        evaluated = [idea for idea in ideas if idea.evaluation]
+        if len(evaluated) < 2:
+            return 0.0
+        scores = sorted(
+            (idea.evaluation.overall_score for idea in evaluated if idea.evaluation),
+            reverse=True,
+        )
+        if len(scores) < 2:
+            return 0.0
+        top, second = scores[0], scores[1]
+        if top == 0:
+            return 0.0
+        diff = abs(top - second) / max(top, 1e-6)
+        return float(1.0 - min(diff, 1.0))  # large diff => low disagreement
+
+    def _default_debaters(self) -> List[DebaterConfig]:
+        return [
+            DebaterConfig(role="proposer", style="thorough", temperature=0.5),
+            DebaterConfig(role="critic", style="concise", temperature=0.6),
+            DebaterConfig(role="skeptic", style="concise", temperature=0.6),
+            DebaterConfig(role="safety", style="conservative", temperature=0.4),
+        ]
+
+    def _make_debate_config(self) -> DebateConfig:
+        return DebateConfig(
+            num_agents=self._debate_defaults.get("num_agents", 4),
+            num_rounds=self._debate_defaults.get("num_rounds", 2),
+            groups=max(1, self._debate_defaults.get("groups", 1)),
+            rubric=DEFAULT_DEBATE_RUBRIC,
+        )
+
     async def _process_idea(
         self,
         idea: ResearchIdea,
@@ -2160,7 +2525,8 @@ Return JSON only.
             reproducibility_report={},
             publication_draft="",
             iteration_count=0,
-            recommendations=[]
+            recommendations=[],
+            debates=[]
         )
 
         enable_iteration = bool(enable_iteration and self.config.get("enable_iteration", True))
@@ -2208,6 +2574,44 @@ Return JSON only.
                 reverse=True,
             )
 
+            debate_record: Optional[Dict[str, Any]] = None
+            if self.debate_manager and self._debate_enabled and ranking:
+                top_score = ranking[0].evaluation.overall_score if ranking[0].evaluation else 0.0
+                signals = {
+                    "confidence": float(top_score) / 10.0 if top_score else 0.0,
+                    "stakes": "high",
+                    "disagreement_score": self._compute_disagreement(ranking),
+                    "rl_uncertainty": 0.0,
+                }
+                if should_debate(signals, self._debate_policy):
+                    topic = f"Select the best research idea for: {research_question}"
+                    context_payload = {
+                        "ideas": [
+                            {
+                                "id": idea.id,
+                                "title": idea.title,
+                                "summary": idea.summary,
+                                "overall_score": idea.evaluation.overall_score if idea.evaluation else None,
+                                "confidence": idea.confidence_score,
+                            }
+                            for idea in ranking
+                        ],
+                    }
+                    debate_cfg = self._make_debate_config()
+                    debaters = self._default_debaters()
+                    try:
+                        debate_record = await self.debate_manager.run(
+                            topic,
+                            context_payload,
+                            debate_cfg,
+                            debaters,
+                            session_id=session_id,
+                        )
+                        if result:
+                            result.debates.append(debate_record)
+                    except Exception as exc:
+                        self.logger.warning("Debate execution failed: %s", exc)
+
             if session_id:
                 await self._log_progress(
                     session_id,
@@ -2244,6 +2648,17 @@ Return JSON only.
                 result.results = best_idea.results
                 result.iteration_count = best_idea.iteration_count
                 result.confidence_score = best_idea.confidence_score
+
+                if debate_record:
+                    verdict = debate_record.get("verdict", {})
+                    scores = verdict.get("scores", {}) or {}
+                    if scores:
+                        score_avg = sum(float(v) for v in scores.values() if isinstance(v, (int, float)))
+                        score_avg /= max(len(scores), 1)
+                        result.confidence_score = max(result.confidence_score, min(0.95, score_avg))
+                    recommendation = str(verdict.get("recommendation", "")).lower()
+                    if recommendation == "reject":
+                        result.confidence_score = min(result.confidence_score, 0.3)
 
                 if session_id and best_idea.node_id:
                     await self._log_progress(
@@ -2305,6 +2720,12 @@ Return JSON only.
                             parent_phase="synthesis",
                             node_type="result",
                         )
+                if self.memory_store and result.final_conclusions:
+                    await self.memory_store.add_semantic(
+                        "\n".join(result.final_conclusions[:3]),
+                        importance=0.65,
+                        tags={"research_id": research_id, "scope": "scientific_research"},
+                    )
             else:
                 result.final_conclusions = []
 
@@ -2858,3 +3279,36 @@ Return JSON only.
         consistency_bonus = 0.1 if len(successful_results) > 1 else 0.0
 
         return min(avg_confidence + consistency_bonus, 1.0)
+
+if GEPAOptimizer is not None:
+    import dspy  # type: ignore
+
+    class IdeaGenerationProgram(dspy.Module):
+        """DSPy module wrapping idea generation prompt for GEPA optimisation."""
+
+        def __init__(self, llm_client: LLMClient, max_ideas: int, template: str, temperature: float = 0.6):
+            super().__init__()
+            self.llm_client = llm_client
+            self.max_ideas = max(1, max_ideas)
+            self.base_template = template
+            self.temperature = temperature
+            self.prompt_param = dspy.Parameter(template)
+
+        def forward(self, sample: Any) -> Dict[str, Any]:
+            question = getattr(sample, "question", None)
+            if question is None and isinstance(sample, dict):
+                question = sample.get("question")
+            if question is None:
+                question = str(sample)
+
+            template = self.prompt_param.value or self.base_template
+            prompt_text = template.format(max_ideas=self.max_ideas, research_question=question)
+            response = asyncio.run(
+                self.llm_client.generate(
+                    prompt_text,
+                    max_tokens=1200,
+                    temperature=self.temperature,
+                )
+            )
+            idea_dicts = ScientificResearchEngine._idea_response_to_dicts(response, self.max_ideas)
+            return {"raw": response, "prompt": prompt_text, "ideas": idea_dicts}

@@ -99,6 +99,45 @@ class OpenHandsActionServerRunner:
             payload = {"action": action_dict}
             action_name = action_dict.get("action")
             args = dict(action_dict.get("args", {}))
+
+            # Remap file paths to the host workspace when the agent uses /workspace prefixes
+            def _remap_path(path_value: Optional[str]) -> Optional[str]:
+                if not path_value:
+                    return path_value
+                if os.path.isabs(path_value):
+                    if path_value.startswith("/workspace"):
+                        relative = path_value[len("/workspace"):].lstrip("/")
+                        return str((self._workspace_path / relative).resolve())
+                    return path_value
+                normalized = path_value.lstrip("./")
+                return str((self._workspace_path / normalized).resolve())
+                return path_value
+
+            if action_name in {"read", "write", "edit"}:
+                path_value = args.get("path")
+                remapped = _remap_path(path_value)
+                if remapped:
+                    args["path"] = remapped
+                if action_name == "write" and "start" not in args:
+                    args.setdefault("start", 1)
+                    args.setdefault("end", -1)
+                if action_name == "edit":
+                    file_text = args.get("file_text")
+                    if isinstance(file_text, str):
+                        args["file_text"] = file_text
+
+            if action_name == "run" and "command" in args and isinstance(args["command"], str):
+                command_text = args["command"]
+                if "/workspace" in command_text:
+                    command_text = command_text.replace(
+                        "/workspace/",
+                        str(self._workspace_path.resolve()) + "/",
+                    )
+                if "\n" in command_text or command_text.strip().startswith("#") or command_text.strip().startswith("{"):
+                    sanitized = command_text.strip().replace("'", "'\"'\"'")
+                    command_text = f"bash -lc '{sanitized}'"
+                args["command"] = command_text
+
             preview = {}
             for key in ("command", "path", "code", "file_text", "content"):
                 if key in args:

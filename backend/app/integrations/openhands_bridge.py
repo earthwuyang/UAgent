@@ -65,13 +65,14 @@ class OpenHandsGoalPlanBridge:
         self._bootstrap_goal = os.getenv(
             "CODEACT_BOOTSTRAP_GOAL",
             """
-Prepare the workspace for complex software experiments by ensuring the following:
-- Update package indexes and install mandatory build tools and system dependencies (git, build-essential, clang, cmake, ninja, make, libreadline-dev, zlib1g-dev, libssl-dev, python3-dev, python3-venv, pkg-config).
-- Install database tooling commonly required for data-intensive research (PostgreSQL server/client utilities, DuckDB CLI/Python package).
-- Initialize local runtime directories under the workspace (e.g., workspace/db/postgres, workspace/db/duckdb) and configure services to run on non-default ports (such as PostgreSQL on 55432) without requiring elevated privileges.
-- Set environment exports by writing a script (e.g., workspace/env.sh) that defines PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, DUCKDB_PATH, and ensure future commands source this script before running experiments.
-- Verify installations by printing version information (psql --version, duckdb --version, gcc --version) and confirming services respond to simple test queries.
-Follow safe practices (no sudo if not required, avoid destructive commands) and make changes idempotent so re-running the preparation does not fail.
+Prepare the workspace for complex software experiments **without** installing new system packages.
+- Do NOT run `apt-get`, `sudo`, or any other system package manager. Assume required toolchains already exist.
+- Inspect the current environment (e.g., versions of git, python, postgres, duckdb) and record findings in `workspace/env_report.txt`. If a tool is missing, note it clearly instead of attempting an install.
+- Create any runtime directories needed under the workspace (for example `workspace/db/postgres`, `workspace/db/duckdb`) and ensure permissions allow the current user to write there.
+- Generate a shell script `workspace/env.sh` exporting runtime variables such as PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, DUCKDB_PATH, etc., pointing them at workspace locations or reasonable defaults. This script must be idempotent and safe to source multiple times.
+- Where services are required (e.g., Postgres, DuckDB), prepare start-up scripts or document the commands needed using existing binaries, but do not attempt to install or start privileged daemons.
+- Finish by summarising the prepared resources and any gaps in `workspace/bootstrap_summary.md`.
+All actions must be idempotent and keep the workspace self-contained.
 """,
         )
 
@@ -263,6 +264,9 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps.
                     f"Goal: {plan.goal}\n"
                     f"Step description: {step.description}\n"
                     f"Expected output: {step.expected_output}\n"
+                    "Do not run `apt-get`, `sudo`, or any other system package manager commands unless really need to update system dependencies. "
+                    "Work strictly with the existing Python environment and workspace resources. Use relative paths inside the workspace (e.g., `collect_data.py` or `code/collect_data.py`) instead of absolute `/workspace` prefixes. "
+                    "If you need multiple shell commands, combine them into one `bash -lc \"cmd1 ; cmd2\"` invocation. "
                     "Do not rely on placeholders. Make concrete, runnable changes."
                 )
 

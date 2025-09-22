@@ -24,6 +24,7 @@ from .connectors import ArxivClient, CrossrefClient, OpenAlexClient, PubMedClien
 from .pipelines import ClaimVerifier, EvidenceRetriever, EvidenceSynthesizer
 from .services import ArtifactStore, PlaywrightCaptureService, QwenVisionAnalyzer, ResearchGraphService
 from .integrations.openhands_adapter import OpenHandsAppClient
+from .memory import AgentMemory, AVDBConfig
 
 
 # Configure logging
@@ -72,6 +73,22 @@ async def lifespan(app: FastAPI):
     # Initialize session manager
     session_manager = ResearchSessionManager()
 
+    # Optional agent memory
+    memory_store: Optional[AgentMemory] = None
+    avdb_path = os.getenv("AVDB_PATH")
+    if avdb_path:
+        try:
+            avdb_cfg = AVDBConfig(
+                db_path=avdb_path,
+                dim=int(os.getenv("AVDB_DIM", "384")),
+                importance_min=float(os.getenv("AVDB_IMPORTANCE_MIN", "0.35")),
+                max_age_days=int(os.getenv("AVDB_MAX_AGE_DAYS", "30")),
+            )
+            memory_store = AgentMemory(avdb_cfg)
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.warning("Agent memory unavailable: %s", exc)
+            memory_store = None
+
     # Initialize research engines
     deep_engine = DeepResearchEngine(llm_client)
     code_engine = CodeResearchEngine(
@@ -97,6 +114,13 @@ async def lifespan(app: FastAPI):
             "codeact_action_timeout": int(os.getenv("CODEACT_ACTION_TIMEOUT", "1800")),
             "experiment_repair_attempts": int(os.getenv("EXPERIMENT_REPAIR_ATTEMPTS", "3")),
             "default_openhands_resources": {},
+            "memory_store": memory_store,
+            "debate_enabled": os.getenv("DEBATE_ENABLED", "true").lower() != "false",
+            "debate_max_agents": int(os.getenv("DEBATE_MAX_AGENTS", "4")),
+            "debate_max_rounds": int(os.getenv("DEBATE_MAX_ROUNDS", "2")),
+            "debate_groups": int(os.getenv("DEBATE_GROUPS", "1")),
+            "debate_trigger_confidence": float(os.getenv("DEBATE_TRIGGER_CONFIDENCE", "0.65")),
+            "debate_trigger_stakes": os.getenv("DEBATE_TRIGGER_STAKES", "high"),
         }
     )
 
@@ -145,6 +169,7 @@ async def lifespan(app: FastAPI):
             "research_graph": research_graph,
             "browser_service": browser_service,
             "vision_analyzer": vision_analyzer,
+            "memory": memory_store,
         },
     })
 

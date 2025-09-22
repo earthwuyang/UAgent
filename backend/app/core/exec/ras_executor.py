@@ -42,11 +42,28 @@ class RASExecutor:
         # Placeholder execution loop; integrate with plugins if present
         results: List[Dict[str, Any]] = []
         for step in ras.steps:
-            results.append({"id": step.id, "kind": step.kind, "status": "planned"})
+            step_record: Dict[str, Any] = {"id": step.id, "kind": step.kind, "status": "planned"}
+            handler = self.plugins.get(step.kind) if self.plugins else None
+            if handler is not None:
+                try:
+                    outcome = await handler({
+                        "goal_id": goal_id,
+                        "node_id": node_id,
+                        "run_dir": run_dir,
+                    }, step.dict(by_alias=True))
+                    step_record.update({
+                        "status": "completed",
+                        "outcome": outcome,
+                    })
+                except Exception as exc:  # pragma: no cover - plugin failure
+                    step_record.update({
+                        "status": "failed",
+                        "error": str(exc),
+                    })
+            results.append(step_record)
 
         atomic_write_json(run_dir / "artifacts" / "exec_summary.json", {
             "granted": granted,
             "steps": [r for r in results],
         })
         return results
-
