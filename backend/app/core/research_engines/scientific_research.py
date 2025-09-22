@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import uuid
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -486,7 +487,10 @@ class ExperimentExecutor:
         self.openhands_client = openhands_client  # For actual code execution
         self.logger = logging.getLogger(__name__)
         self.config = config or {}
-        self.allow_simulation = bool(self.config.get("allow_simulated_experiments", False))
+        if self.config.get("allow_simulated_experiments"):
+            self.logger.warning(
+                "allow_simulated_experiments is deprecated and ignored; simulated runs are no longer supported"
+            )
         self.forbidden_code_tokens: List[str] = [
             token.lower()
             for token in self.config.get(
@@ -503,6 +507,16 @@ class ExperimentExecutor:
                 ],
             )
         ]
+        self.ras_spec_path: Optional[Path] = None
+        raw_ras = self.config.get("ras_spec_path")
+        if isinstance(raw_ras, str) and raw_ras.strip():
+            path = Path(raw_ras.strip())
+            if not path.is_absolute():
+                path = Path.cwd() / path
+            if path.exists():
+                self.ras_spec_path = path
+            else:
+                self.logger.warning("Configured ras_spec_path %s does not exist", path)
 
     @staticmethod
     def _clean_code_block(raw_code: str) -> str:
@@ -519,7 +533,7 @@ class ExperimentExecutor:
             raise RuntimeError("Generated experiment code is empty")
         lower = code.lower()
         flagged = [token for token in self.forbidden_code_tokens if token in lower]
-        if flagged and not self.allow_simulation:
+        if flagged:
             raise RuntimeError(
                 "Generated experiment code contains disallowed simulation markers: "
                 + ", ".join(flagged)
@@ -545,9 +559,9 @@ class ExperimentExecutor:
 
         prior_errors = list(prior_errors or [])
         try:
-            if not self.openhands_client and not self.allow_simulation:
+            if not self.openhands_client:
                 raise RuntimeError(
-                    "OpenHands client not configured; enable 'allow_simulated_experiments' to run without it"
+                    "OpenHands client not configured; simulated experiments are disabled"
                 )
 
             self.logger.info(f"Starting experiment execution: {design.name}")
@@ -570,11 +584,9 @@ class ExperimentExecutor:
                 setup_result = await self._setup_experiment_environment(design, session_context)
                 execution.logs.append(f"Environment setup: {setup_result}")
             else:
-                if not self.allow_simulation:
-                    raise RuntimeError(
-                        "OpenHands session unavailable for experiment execution and simulated runs are disabled"
-                    )
-                execution.logs.append("Simulated environment setup completed (simulation mode enabled)")
+                raise RuntimeError(
+                    "OpenHands session unavailable for experiment execution and simulations are not permitted"
+                )
 
             execution.progress = 0.3
 
@@ -582,7 +594,7 @@ class ExperimentExecutor:
             execution.logs.append(f"Attempt {attempt_number}: collecting experimental data")
 
             if self.openhands_client and session_context:
-                # Execute data collection code
+                # Execute data collection code (RAS plan preferred)
                 data_result = await self._collect_experimental_data(
                     design,
                     execution,
@@ -591,17 +603,9 @@ class ExperimentExecutor:
                 )
                 execution.output_data.update(data_result or {})
             else:
-                if self.openhands_client and not session_context:
-                    self.logger.debug(
-                        "OpenHands client configured but no session context supplied for %s",
-                        design.name,
-                    )
-                if not self.allow_simulation:
-                    raise RuntimeError(
-                        "Experiment execution requires OpenHands session; received none and simulations are disabled"
-                    )
-                data_result = await self._simulate_data_collection(design)
-                execution.output_data.update(data_result)
+                raise RuntimeError(
+                    "Experiment execution requires an OpenHands session and cannot proceed without one"
+                )
 
             success_flag = False
             if data_result:
@@ -750,11 +754,23 @@ Non-negotiable constraints:
 4. Save collected metrics under 'experiments/{design.id}/results'.
 5. Use only standard libraries or dependencies already available.
 6. Avoid external network calls.
+7. If the experiment requires multi-step command execution, author a ResearchActionSpec JSON (following backend/app/core/exec/ras.py) at 'experiments/{design.id}/ras_spec.json' that lists every fetch/build/run step plus required assertions so the orchestrator can execute it deterministically.
 {error_context}
 
 The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics derived from actual execution.
 """
         execution.intermediate_results.setdefault("data_collection_prompt", data_collection_prompt)
+
+
+        ras_result: Optional[Dict[str, Any]] = None
+        if self.ras_spec_path:
+            try:
+                ras_result = await self._run_ras_plan(design, execution, session_context)
+                if ras_result:
+                    return ras_result
+            except Exception as ras_exc:
+                self.logger.error("RAS execution failed: %s", ras_exc)
+                prior_errors.append(str(ras_exc))
 
         codeact_enabled = (
             self.config.get("use_codeact", True)
@@ -811,7 +827,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                     f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
                     f"followed by a compact JSON dict of results. Do not simulate, mock, or fabricate metrics. Do not use the words 'simulate', 'simulation', 'mock', 'placeholder', 'synthetic', 'random.uniform', or 'np.random'. "
                     f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
-                    f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run."
+                    f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run. "
+                    f"If a ResearchActionSpec JSON does not already exist at experiments/{design.id}/ras_spec.json, author one describing each command sequence, required capabilities, artifacts, and assertions so the orchestrator can execute the workflow autonomously."
                 )
 
                 outer_rounds = int(self.config.get("codeact_rounds", 3))
@@ -851,27 +868,107 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
         )
 
-    async def _simulate_data_collection(self, design: ExperimentDesign) -> Dict[str, Any]:
-        """Simulate data collection for testing when explicitly enabled."""
+    async def _run_ras_plan(
+        self,
+        design: ExperimentDesign,
+        execution: ExperimentExecution,
+        session_context: OpenHandsSessionContext,
+    ) -> Optional[Dict[str, Any]]:
+        if not self.ras_spec_path:
+            return None
+        workspace_path = self.openhands_client.workspace_manager.get_workspace_path(session_context.workspace_id)
+        if not workspace_path:
+            raise RuntimeError("OpenHands workspace path unavailable for RAS execution")
 
-        if not self.allow_simulation:
-            raise RuntimeError("Simulated experiments are disabled")
+        spec_payload: Optional[Dict[str, Any]] = None
+        spec_origin = None
 
-        import random
+        if self.ras_spec_path:
+            try:
+                spec_payload = json.loads(self.ras_spec_path.read_text(encoding="utf-8"))
+                spec_origin = str(self.ras_spec_path)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid RAS spec JSON at {self.ras_spec_path}: {exc}") from exc
+        else:
+            candidates = [
+                f"experiments/{design.id}/ras_spec.json",
+                f"experiments/{design.id}/plan/ras_spec.json",
+                "experiments/ras_spec.json",
+                "ras_spec.json",
+            ]
+            for rel_path in candidates:
+                try:
+                    content = await self.openhands_client.workspace_manager.read_file(
+                        session_context.workspace_id,
+                        rel_path,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.logger.debug("Failed to read candidate RAS spec %s: %s", rel_path, exc)
+                    continue
+                if not content:
+                    continue
+                try:
+                    spec_payload = json.loads(content)
+                    spec_origin = rel_path
+                    break
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"RAS spec at {rel_path} is not valid JSON: {exc}"
+                    ) from exc
 
-        data_points = design.data_collection_plan.get("samples", 100)
-        measurements = [random.gauss(50, 10) for _ in range(data_points)]
+        if spec_payload is None:
+            raise RuntimeError(
+                f"No ResearchActionSpec found. Create a JSON spec (see backend/app/core/exec/ras.py) "
+                f"at experiments/{design.id}/ras_spec.json describing the exact fetch/build/run steps "
+                "and required assertions before retrying."
+            )
 
-        return {
-            "success": True,
-            "data_points": data_points,
-            "measurements": measurements,
-            "metadata": {
-                "collection_method": "simulated",
-                "timestamp": datetime.now().isoformat(),
-                "variables": design.variables,
-            },
+        ras_spec = ResearchActionSpec.parse_obj(spec_payload)
+        ras_executor = RASExecutor(ws_mgr=self.openhands_client.workspace_manager)
+        run_dir = workspace_path
+
+        results = await ras_executor.execute(
+            ras=ras_spec,
+            run_dir=run_dir,
+            goal_id=design.id,
+            node_id=execution.id,
+        )
+
+        observations_path = run_dir / "artifacts" / "results" / "observations.jsonl"
+        model_path = run_dir / "artifacts" / "model.pkl"
+        if not observations_path.exists():
+            raise RASExecutionError("RAS plan completed without observations.jsonl")
+
+        bench_summary: Dict[str, Any] = {
+            "observations_path": str(observations_path),
+            "model_path": str(model_path) if model_path.exists() else None,
+            "ras_steps": results,
+            "ras_spec_origin": spec_origin,
         }
+
+        assertions_path = run_dir / "artifacts" / "assertions.json"
+        if assertions_path.exists():
+            try:
+                bench_summary["assertions"] = json.loads(assertions_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                self.logger.warning("Failed to parse RAS assertions: %s", exc)
+
+        try:
+            latencies = []
+            for line in observations_path.read_text(encoding="utf-8").splitlines():
+                payload = json.loads(line)
+                latencies.append({
+                    "sql_id": payload.get("sql_id"),
+                    "winner": payload.get("winner"),
+                    "pg_ms": payload.get("latency_ms", {}).get("pg"),
+                    "duck_ms": payload.get("latency_ms", {}).get("duck"),
+                })
+            bench_summary["latencies"] = latencies
+        except Exception as exc:  # pragma: no cover - defensive parsing
+            self.logger.warning("Failed to parse observations: %s", exc)
+
+        bench_summary["success"] = True
+        return bench_summary
 
     async def _analyze_experimental_data(self, design: ExperimentDesign, data: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze experimental data"""
@@ -2459,6 +2556,11 @@ Return JSON only.
                 if res.status == ExperimentStatus.COMPLETED and res.data.get("success")
             ]
 
+            if not successful_results:
+                raise RuntimeError(
+                    "INSUFFICIENT_EVIDENCE: no completed experiments produced success metrics"
+                )
+
             if successful_results:
                 result.final_conclusions = result.synthesis.get("conclusions", [])
 
@@ -3068,3 +3170,5 @@ if GEPAOptimizer is not None:
             )
             idea_dicts = ScientificResearchEngine._idea_response_to_dicts(response, self.max_ideas)
             return {"raw": response, "prompt": prompt_text, "ideas": idea_dicts}
+from ..exec.ras import ResearchActionSpec
+from ..exec.ras_executor import RASExecutor, RASExecutionError

@@ -129,7 +129,9 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps.
 """
 
         response = await self._llm_client.generate(plan_prompt, max_tokens=700, temperature=0.3)
-        parsed = _safe_json_loads(response) or {}
+        parsed = _safe_json_loads(response)
+        if not isinstance(parsed, dict):
+            raise RuntimeError("OpenHands plan generation returned non-dict payload; refusing fallback")
 
         steps: List[GoalPlanStep] = []
         for raw in parsed.get("steps", []) or []:
@@ -145,13 +147,7 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps.
             steps.append(step)
 
         if not steps:
-            steps = [
-                GoalPlanStep(
-                    id="step-1",
-                    description="Implement baseline experiment script",
-                    expected_output="Python script that collects and logs experimental results",
-                )
-            ]
+            raise RuntimeError("OpenHands plan generation produced zero valid steps")
 
         plan = GoalPlan(
             plan_id=f"plan_{uuid.uuid4().hex[:8]}",

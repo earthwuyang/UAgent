@@ -283,6 +283,18 @@ class OpenHandsActionServerRunner:
         env["SESSION_API_KEY"] = session_api_key
         env.setdefault("PYTHONUNBUFFERED", "1")
 
+        workspace_mount = f"{workspace_path}:/workspace:rw"
+        sandbox_volumes = env.get("SANDBOX_VOLUMES")
+        if sandbox_volumes:
+            if workspace_mount not in sandbox_volumes.split(","):
+                env["SANDBOX_VOLUMES"] = f"{workspace_mount},{sandbox_volumes}"
+        else:
+            env["SANDBOX_VOLUMES"] = workspace_mount
+        try:
+            env["SANDBOX_USER_ID"] = str(os.getuid())
+        except AttributeError:
+            env.setdefault("SANDBOX_USER_ID", "1000")
+
         username = _lookup_username()
         try:
             user_id = os.getuid()

@@ -121,6 +121,7 @@ async def lifespan(app: FastAPI):
             "debate_groups": int(os.getenv("DEBATE_GROUPS", "1")),
             "debate_trigger_confidence": float(os.getenv("DEBATE_TRIGGER_CONFIDENCE", "0.65")),
             "debate_trigger_stakes": os.getenv("DEBATE_TRIGGER_STAKES", "high"),
+            "ras_spec_path": os.getenv("SCIENTIFIC_RAS_SPEC"),
         }
     )
 
