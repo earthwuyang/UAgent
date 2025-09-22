@@ -176,19 +176,14 @@ class CodeActRunner:
         params: Dict[str, str],
         timeout: int,
     ) -> Tuple[str, bool]:
-        from openhands.events.action.commands import CmdRunAction, IPythonRunCellAction  # type: ignore
-        from openhands.events.action.files import FileEditAction, FileReadAction, FileWriteAction  # type: ignore
-        from openhands.events.event import FileReadSource, FileEditSource  # type: ignore
-
+        # No OpenHands imports in parent; use Session helpers that build raw action dicts
         try:
             if func == "execute_bash":
                 cmd = params.get("command", "")
-                action = CmdRunAction(command=cmd)
-                result = await session.send_action(action, timeout=timeout)
-                obs = result.raw_observation
+                res = await session.run_cmd(cmd, timeout=timeout, blocking=True)
+                obs = res.raw_observation
                 content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
-                ok = result.execution_result.success
-                return content, ok
+                return content, res.execution_result.success
 
             if func == "str_replace_editor":
                 command = params.get("command", "").strip()
@@ -210,28 +205,27 @@ class CodeActRunner:
                             False,
                         )
                 if command == "view":
-                    action = FileReadAction(path=path, impl_source=FileReadSource.OH_ACI)
-                    res = await session.send_action(action, timeout=timeout)
+                    res = await session.file_read(path, timeout=timeout)
                     obs = res.raw_observation
                     content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
                     return content, res.execution_result.success
 
-                kwargs: Dict[str, Any] = {"path": path, "impl_source": FileEditSource.OH_ACI, "command": command}
-                for key in ("file_text", "old_str", "new_str"):
-                    if key in params:
-                        kwargs[key] = params[key]
-                if "insert_line" in params:
-                    kwargs["insert_line"] = params["insert_line"]
-                action = FileEditAction(**kwargs)
-                res = await session.send_action(action, timeout=timeout)
+                res = await session.file_edit(
+                    path,
+                    command,
+                    file_text=params.get("file_text"),
+                    old_str=params.get("old_str"),
+                    new_str=params.get("new_str"),
+                    insert_line=int(params.get("insert_line")) if params.get("insert_line") else None,
+                    timeout=timeout,
+                )
                 obs = res.raw_observation
                 content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
                 return content, res.execution_result.success
 
             if func == "file_read":
                 path = params.get("path", "").strip()
-                action = FileReadAction(path=path, impl_source=FileReadSource.OH_ACI)
-                res = await session.send_action(action, timeout=timeout)
+                res = await session.file_read(path, timeout=timeout)
                 obs = res.raw_observation
                 content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
                 return content, res.execution_result.success
@@ -239,16 +233,14 @@ class CodeActRunner:
             if func == "write":
                 path = params.get("path", "").strip()
                 content_text = params.get("content", "")
-                action = FileEditAction(path=path, command="write", content=content_text, impl_source=FileEditSource.OH_ACI)
-                res = await session.send_action(action, timeout=timeout)
+                res = await session.file_write(path, content_text, timeout=timeout)
                 obs = res.raw_observation
                 content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
                 return content, res.execution_result.success
 
             if func == "ipython_run":
                 code = params.get("code", "")
-                action = IPythonRunCellAction(code=code)
-                res = await session.send_action(action, timeout=timeout)
+                res = await session.ipython_run(code, timeout=timeout)
                 obs = res.raw_observation
                 content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
                 return content, res.execution_result.success

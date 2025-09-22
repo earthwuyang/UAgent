@@ -803,32 +803,14 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                 # If CodeAct is available but errored, return failure rather than falling back to LLM.
                 return {"success": False, "error": f"CodeAct flow error: {exc}"}
 
-        async def _gen_code(prompt: str) -> str:
-            try:
-                self.logger.debug(
-                    "[OpenHands:%s] Qwen prompt (data collection): %s",
-                    session_id,
-                    prompt[:4000],
-                )
-                resp = await self.llm_client.generate(prompt)
-                self.logger.debug(
-                    "[OpenHands:%s] Qwen response (data collection): %s",
-                    session_id,
-                    str(resp)[:4000],
-                )
-                return textwrap.dedent(self._clean_code_block(str(resp))).strip()
-            except Exception as exc:
-                self.logger.error("Failed to generate experimental code: %s", exc)
-                return ""
+        # If CodeAct was not available or did not produce a final result, refuse legacy
+        # direct LLM code generation for experiments. Require CodeAct to handle retries.
+        raise RuntimeError(
+            "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
+        )
 
-        cleaned_code = await _gen_code(data_collection_prompt + "\n\nIMPORTANT: Do not simulate or mock; avoid the tokens: simulate, simulation, mock, placeholder, synthetic, random.uniform, np.random. Return code that collects real metrics.")
-        if not cleaned_code:
-            raise RuntimeError("Experiment code generation returned no code")
-        self._validate_generated_code(cleaned_code)
-        try:
-            compile(cleaned_code, "<generated_experiment>", "exec")
-        except SyntaxError as exc:
-            raise RuntimeError(f"Generated experiment code failed syntax check: {exc}") from exc
+        # Unreachable after the change above; kept for context but not executed.
+        cleaned_code = ""
 
         indented_code = textwrap.indent(cleaned_code, "    ")
 
@@ -970,19 +952,8 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             # Prepare next attempt with error feedback
             error_snippet = (execution_result.stderr or stdout_text)[-2000:]
             prior_errors.append(error_snippet)
-            fix_prompt = (
-                data_collection_prompt
-                + "\n\nObserved issue to fix (including syntax/lint):\n" + error_snippet
-                + "\n\nRegenerate a corrected version that compiles and runs. Do not simulate or mock; avoid the tokens: simulate, simulation, mock, placeholder, synthetic, random.uniform, np.random."
-            )
-            cleaned_code = await _gen_code(fix_prompt)
-            if not cleaned_code:
-                raise RuntimeError("Experiment code regeneration returned no code")
-            self._validate_generated_code(cleaned_code)
-            try:
-                compile(cleaned_code, "<generated_experiment_retry>", "exec")
-            except SyntaxError as exc:
-                raise RuntimeError(f"Regenerated experiment code invalid: {exc}") from exc
+            # Direct regeneration disabled; CodeAct should be responsible for retries
+            raise RuntimeError("Experiment repair requires CodeAct; legacy regeneration disabled")
             indented_code = textwrap.indent(cleaned_code, "    ")
             script_core = (
                 "import json\n"

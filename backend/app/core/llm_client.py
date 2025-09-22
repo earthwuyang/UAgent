@@ -2,6 +2,10 @@
 
 import json
 import logging
+import os
+import asyncio
+import random
+import time
 from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
@@ -250,6 +254,11 @@ class DashScopeClient(LLMClient):
         dashscope.api_key = api_key
         self.model = model
         self.logger = logging.getLogger(__name__)
+        # Global async concurrency limiter (per-process)
+        max_concurrent = int(os.getenv("LLM_MAX_CONCURRENT", "4"))
+        # Use a class-level semaphore shared across instances
+        if not hasattr(DashScopeClient, "_sem"):
+            DashScopeClient._sem = asyncio.Semaphore(max_concurrent)
 
     async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
         """Classify a request using Qwen
@@ -264,13 +273,9 @@ class DashScopeClient(LLMClient):
         try:
             full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification (respond with valid JSON only):"
 
-            # Use async generation if available, otherwise use sync
-            try:
-                # Try async first
-                response = await self._async_generate(full_prompt)
-            except (AttributeError, NotImplementedError):
-                # Fall back to sync if async not available
-                response = self._sync_generate(full_prompt)
+            # Use async generation with retry + rate limiting
+            async with DashScopeClient._sem:
+                response = await self._retry_async_call(self._async_generate, full_prompt)
 
             content = response
 
@@ -308,8 +313,6 @@ class DashScopeClient(LLMClient):
     async def _async_generate(self, prompt: str) -> str:
         """Async generation (if supported by dashscope)"""
         # Check if async is available
-        import asyncio
-
         # Use asyncio.to_thread to run sync function in thread pool
         return await asyncio.to_thread(self._sync_generate, prompt)
 
@@ -340,11 +343,9 @@ class DashScopeClient(LLMClient):
             Generated text
         """
         try:
-            # Use async generation if available, otherwise use sync
-            try:
-                return await self._async_generate_full(prompt, max_tokens, **kwargs)
-            except (AttributeError, NotImplementedError):
-                return self._sync_generate_full(prompt, max_tokens, **kwargs)
+            # Use async generation with retry + rate limiting
+            async with DashScopeClient._sem:
+                return await self._retry_async_call(self._async_generate_full, prompt, max_tokens, **kwargs)
 
         except Exception as e:
             self.logger.error(f"DashScope generation error: {e}")
@@ -352,7 +353,6 @@ class DashScopeClient(LLMClient):
 
     async def _async_generate_full(self, prompt: str, max_tokens: int, **kwargs) -> str:
         """Async generation for full text"""
-        import asyncio
         return await asyncio.to_thread(self._sync_generate_full, prompt, max_tokens, **kwargs)
 
     def _sync_generate_full(self, prompt: str, max_tokens: int, **kwargs) -> str:
@@ -399,26 +399,35 @@ class DashScopeClient(LLMClient):
 
         def _sync_stream():
             """Synchronous streaming generator"""
-            try:
-                response = Generation.call(
-                    model=self.model,
-                    prompt=prompt,
-                    temperature=kwargs.get("temperature", 0.7),
-                    max_tokens=kwargs.get("max_tokens", 1000),
-                    top_p=kwargs.get("top_p", 0.8),
-                    stream=True,  # Enable streaming
-                )
-
-                for chunk in response:
-                    if chunk.status_code == 200:
-                        if hasattr(chunk.output, 'text') and chunk.output.text:
-                            yield chunk.output.text
-                    else:
-                        raise Exception(f"DashScope streaming error: {chunk.status_code} - {chunk.message}")
-
-            except Exception as e:
-                self.logger.error(f"DashScope sync streaming error: {e}")
-                raise
+            # Retry with backoff on throttling
+            attempts = int(os.getenv("LLM_STREAM_RETRIES", "5"))
+            base = float(os.getenv("LLM_BACKOFF_BASE", "1.5"))
+            for attempt in range(1, attempts + 1):
+                try:
+                    response = Generation.call(
+                        model=self.model,
+                        prompt=prompt,
+                        temperature=kwargs.get("temperature", 0.7),
+                        max_tokens=kwargs.get("max_tokens", 1000),
+                        top_p=kwargs.get("top_p", 0.8),
+                        stream=True,  # Enable streaming
+                    )
+                    for chunk in response:
+                        if chunk.status_code == 200:
+                            if hasattr(chunk.output, 'text') and chunk.output.text:
+                                yield chunk.output.text
+                        else:
+                            msg = f"DashScope streaming error: {chunk.status_code} - {chunk.message}"
+                            raise Exception(msg)
+                    return
+                except Exception as e:
+                    s = str(e)
+                    if "Too many requests" in s or "429" in s or "503" in s:
+                        delay = min(30.0, (base ** (attempt - 1)) + random.uniform(0, 0.5))
+                        time.sleep(delay)
+                        continue
+                    self.logger.error(f"DashScope sync streaming error: {e}")
+                    raise
 
         # Create a queue for thread communication
         queue = Queue()
@@ -455,6 +464,21 @@ class DashScopeClient(LLMClient):
         finally:
             # Ensure thread is cleaned up
             thread.join(timeout=1)
+
+    async def _retry_async_call(self, func, *args, **kwargs):
+        """Retry wrapper with exponential backoff and jitter for async calls."""
+        attempts = int(os.getenv("LLM_MAX_RETRIES", "5"))
+        base = float(os.getenv("LLM_BACKOFF_BASE", "1.5"))
+        for attempt in range(1, attempts + 1):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                s = str(e)
+                if any(t in s for t in ("Too many requests", "429", "503")):
+                    delay = min(30.0, (base ** (attempt - 1)) + random.uniform(0, 0.5))
+                    await asyncio.sleep(delay)
+                    continue
+                raise
 
 
 
