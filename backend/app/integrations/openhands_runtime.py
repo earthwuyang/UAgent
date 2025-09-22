@@ -94,7 +94,7 @@ class OpenHandsActionServerRunner:
             if not self.is_running:
                 raise RuntimeError("OpenHands action server session is not running")
             payload = {"action": action_dict}
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
+            async with httpx.AsyncClient(timeout=timeout + 10, trust_env=False) as client:
                 response = await client.post(
                     f"http://127.0.0.1:{self._port}/execute_action",
                     json=payload,
@@ -202,17 +202,6 @@ class OpenHandsActionServerRunner:
             raise RuntimeError("OpenHands runtime is not available in the current environment")
 
         # Ensure core third-party dependencies for the server are available in this Python
-        self._ensure_packages([
-            "puremagic",
-            "binaryornot",
-            "fastapi",
-            "uvicorn",
-            "starlette",
-            "pydantic",
-            "openhands-aci",
-            "litellm",
-        ])
-
         port = _find_free_port()
         session_api_key = secrets.token_hex(16)
 
@@ -238,9 +227,8 @@ class OpenHandsActionServerRunner:
             username,
             "--user-id",
             str(user_id),
-            "--enable-browser",
-            str(bool(enable_browser)),
         ]
+        cmd.append("--enable-browser" if enable_browser else "--no-enable-browser")
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -268,9 +256,9 @@ class OpenHandsActionServerRunner:
         finally:
             await session.close()
 
-    async def _wait_until_ready(self, process, port: int, api_key: str, retries: int = 50, delay: float = 0.2) -> None:
+    async def _wait_until_ready(self, process, port: int, api_key: str, retries: int = 600, delay: float = 0.5) -> None:
         url = f"http://127.0.0.1:{port}/alive"
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             for _ in range(retries):
                 if process.returncode is not None:
                     stdout, stderr = await process.communicate()
@@ -281,7 +269,14 @@ class OpenHandsActionServerRunner:
                 try:
                     response = await client.get(url, headers={"X-Session-API-Key": api_key})
                     if response.status_code == 200:
-                        return
+                        try:
+                            payload = response.json()
+                        except ValueError:
+                            payload = {}
+                        status = payload.get("status") if isinstance(payload, dict) else None
+                        if status == "ok":
+                            return
+                        # The server is up but still initializing – keep waiting.
                 except (httpx.HTTPError, ConnectionError):
                     pass
                 await asyncio.sleep(delay)
@@ -290,6 +285,10 @@ class OpenHandsActionServerRunner:
     def _observation_to_execution_result(self, observation: dict):
         from ..core.openhands.code_executor import ExecutionResult
         metadata = observation.get("metadata", {}) or {}
+        if not metadata and isinstance(observation.get("extras"), dict):
+            extras_meta = observation["extras"].get("metadata")
+            if isinstance(extras_meta, dict):
+                metadata = extras_meta
         exit_code = metadata.get("exit_code", -1)
         output = observation.get("content", "")
         command_text = metadata.get("command") or metadata.get("action", "")
@@ -315,23 +314,8 @@ class OpenHandsActionServerRunner:
         This installs missing packages into the current interpreter (sys.executable)
         so the action_execution_server.py can import them. Idempotent and best-effort.
         """
-        for pkg in packages:
-            mod = pkg.replace('-', '_')
-            try:
-                __import__(mod)
-                continue
-            except Exception:
-                try:
-                    subprocess.run([sys.executable, "-m", "pip", "install", pkg], check=True)
-                except Exception:
-                    # Non-fatal; the server may still run if this import isn't needed in current path
-                    pass
-
-        # Ensure the OpenHands repo itself is installed (captures remaining deps)
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(self._openhands_path)], check=True)
-        except Exception:
-            pass
+        # No automatic installation; assume prerequisites are installed in the environment
+        return
 
     async def execute_ipython_code(
         self,

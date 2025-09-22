@@ -259,6 +259,25 @@ class DashScopeClient(LLMClient):
         # Use a class-level semaphore shared across instances
         if not hasattr(DashScopeClient, "_sem"):
             DashScopeClient._sem = asyncio.Semaphore(max_concurrent)
+        if not hasattr(DashScopeClient, "_rate_lock"):
+            DashScopeClient._rate_lock = asyncio.Lock()
+            DashScopeClient._next_available = 0.0
+            DashScopeClient._min_interval = float(
+                os.getenv("DASHSCOPE_MIN_INTERVAL", "0.25")
+            )
+
+    @classmethod
+    async def _acquire_rate_slot(cls) -> None:
+        """Enforce minimum delay between outbound DashScope requests."""
+        interval = getattr(cls, "_min_interval", 0.25)
+        lock: asyncio.Lock = getattr(cls, "_rate_lock")
+        async with lock:
+            now = time.monotonic()
+            wait_for = getattr(cls, "_next_available", 0.0) - now
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+                now = time.monotonic()
+            setattr(cls, "_next_available", now + interval)
 
     async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
         """Classify a request using Qwen
@@ -274,6 +293,7 @@ class DashScopeClient(LLMClient):
             full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification (respond with valid JSON only):"
 
             # Use async generation with retry + rate limiting
+            await DashScopeClient._acquire_rate_slot()
             async with DashScopeClient._sem:
                 response = await self._retry_async_call(self._async_generate, full_prompt)
 
@@ -344,6 +364,7 @@ class DashScopeClient(LLMClient):
         """
         try:
             # Use async generation with retry + rate limiting
+            await DashScopeClient._acquire_rate_slot()
             async with DashScopeClient._sem:
                 return await self._retry_async_call(self._async_generate_full, prompt, max_tokens, **kwargs)
 
@@ -382,6 +403,8 @@ class DashScopeClient(LLMClient):
         """
         try:
             import asyncio
+
+            await DashScopeClient._acquire_rate_slot()
 
             # Use async streaming generation
             async for chunk in self._async_stream_generate(prompt, **kwargs):
@@ -474,7 +497,7 @@ class DashScopeClient(LLMClient):
                 return await func(*args, **kwargs)
             except Exception as e:
                 s = str(e)
-                if any(t in s for t in ("Too many requests", "429", "503")):
+                if any(t in s for t in ("Too many requests", "429", "503", "capacity limits", "InternalError.Algo")):
                     delay = min(30.0, (base ** (attempt - 1)) + random.uniform(0, 0.5))
                     await asyncio.sleep(delay)
                     continue
