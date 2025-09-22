@@ -266,7 +266,7 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps.
                     f"Expected output: {step.expected_output}\n"
                     "Do not run `apt-get`, `sudo`, or any other system package manager commands unless really need to update system dependencies. "
                     "Work strictly with the existing Python environment and workspace resources. Use relative paths inside the workspace (e.g., `collect_data.py` or `code/collect_data.py`) instead of absolute `/workspace` prefixes. "
-                    "If you need multiple shell commands, combine them into one `bash -lc \"cmd1 ; cmd2\"` invocation. "
+                    "If you need multiple shell commands, combine them into one `bash -lc "cmd1 ; cmd2"` invocation. "
                     "Do not rely on placeholders. Make concrete, runnable changes."
                 )
 

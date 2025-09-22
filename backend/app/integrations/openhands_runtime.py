@@ -133,9 +133,9 @@ class OpenHandsActionServerRunner:
                         "/workspace/",
                         str(self._workspace_path.resolve()) + "/",
                     )
-                if "\n" in command_text or command_text.strip().startswith("#") or command_text.strip().startswith("{"):
-                    sanitized = command_text.strip().replace("'", "'\"'\"'")
-                    command_text = f"bash -lc '{sanitized}'"
+                stripped = command_text.strip()
+                if "\n" in command_text or stripped.startswith("#") or stripped.startswith("{") or stripped.startswith("["):
+                    command_text = "bash -lc " + json.dumps(stripped)
                 args["command"] = command_text
 
             preview = {}
