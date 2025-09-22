@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import logging
 
 import httpx
 
@@ -25,6 +26,8 @@ def _ensure_openhands_on_path() -> Optional[Path]:
 
 
 _openhands_dir_for_imports = _ensure_openhands_on_path()
+
+logger = logging.getLogger(__name__)
 
 # Avoid importing OpenHands modules in the parent process to prevent heavy deps.
 CmdRunAction = None  # type: ignore
@@ -94,6 +97,21 @@ class OpenHandsActionServerRunner:
             if not self.is_running:
                 raise RuntimeError("OpenHands action server session is not running")
             payload = {"action": action_dict}
+            action_name = action_dict.get("action")
+            args = dict(action_dict.get("args", {}))
+            preview = {}
+            for key in ("command", "path", "code", "file_text", "content"):
+                if key in args:
+                    value = args[key]
+                    if isinstance(value, str) and len(value) > 120:
+                        value = value[:117] + "..."
+                    preview[key] = value
+            logger.info(
+                "[CodeAct] sending action=%s workspace=%s args_preview=%s",
+                action_name,
+                self._workspace_path,
+                preview,
+            )
             async with httpx.AsyncClient(timeout=timeout + 10, trust_env=False) as client:
                 response = await client.post(
                     f"http://127.0.0.1:{self._port}/execute_action",
@@ -103,6 +121,16 @@ class OpenHandsActionServerRunner:
             response.raise_for_status()
             observation = response.json()
             execution_result = self._runner._observation_to_execution_result(observation)
+            preview = observation.get("content") or observation.get("stdout") or ""
+            if isinstance(preview, str) and len(preview) > 200:
+                preview = preview[:197] + "..."
+            logger.info(
+                "[CodeAct] action=%s exit_code=%s success=%s output=%s",
+                action_name,
+                execution_result.exit_code,
+                execution_result.success,
+                preview,
+            )
             return OpenHandsActionResult(
                 execution_result=execution_result,
                 raw_observation=observation,
@@ -230,6 +258,13 @@ class OpenHandsActionServerRunner:
         ]
         cmd.append("--enable-browser" if enable_browser else "--no-enable-browser")
 
+        logger.info(
+            "[CodeAct] launching action server on port %s (workspace=%s enable_browser=%s)",
+            port,
+            workspace_path,
+            enable_browser,
+        )
+
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -275,6 +310,7 @@ class OpenHandsActionServerRunner:
                             payload = {}
                         status = payload.get("status") if isinstance(payload, dict) else None
                         if status == "ok":
+                            logger.info("[CodeAct] action server ready on port %s", port)
                             return
                         # The server is up but still initializing – keep waiting.
                 except (httpx.HTTPError, ConnectionError):
