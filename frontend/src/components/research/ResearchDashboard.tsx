@@ -15,6 +15,7 @@ import { ResearchProgressStream } from './ResearchProgressStream';
 import ResearchTreeVisualization from './ResearchTreeVisualization';
 import { HTTP_BASE_URL } from '../../config';
 import type { RouteAndExecuteAck } from '../../types/api';
+import SessionManagerPanel from './SessionManagerPanel';
 
 interface ResearchRequest {
   user_request: string;
@@ -291,6 +292,9 @@ export const ResearchDashboard: React.FC = () => {
           </TabsContent>
         </Tabs>
       )}
+
+      {/* Session management */}
+      <SessionManagerPanel />
 
       {/* Instructions */}
       {!sessionId && !acknowledgement && (

@@ -313,6 +313,77 @@ class WebSocketConnectionManager:
             logger.error(f"Failed to send WebSocket message: {e}")
             raise
 
+    def _serialize_event(self, event: ProgressEvent) -> Dict[str, Any]:
+        event_dict = asdict(event)
+        event_dict["event_type"] = event.event_type.value
+        event_dict["timestamp"] = event.timestamp.isoformat()
+        return event_dict
+
+    def _serialize_journal_entry(self, entry: ResearchJournalEntry) -> Dict[str, Any]:
+        entry_dict = asdict(entry)
+        entry_dict["timestamp"] = entry.timestamp.isoformat()
+        return entry_dict
+
+    def _serialize_engine_status(self, status: EngineStatus) -> Dict[str, Any]:
+        status_dict = asdict(status)
+        if status_dict.get("start_time"):
+            status_dict["start_time"] = status_dict["start_time"].isoformat()
+        if status_dict.get("estimated_completion"):
+            status_dict["estimated_completion"] = (
+                status_dict["estimated_completion"].isoformat()
+            )
+        return status_dict
+
+    def get_session_metrics(self, session_id: str) -> Dict[str, Any]:
+        """Return cached metrics for a session."""
+        events = self.event_history.get(session_id, [])
+        journal = self.journal_entries.get(session_id, [])
+        llm_events = self.llm_conversations.get(session_id, [])
+
+        last_event = events[-1].timestamp.isoformat() if events else None
+        last_journal = journal[-1].timestamp.isoformat() if journal else None
+        last_llm = None
+        if llm_events:
+            last_llm = llm_events[-1].get("timestamp")
+
+        return {
+            "event_count": len(events),
+            "journal_count": len(journal),
+            "llm_message_count": len(llm_events),
+            "last_event_at": last_event,
+            "last_journal_at": last_journal,
+            "last_llm_message_at": last_llm,
+            "active_connections": {
+                "research": len(self.research_connections.get(session_id, [])),
+                "openhands": len(self.openhands_connections.get(session_id, [])),
+                "llm_stream": len(self.llm_stream_connections.get(session_id, [])),
+            },
+        }
+
+    def get_session_snapshot(self, session_id: str) -> Dict[str, Any]:
+        """Return a snapshot of cached session data for reconnecting clients."""
+        events = [self._serialize_event(evt) for evt in self.event_history.get(session_id, [])]
+        journal_entries = [
+            self._serialize_journal_entry(entry)
+            for entry in self.journal_entries.get(session_id, [])
+        ]
+
+        llm_events = list(self.llm_conversations.get(session_id, []))
+
+        metrics = self.get_session_metrics(session_id)
+
+        return {
+            "session_id": session_id,
+            "events": events,
+            "journal_entries": journal_entries,
+            "llm_events": llm_events,
+            "metrics": metrics,
+            "engine_statuses": {
+                name: self._serialize_engine_status(status)
+                for name, status in self.engine_statuses.items()
+            },
+        }
+
 
 class ResearchProgressTracker:
     """Tracks and broadcasts research progress events"""

@@ -34,3 +34,6 @@ dspy-ai>=2.6.0
 gepa>=0.0.12
 dspy
 agentvectordb
+python-json-logger
+termcolor
+openhands-ai==0.56.0

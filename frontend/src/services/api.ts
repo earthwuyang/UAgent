@@ -16,6 +16,8 @@ import type {
   CodeResearchResponse,
   ScientificResearchResponse,
   ResearchSession,
+  SessionHistoryResponse,
+  SessionListingResponse,
 } from '../types/api';
 
 // Create axios instance with base configuration
@@ -81,7 +83,7 @@ export class UAgentAPI {
   }
 
   // Research Session Management
-  static async getResearchSessions(): Promise<{ sessions: ResearchSession[]; total: number }> {
+  static async getResearchSessions(): Promise<SessionListingResponse> {
     const response = await api.get('/research/sessions');
     return response.data;
   }
@@ -106,6 +108,11 @@ export class UAgentAPI {
 
   static async deleteResearchSession(researchId: string): Promise<{ message: string }> {
     const response = await api.delete(`/research/sessions/${researchId}`);
+    return response.data;
+  }
+
+  static async getSessionHistory(researchId: string): Promise<SessionHistoryResponse> {
+    const response = await api.get(`/research/sessions/${researchId}/history`);
     return response.data;
   }
 }

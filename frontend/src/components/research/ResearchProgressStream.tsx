@@ -10,40 +10,13 @@ import { Progress } from '../ui/progress';
 import { ScrollArea } from '../ui/scroll-area';
 import { Separator } from '../ui/separator';
 import { WS_BASE_URL } from '../../config';
-
-interface ProgressEvent {
-  event_type: string;
-  session_id: string;
-  timestamp: string;
-  data: {
-    engine: string;
-    phase?: string;
-    metadata?: any;
-  };
-  source: string;
-  progress_percentage?: number;
-  message?: string;
-}
-
-interface JournalEntry {
-  timestamp: string;
-  session_id: string;
-  engine: string;
-  phase: string;
-  message: string;
-  metadata: any;
-  level: string;
-}
-
-interface EngineStatus {
-  engine_name: string;
-  status: string;
-  current_task?: string;
-  progress_percentage: number;
-  start_time?: string;
-  estimated_completion?: string;
-  metrics: any;
-}
+import UAgentAPI from '../../services/api';
+import type {
+  ProgressEvent,
+  JournalEntry,
+  EngineStatus,
+  SessionHistoryResponse,
+} from '../../types/api';
 
 interface ResearchProgressStreamProps {
   sessionId: string;
@@ -63,12 +36,76 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
   const [overallProgress, setOverallProgress] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const journalWsRef = useRef<WebSocket | null>(null);
   const engineWsRef = useRef<WebSocket | null>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
+  const eventSignaturesRef = useRef<Set<string>>(new Set());
+  const journalSignaturesRef = useRef<Set<string>>(new Set());
 
   const scrollToBottom = () => {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const makeEventSignature = (evt: ProgressEvent): string => (
+    `${evt.event_type}|${evt.timestamp}|${evt.source}|${evt.message ?? ''}`
+  );
+
+  const makeJournalSignature = (entry: JournalEntry): string => (
+    `${entry.timestamp}|${entry.engine}|${entry.phase}|${entry.message}`
+  );
+
+  const pushEvent = (evt: ProgressEvent) => {
+    const signature = makeEventSignature(evt);
+    if (eventSignaturesRef.current.has(signature)) {
+      return;
+    }
+    eventSignaturesRef.current.add(signature);
+    setEvents((prev) => {
+      const next = [...prev, evt];
+      onEventsUpdate?.(next);
+      return next;
+    });
+    if (typeof evt.progress_percentage === 'number') {
+      setOverallProgress(evt.progress_percentage);
+    }
+  };
+
+  const pushJournalEntry = (entry: JournalEntry) => {
+    const signature = makeJournalSignature(entry);
+    if (journalSignaturesRef.current.has(signature)) {
+      return;
+    }
+    journalSignaturesRef.current.add(signature);
+    setJournalEntries((prev) => [...prev, entry]);
+  };
+
+  const applySnapshot = (snapshot: SessionHistoryResponse) => {
+    const snapshotEvents = snapshot.events ?? [];
+    const snapshotJournal = snapshot.journal_entries ?? [];
+
+    eventSignaturesRef.current.clear();
+    journalSignaturesRef.current.clear();
+
+    snapshotEvents.forEach((evt) => {
+      eventSignaturesRef.current.add(makeEventSignature(evt));
+    });
+    snapshotJournal.forEach((entry) => {
+      journalSignaturesRef.current.add(makeJournalSignature(entry));
+    });
+
+    setEvents(snapshotEvents);
+    onEventsUpdate?.(snapshotEvents);
+    setJournalEntries(snapshotJournal);
+    setEngineStatuses(snapshot.engine_statuses ?? {});
+
+    const latestWithProgress = [...snapshotEvents]
+      .reverse()
+      .find((evt) => typeof evt.progress_percentage === 'number');
+
+    if (latestWithProgress && typeof latestWithProgress.progress_percentage === 'number') {
+      setOverallProgress(latestWithProgress.progress_percentage);
+    } else if (snapshotEvents.length === 0) {
+      setOverallProgress(0);
+    }
   };
 
   useEffect(() => {
@@ -76,11 +113,33 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
   }, [events, journalEntries]);
 
   useEffect(() => {
+    setEvents([]);
+    setJournalEntries([]);
+    setEngineStatuses({});
+    setOverallProgress(0);
+    setConnected(false);
+    eventSignaturesRef.current.clear();
+    journalSignaturesRef.current.clear();
+    onEventsUpdate?.([]);
+  }, [sessionId, onEventsUpdate]);
+
+  useEffect(() => {
     if (!sessionId) return;
 
     let isCleanup = false;
     let progressReconnectTimeout: number | null = null;
     let engineReconnectTimeout: number | null = null;
+
+    const loadSnapshot = async () => {
+      try {
+        const snapshot = await UAgentAPI.getSessionHistory(sessionId);
+        if (!isCleanup) {
+          applySnapshot(snapshot);
+        }
+      } catch (error) {
+        console.error('Failed to load session snapshot:', error);
+      }
+    };
 
     // Connect to research progress WebSocket
     const connectProgressWS = () => {
@@ -93,6 +152,7 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
         console.log('Research progress WebSocket connected');
         setConnected(true);
         onConnectionChange?.(true);
+        loadSnapshot();
       };
 
       ws.onmessage = (event) => {
@@ -100,19 +160,11 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
           const data = JSON.parse(event.data);
 
           if (data.type === 'research_event' || data.type === 'event_replay') {
-            const evt = data.type === 'event_replay' ? data.event : data.event;
-            setEvents(prev => {
-              const newEvents = [...prev, evt];
-              onEventsUpdate?.(newEvents);
-              return newEvents;
-            });
-
-            // Update overall progress
-            if (evt.progress_percentage !== undefined) {
-              setOverallProgress(evt.progress_percentage);
-            }
+            const evt = data.event as ProgressEvent;
+            pushEvent(evt);
           } else if (data.type === 'journal_entry') {
-            setJournalEntries(prev => [...prev, data.entry]);
+            const entry = data.entry as JournalEntry;
+            pushJournalEntry(entry);
           }
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
@@ -153,9 +205,10 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
           const data = JSON.parse(event.data);
 
           if (data.type === 'engine_status') {
+            const status = data.status as EngineStatus;
             setEngineStatuses(prev => ({
               ...prev,
-              [data.status.engine_name]: data.status
+              [status.engine_name]: status,
             }));
           }
         } catch (error) {
@@ -175,6 +228,7 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
       engineWsRef.current = ws;
     };
 
+    loadSnapshot();
     connectProgressWS();
     connectEngineWS();
 
@@ -195,9 +249,6 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
       }
       if (engineWsRef.current?.readyState === WebSocket.OPEN) {
         engineWsRef.current.close(1000, 'Component unmounting');
-      }
-      if (journalWsRef.current?.readyState === WebSocket.OPEN) {
-        journalWsRef.current.close(1000, 'Component unmounting');
       }
     };
   }, [sessionId, onConnectionChange, onEventsUpdate]);

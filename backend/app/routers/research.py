@@ -1,6 +1,7 @@
 """Research API endpoints"""
 
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from ..core.app_state import get_app_state
 from ..core.research_engines.deep_research import ResearchResult as DeepResearchResult
 from ..core.research_engines.code_research import CodeResearchResult
 from ..core.research_engines.scientific_research import ScientificResearchResult
+from ..core.websocket_manager import websocket_manager
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,37 @@ class ScientificResearchResponse(ResearchResponse):
 research_sessions: Dict[str, Dict[str, Any]] = {}
 
 
+def _serialize_legacy_session(session_id: str, session_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialize legacy session entries created by engine-specific endpoints."""
+    request_payload = session_data.get("request", {})
+    created_at = session_data.get("created_at")
+    updated_at = session_data.get("updated_at", created_at)
+    status = session_data.get("status", "completed")
+
+    return {
+        "session_id": session_id,
+        "query": request_payload.get("query", ""),
+        "status": status,
+        "type": session_data.get("type"),
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "has_result": True,
+        "error": session_data.get("error"),
+        "is_active": status in {"pending", "running"},
+        "completed_at": updated_at if status == "completed" else None,
+    }
+
+
+def _parse_iso_timestamp(value: Optional[str]) -> datetime:
+    if not value:
+        return datetime.min
+    try:
+        normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        return datetime.min
+
+
 @router.post("/deep", response_model=DeepResearchResponse)
 async def conduct_deep_research(request: DeepResearchRequest, background_tasks: BackgroundTasks):
     """Conduct deep research using the Deep Research Engine"""
@@ -104,11 +137,14 @@ async def conduct_deep_research(request: DeepResearchRequest, background_tasks: 
         )
 
         # Store result
+        timestamp = datetime.utcnow().isoformat()
         research_sessions[research_id] = {
             "type": "deep_research",
             "request": request.dict(),
             "result": result,
-            "status": "completed"
+            "status": "completed",
+            "created_at": timestamp,
+            "updated_at": timestamp,
         }
 
         # Create response
@@ -152,11 +188,14 @@ async def conduct_code_research(request: CodeResearchRequest, background_tasks: 
         )
 
         # Store result
+        timestamp = datetime.utcnow().isoformat()
         research_sessions[research_id] = {
             "type": "code_research",
             "request": request.dict(),
             "result": result,
-            "status": "completed"
+            "status": "completed",
+            "created_at": timestamp,
+            "updated_at": timestamp,
         }
 
         # Extract languages found
@@ -210,11 +249,14 @@ async def conduct_scientific_research(request: ScientificResearchRequest, backgr
         )
 
         # Store result
+        timestamp = datetime.utcnow().isoformat()
         research_sessions[research_id] = {
             "type": "scientific_research",
             "request": request.dict(),
             "result": result,
-            "status": "completed"
+            "status": "completed",
+            "created_at": timestamp,
+            "updated_at": timestamp,
         }
 
         # Create response
@@ -253,31 +295,46 @@ async def list_research_sessions():
     if session_manager:
         manager_sessions = await session_manager.list_sessions()
         for record in manager_sessions:
+            classification = record.get("classification") or {}
+            metrics = websocket_manager.get_session_metrics(record["session_id"])
             sessions.append({
                 "session_id": record["session_id"],
                 "query": record["request"],
                 "status": record["status"],
-                "type": record["classification"].get("primary_engine"),
-                "created_at": record["created_at"],
-                "updated_at": record["updated_at"],
-                "has_result": record["result"] is not None,
-                "error": record["error"]
+                "type": classification.get("primary_engine"),
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at"),
+                "has_result": record.get("result") is not None,
+                "error": record.get("error"),
+                "is_active": record.get("is_active", False),
+                "completed_at": record.get("completed_at"),
+                "metrics": metrics,
             })
 
     # Include legacy sessions created through direct research endpoints
     for research_id, session_data in research_sessions.items():
-        sessions.append({
-            "session_id": research_id,
-            "query": session_data["request"]["query"],
-            "status": session_data["status"],
-            "type": session_data["type"],
-            "created_at": session_data.get("created_at", "unknown"),
-            "updated_at": session_data.get("updated_at", "unknown"),
-            "has_result": True,
-            "error": None
-        })
+        serialized = _serialize_legacy_session(research_id, session_data)
+        serialized["metrics"] = websocket_manager.get_session_metrics(research_id)
+        sessions.append(serialized)
 
-    return {"sessions": sessions, "total": len(sessions)}
+    sessions.sort(
+        key=lambda item: _parse_iso_timestamp(
+            item.get("updated_at") or item.get("created_at")
+        ),
+        reverse=True,
+    )
+
+    active_sessions = [item for item in sessions if item.get("status") in {"pending", "running"}]
+    completed_sessions = [item for item in sessions if item.get("status") == "completed"]
+    errored_sessions = [item for item in sessions if item.get("status") == "error"]
+
+    return {
+        "sessions": sessions,
+        "total": len(sessions),
+        "active": active_sessions,
+        "completed": completed_sessions,
+        "errors": errored_sessions,
+    }
 
 
 @router.get("/sessions/{research_id}")
@@ -289,6 +346,7 @@ async def get_research_session(research_id: str):
     if session_manager:
         record = await session_manager.get_session(research_id)
         if record:
+            metrics = websocket_manager.get_session_metrics(research_id)
             return {
                 "session_id": record["session_id"],
                 "request": record["request"],
@@ -297,7 +355,9 @@ async def get_research_session(research_id: str):
                 "result": record["result"],
                 "error": record["error"],
                 "created_at": record["created_at"],
-                "updated_at": record["updated_at"]
+                "updated_at": record["updated_at"],
+                "completed_at": record.get("completed_at"),
+                "metrics": metrics,
             }
         return {
             "session_id": research_id,
@@ -308,6 +368,7 @@ async def get_research_session(research_id: str):
 
     if research_id in research_sessions:
         session_data = research_sessions[research_id]
+        metrics = websocket_manager.get_session_metrics(research_id)
         return {
             "session_id": research_id,
             "type": session_data["type"],
@@ -316,7 +377,9 @@ async def get_research_session(research_id: str):
             "summary": _create_session_summary(session_data),
             "result": _serialize_result(session_data["result"]),
             "created_at": session_data.get("created_at", "unknown"),
-            "updated_at": session_data.get("updated_at", "unknown")
+            "updated_at": session_data.get("updated_at", "unknown"),
+            "completed_at": session_data.get("updated_at"),
+            "metrics": metrics,
         }
 
     raise HTTPException(
@@ -378,6 +441,31 @@ async def delete_research_session(research_id: str):
 
     del research_sessions[research_id]
     return {"message": f"Research session {research_id} deleted successfully"}
+
+
+@router.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    """Return cached progress history for a session."""
+    app_state = get_app_state()
+    session_manager = app_state.get("session_manager")
+
+    session_payload: Optional[Dict[str, Any]] = None
+    if session_manager:
+        session_payload = await session_manager.get_session(session_id)
+
+    if not session_payload and session_id in research_sessions:
+        session_payload = _serialize_legacy_session(session_id, research_sessions[session_id])
+
+    snapshot = websocket_manager.get_session_snapshot(session_id)
+    if session_payload is not None:
+        merged_payload = dict(session_payload)
+        merged_payload.setdefault("session_id", session_id)
+        merged_payload["metrics"] = snapshot.get("metrics")
+        snapshot["session"] = merged_payload
+    else:
+        snapshot["session"] = None
+
+    return snapshot
 
 
 def _create_session_summary(session_data: Dict[str, Any]) -> Dict[str, Any]:

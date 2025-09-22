@@ -19,6 +19,7 @@ class SessionRecord:
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     task_name: Optional[str] = None
+    completed_at: Optional[datetime] = None
 
 
 class ResearchSessionManager:
@@ -59,6 +60,8 @@ class ResearchSessionManager:
                 return
             record.status = status
             record.updated_at = datetime.utcnow()
+            if status in {"completed", "error"}:
+                record.completed_at = record.completed_at or record.updated_at
 
     async def set_result(self, session_id: str, result: Dict[str, Any]) -> None:
         """Store final result for a session"""
@@ -70,6 +73,7 @@ class ResearchSessionManager:
             record.status = "completed"
             record.updated_at = datetime.utcnow()
             record.error = None
+            record.completed_at = record.updated_at
 
     async def set_error(self, session_id: str, error: str) -> None:
         """Mark session as errored"""
@@ -80,6 +84,7 @@ class ResearchSessionManager:
             record.error = error
             record.status = "error"
             record.updated_at = datetime.utcnow()
+            record.completed_at = record.updated_at
 
     async def list_sessions(self) -> List[Dict[str, Any]]:
         """List all sessions with metadata"""
@@ -124,4 +129,9 @@ class ResearchSessionManager:
             "result": record.result,
             "error": record.error,
             "task_name": record.task_name,
+            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+            "is_active": record.status in {"pending", "running"},
+            "duration_seconds": (
+                (record.completed_at or datetime.utcnow()) - record.created_at
+            ).total_seconds(),
         }

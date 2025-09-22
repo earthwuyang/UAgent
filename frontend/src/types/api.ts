@@ -162,4 +162,73 @@ export interface ResearchSession {
   updated_at?: string;
   has_result?: boolean;
   error?: string | null;
+  is_active?: boolean;
+  completed_at?: string | null;
+  metrics?: SessionMetrics;
+}
+
+export interface SessionMetrics {
+  event_count: number;
+  journal_count: number;
+  llm_message_count: number;
+  last_event_at?: string | null;
+  last_journal_at?: string | null;
+  last_llm_message_at?: string | null;
+  active_connections?: {
+    research: number;
+    openhands: number;
+    llm_stream: number;
+  };
+}
+
+export interface ProgressEvent {
+  event_type: string;
+  session_id: string;
+  timestamp: string;
+  data: {
+    engine: string;
+    phase?: string;
+    metadata?: Record<string, any>;
+  };
+  source: string;
+  progress_percentage?: number;
+  message?: string;
+}
+
+export interface JournalEntry {
+  timestamp: string;
+  session_id: string;
+  engine: string;
+  phase: string;
+  message: string;
+  metadata: Record<string, any>;
+  level: string;
+}
+
+export interface EngineStatus {
+  engine_name: string;
+  status: string;
+  current_task?: string;
+  progress_percentage: number;
+  start_time?: string;
+  estimated_completion?: string;
+  metrics: Record<string, any>;
+}
+
+export interface SessionHistoryResponse {
+  session_id: string;
+  events: ProgressEvent[];
+  journal_entries: JournalEntry[];
+  llm_events: any[];
+  metrics: SessionMetrics;
+  engine_statuses: Record<string, EngineStatus>;
+  session?: ResearchSession | null;
+}
+
+export interface SessionListingResponse {
+  sessions: ResearchSession[];
+  total: number;
+  active?: ResearchSession[];
+  completed?: ResearchSession[];
+  errors?: ResearchSession[];
 }
