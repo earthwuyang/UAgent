@@ -321,6 +321,18 @@ class CodeResearchEngine:
         self._session_root_nodes: Dict[str, str] = {}
         self._repomaster_bridge: Optional[RepoMasterBridge] = None
         self._use_repo_master_default = bool(self.config.get("use_repo_master", True))
+        self._default_quality_scores = {
+            "maintainability": 0.5,
+            "test_coverage": 0.5,
+            "documentation": 0.5,
+        }
+
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _get_root_node_id(self, session_id: Optional[str]) -> str:
         if not session_id:

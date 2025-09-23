@@ -254,6 +254,7 @@ class HypothesisGenerator:
 
         prompt = hypothesis_prompt.rstrip() + "\n\nRespond with a valid JSON array only. Do not include code fences or prose."
 
+        hypotheses_data: Any = None
         for attempt in range(1, self.max_json_retries + 1):
             response = await self.llm_client.generate(
                 prompt,
@@ -265,6 +266,17 @@ class HypothesisGenerator:
                 attempt,
                 response,
             )
+
+            if not str(response).strip():
+                self.logger.warning(
+                    "Hypothesis generation returned empty response on attempt %s",
+                    attempt,
+                )
+                if attempt == self.max_json_retries:
+                    raise RuntimeError(
+                        "Hypothesis generation returned no content after multiple attempts"
+                    )
+                continue
 
             try:
                 hypotheses_data = safe_json_loads(response)
