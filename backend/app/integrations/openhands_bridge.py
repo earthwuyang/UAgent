@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from ..core.llm_client import LLMClient
 from ..core.openhands import OpenHandsClient, CodeGenerationRequest, CodeGenerationResult
 from ..services.codeact_runner import CodeActRunner
+from ..utils.json_utils import JsonParseError, safe_json_loads
 
 
 ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
@@ -21,10 +22,13 @@ _WORKSPACE_CONFIG_KEYS = {"max_file_size", "max_total_size", "timeout", "python_
 
 
 def _safe_json_loads(content: str) -> Optional[Dict[str, Any]]:
-    try:
-        return json.loads(content)
-    except (TypeError, json.JSONDecodeError):
+    if content is None:
         return None
+    try:
+        parsed = safe_json_loads(content)
+    except JsonParseError:
+        return None
+    return parsed if isinstance(parsed, dict) else parsed
 
 
 @dataclass

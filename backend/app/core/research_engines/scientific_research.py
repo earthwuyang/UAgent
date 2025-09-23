@@ -23,7 +23,11 @@ from ...integrations.openhands_bridge import (
     GoalPlan,
     GoalPlanStep,
 )
-from ...utils.json_utils import JsonParseError, safe_json_loads
+from ...utils.json_utils import (
+    JsonParseError,
+    safe_json_loads,
+    sanitize_json_strings,
+)
 from ...debate import (
     DebateManager,
     DebateConfig,
@@ -222,6 +226,7 @@ class HypothesisGenerator:
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
         self.max_json_retries = 3
+        self.max_generation_tokens = int(os.getenv("HYPOTHESIS_MAX_TOKENS", "3200"))
 
     async def generate_hypotheses(
         self,
@@ -259,7 +264,7 @@ class HypothesisGenerator:
         for attempt in range(1, self.max_json_retries + 1):
             response = await self.llm_client.generate(
                 prompt,
-                max_tokens=900,
+                max_tokens=self.max_generation_tokens,
                 temperature=0.3 if attempt > 1 else 0.4,
             )
             self.logger.debug(
@@ -269,7 +274,7 @@ class HypothesisGenerator:
             )
 
             raw_response = str(response)
-            sanitized_response = self._sanitize_llm_json(raw_response)
+            sanitized_response = sanitize_json_strings(raw_response)
             last_response = raw_response
 
             if not raw_response.strip():
@@ -304,11 +309,12 @@ class HypothesisGenerator:
                     )
 
         if hypotheses_data is None and last_response:
+            sanitized_text = sanitize_json_strings(last_response)
             self.logger.warning(
                 "Hypothesis generation falling back to text coercion; raw response: %s",
                 last_response,
             )
-            hypotheses_data = self._coerce_hypotheses_from_text(last_response)
+            hypotheses_data = self._coerce_hypotheses_from_text(sanitized_text)
 
         if not isinstance(hypotheses_data, list):
             raise RuntimeError(
@@ -419,42 +425,6 @@ class HypothesisGenerator:
 
         return results
 
-    @staticmethod
-    def _sanitize_llm_json(payload: str) -> str:
-        """Collapse literal newlines inside JSON strings into spaces."""
-
-        if not payload:
-            return payload
-
-        result: List[str] = []
-        in_string = False
-        escape = False
-
-        for ch in payload:
-            if in_string:
-                if escape:
-                    result.append(ch)
-                    escape = False
-                    continue
-                if ch == "\\":
-                    result.append(ch)
-                    escape = True
-                    continue
-                if ch in ("\n", "\r"):
-                    result.append(" ")
-                    continue
-                if ch == '"':
-                    in_string = False
-                result.append(ch)
-            else:
-                result.append(ch)
-                if ch == '"':
-                    in_string = True
-                else:
-                    escape = False
-
-        return "".join(result)
-
     def _fallback_hypotheses(self, research_question: str) -> List[Dict[str, Any]]:
         """Fallback structure when the LLM response is invalid."""
 
@@ -506,7 +476,7 @@ class HypothesisGenerator:
         response = await self.llm_client.generate(refinement_prompt)
 
         try:
-            refined_data = safe_json_loads(response)
+            refined_data = safe_json_loads(sanitize_json_strings(response))
         except JsonParseError as exc:
             self.logger.error("Hypothesis refinement returned invalid JSON: %s", exc)
             raise RuntimeError(
@@ -535,13 +505,15 @@ class ExperimentDesigner:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
+        self.max_generation_tokens = int(os.getenv("EXPERIMENT_DESIGN_MAX_TOKENS", "2800"))
 
     @staticmethod
     def _safe_loads(payload: str) -> Dict[str, Any]:
         """Parse experiment design JSON or raise a descriptive error."""
 
+        sanitized = sanitize_json_strings(payload)
         try:
-            data = safe_json_loads(payload)
+            data = safe_json_loads(sanitized)
         except JsonParseError as exc:
             raise RuntimeError(f"Experiment design returned invalid JSON: {exc}") from exc
 
@@ -583,7 +555,10 @@ class ExperimentDesigner:
         Respond with valid JSON only.
         """
 
-        response = await self.llm_client.generate(design_prompt)
+        response = await self.llm_client.generate(
+            design_prompt,
+            max_tokens=self.max_generation_tokens,
+        )
         design_data = self._safe_loads(response)
 
         design = ExperimentDesign(
@@ -1003,7 +978,7 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         if line:
                             json_str = line.split(":", 1)[1].strip()
                             try:
-                                data = safe_json_loads(json_str)
+                                data = safe_json_loads(sanitize_json_strings(json_str))
                             except JsonParseError as exc:
                                 self.logger.debug(
                                     "CodeAct final result JSON parse failed: %s", exc

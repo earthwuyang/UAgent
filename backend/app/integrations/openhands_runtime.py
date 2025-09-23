@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import os
 import secrets
@@ -11,7 +12,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-import logging
 
 import httpx
 
@@ -47,6 +47,14 @@ def _lookup_username() -> str:
         import getpass
 
         return getpass.getuser()
+
+
+def _detect_local_proxy(host: str = "127.0.0.1", port: int = 7890, timeout: float = 0.25) -> Optional[str]:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return f"http://{host}:{port}"
+    except OSError:
+        return None
 
 
 @dataclass
@@ -291,6 +299,13 @@ class OpenHandsActionServerRunner:
         env["PYTHONPATH"] = str(self._openhands_path) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
         env["SESSION_API_KEY"] = session_api_key
         env.setdefault("PYTHONUNBUFFERED", "1")
+
+        proxy_url = _detect_local_proxy()
+        if proxy_url:
+            for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+                env.setdefault(key, proxy_url)
+            env.setdefault("GIT_HTTP_PROXY", proxy_url)
+            env.setdefault("GIT_HTTPS_PROXY", proxy_url)
 
         workspace_mount = f"{workspace_path}:/workspace:rw"
         sandbox_volumes = env.get("SANDBOX_VOLUMES")
