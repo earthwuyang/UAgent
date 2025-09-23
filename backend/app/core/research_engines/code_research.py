@@ -73,6 +73,18 @@ class GitHubSearchEngine:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
+        self._default_quality_scores = {
+            "maintainability": 0.5,
+            "test_coverage": 0.5,
+            "documentation": 0.5,
+        }
+
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     async def search_repositories(self, query: str, language: Optional[str] = None, limit: int = 10) -> List[CodeRepository]:
         """Search GitHub repositories"""
@@ -992,7 +1004,13 @@ class CodeResearchEngine:
 
         if analyses:
             # Analysis-based recommendations
-            avg_quality = sum(analysis.quality_metrics.get('maintainability', 0.5) for analysis in analyses) / len(analyses)
+            avg_quality = sum(
+                self._to_float(
+                    analysis.quality_metrics.get('maintainability'),
+                    self._default_quality_scores['maintainability'],
+                )
+                for analysis in analyses
+            ) / len(analyses)
             if avg_quality > 0.7:
                 recommendations.append("Found high-quality implementations with good maintainability")
             else:
@@ -1031,7 +1049,10 @@ class CodeResearchEngine:
         analysis_score = 0.5
         if analyses:
             avg_maintainability = sum(
-                analysis.quality_metrics.get('maintainability', 0.5)
+                self._to_float(
+                    analysis.quality_metrics.get('maintainability'),
+                    self._default_quality_scores['maintainability'],
+                )
                 for analysis in analyses
             ) / len(analyses)
             analysis_score = avg_maintainability

@@ -118,6 +118,8 @@ class OpenHandsActionServerRunner:
                 remapped = _remap_path(path_value)
                 if remapped:
                     args["path"] = remapped
+                    if action_name == "read" and os.path.isdir(remapped):
+                        action_name = "list"
                 if action_name == "write" and "start" not in args:
                     args.setdefault("start", 1)
                     args.setdefault("end", -1)
@@ -143,6 +145,10 @@ class OpenHandsActionServerRunner:
             rewritten_action["args"] = args
             payload = {"action": rewritten_action}
 
+            if action_name == "list":
+                args.pop("start", None)
+                args.pop("end", None)
+
             preview = {}
             for key in ("command", "path", "code", "file_text", "content"):
                 if key in args:
@@ -156,12 +162,7 @@ class OpenHandsActionServerRunner:
                 self._workspace_path,
                 preview,
             )
-            async with httpx.AsyncClient(timeout=timeout + 10, trust_env=False) as client:
-                response = await client.post(
-                    f"http://127.0.0.1:{self._port}/execute_action",
-                    json=payload,
-                    headers={"X-Session-API-Key": self._api_key},
-                )
+            response = await self._post_action(payload, timeout)
             response.raise_for_status()
             observation = response.json()
             execution_result = self._runner._observation_to_execution_result(observation)
@@ -182,6 +183,14 @@ class OpenHandsActionServerRunner:
                 stderr="",
                 server_logs="",
             )
+
+        async def _post_action(self, payload: dict, timeout: int) -> httpx.Response:
+            async with httpx.AsyncClient(timeout=timeout + 10, trust_env=False) as client:
+                return await client.post(
+                    f"http://127.0.0.1:{self._port}/execute_action",
+                    json=payload,
+                    headers={"X-Session-API-Key": self._api_key},
+                )
 
         async def run_cmd(self, command: str, timeout: int = 300, blocking: bool = True, cwd: str | None = None) -> 'OpenHandsActionResult':
             action = {

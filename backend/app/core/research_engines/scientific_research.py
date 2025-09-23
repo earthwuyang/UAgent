@@ -2760,6 +2760,16 @@ Return JSON only.
                 result.iteration_count = best_idea.iteration_count
                 result.confidence_score = best_idea.confidence_score
 
+                if not result.hypotheses:
+                    raise RuntimeError(
+                        "INSUFFICIENT_HYPOTHESES: the selected idea did not produce any testable hypotheses"
+                    )
+
+                if not result.experiments:
+                    raise RuntimeError(
+                        "INSUFFICIENT_EXPERIMENTS: no experiments were designed for the selected idea"
+                    )
+
                 if debate_record:
                     verdict = debate_record.get("verdict", {})
                     scores = verdict.get("scores", {}) or {}
@@ -2813,6 +2823,11 @@ Return JSON only.
                 for res in result.results
                 if res.status == ExperimentStatus.COMPLETED and res.data.get("success")
             ]
+
+            if not result.results:
+                raise RuntimeError(
+                    "INSUFFICIENT_RESULTS: no experiment executions were recorded"
+                )
 
             if not successful_results:
                 raise RuntimeError(
