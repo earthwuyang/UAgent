@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Add the backend directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -16,15 +18,26 @@ from app.core.llm_client import create_llm_client
 async def test_api_startup():
     """Test that the API can start up successfully"""
     try:
-        # Check if DashScope API key is available
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
-        if not dashscope_key:
-            print("WARNING: DASHSCOPE_API_KEY not set - using test mode")
+        load_dotenv()
+        # Resolve a LiteLLM-compatible configuration
+        provider = (os.getenv("DEFAULT_API_PROVIDER") or os.getenv("LLM_PROVIDER") or "litellm").strip().lower()
+        api_key = (
+            os.getenv("LLM_API_KEY")
+            or os.getenv(f"{provider.upper()}_API_KEY")
+            or os.getenv("LITELLM_API_KEY")
+        )
+        if not api_key:
+            print("WARNING: No LLM API key configured - skipping startup test")
             return False
 
         # Test LLM client creation
         print("Testing LLM client creation...")
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        model = (
+            os.getenv("LLM_MODEL")
+            or os.getenv(f"{provider.upper()}_MODEL")
+            or os.getenv("LITELLM_MODEL")
+        )
+        llm_client = create_llm_client(provider, api_key=api_key, model=model)
         print(f"✓ LLM client created: {llm_client.__class__.__name__}")
 
         # Test a simple classification

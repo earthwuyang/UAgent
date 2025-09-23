@@ -426,12 +426,12 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
     const engine = event.data.engine || 'engine'
     const sessionKey = event.session_id || 'session'
     const engineKey = `${sessionKey}-${engine}`
-    const rootId = `${engineKey}-root`
+    const engineRootId = `${engineKey}-root`
 
     if (!sessionRoots.has(engineKey)) {
-      sessionRoots.set(engineKey, rootId)
-      nodeMap.set(rootId, {
-        id: rootId,
+      sessionRoots.set(engineKey, engineRootId)
+      nodeMap.set(engineRootId, {
+        id: engineRootId,
         type: 'engine',
         engine,
         phase: 'root',
@@ -440,7 +440,7 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
         description: `Execution tree for ${engine}`,
         timestamp: event.timestamp,
         progress: event.progress_percentage,
-        metadata: { node_id: rootId },
+        metadata: { node_id: engineRootId },
         children: [],
         parent_id: undefined,
         depth: 0,
@@ -449,7 +449,21 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
 
     const metadata = { ...(event.data.metadata || {}) }
     const nodeId = metadata.node_id || `${sessionKey}-${engine}-${event.data.phase || 'step'}-${index}`
-    const parentId = metadata.parent_id || sessionRoots.get(engineKey)!
+    const rootCandidate = sessionRoots.get(engineKey)
+    if (!rootCandidate) {
+      console.warn('[research-tree] Missing root node; skipping event', { engineKey, event })
+      return
+    }
+    const rootId = rootCandidate
+    const explicitParentId = metadata.parent_id
+    if (explicitParentId && !nodeMap.has(explicitParentId) && explicitParentId !== rootId) {
+      console.warn(
+        '[research-tree] Skipping node due to missing parent',
+        { nodeId, explicitParentId, event }
+      )
+      return
+    }
+    const parentId = explicitParentId || rootId
     const nodeType = metadata.node_type === 'result' ? 'result' : 'step'
     const completedByProgress = (event.progress_percentage ?? 0) >= 100
     let status: ResearchNode['status'] = (metadata.status as ResearchNode['status']) || (

@@ -24,11 +24,11 @@ class TestScientificResearchEngine:
     @pytest.fixture
     def llm_client(self):
         """Create real DashScope LLM client for testing"""
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if dashscope_key:
-            return create_llm_client("dashscope", api_key=dashscope_key)
+            return create_llm_client("litellm", api_key=dashscope_key)
         else:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
     @pytest.fixture
     def deep_research_engine(self, llm_client):
@@ -374,11 +374,11 @@ class TestScientificResearchIntegration:
     async def test_multi_engine_orchestration(self):
         """Test orchestration of multiple research engines"""
         # Arrange
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         deep_engine = DeepResearchEngine(llm_client)
         code_engine = CodeResearchEngine(llm_client)
 
@@ -424,11 +424,11 @@ class TestScientificResearchIntegration:
     async def test_real_llm_hypothesis_quality(self):
         """Test hypothesis quality with real LLM"""
         # Arrange
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         hypothesis_generator = HypothesisGenerator(llm_client)
 
         research_question = "How does model architecture affect training stability in GANs?"
@@ -456,11 +456,11 @@ class TestScientificResearchIntegration:
     async def test_end_to_end_scientific_workflow_quality(self):
         """Test end-to-end scientific workflow with quality metrics"""
         # Arrange
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         engine = ScientificResearchEngine(llm_client=llm_client)
 
         research_question = "Optimal batch size for training large language models"

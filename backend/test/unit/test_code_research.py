@@ -20,11 +20,11 @@ class TestCodeResearchEngine:
     @pytest.fixture
     def llm_client(self):
         """Create real DashScope LLM client for testing"""
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if dashscope_key:
-            return create_llm_client("dashscope", api_key=dashscope_key)
+            return create_llm_client("litellm", api_key=dashscope_key)
         else:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
     @pytest.fixture
     def code_research_engine(self, llm_client):
@@ -327,11 +327,11 @@ class TestCodeResearchIntegration:
     async def test_end_to_end_code_research_workflow(self):
         """Test complete code research workflow"""
         # Arrange
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         engine = CodeResearchEngine(llm_client)
         query = "microservices architecture Python"
 
@@ -356,11 +356,11 @@ class TestCodeResearchIntegration:
     async def test_real_llm_pattern_extraction(self):
         """Test pattern extraction with real LLM"""
         # Arrange
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         pattern_engine = CodePatternEngine(llm_client)
 
         code_content = """
@@ -395,11 +395,11 @@ class TestCodeResearchIntegration:
     async def test_quality_metrics_with_real_analysis(self):
         """Test quality metrics generation with real LLM"""
         # Arrange
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         engine = CodeResearchEngine(llm_client)
 
         # Act

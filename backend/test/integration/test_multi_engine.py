@@ -1,8 +1,8 @@
 """Integration tests for multi-engine communication and coordination"""
 
-import pytest
-import os
 import asyncio
+
+import pytest
 
 from app.core.research_engines import (
     DeepResearchEngine,
@@ -10,8 +10,8 @@ from app.core.research_engines import (
     ScientificResearchEngine
 )
 from app.core.smart_router import SmartRouter, ClassificationRequest
-from app.core.llm_client import create_llm_client
 from app.core.cache import create_cache
+from ..llm_test_utils import require_litellm_client
 
 
 class TestMultiEngineIntegration:
@@ -19,12 +19,8 @@ class TestMultiEngineIntegration:
 
     @pytest.fixture
     def llm_client(self):
-        """Create real DashScope LLM client for testing"""
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
-        if dashscope_key:
-            return create_llm_client("dashscope", api_key=dashscope_key)
-        else:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+        """Create real LiteLLM client for testing"""
+        return require_litellm_client()
 
     @pytest.fixture
     def research_engines(self, llm_client):
@@ -280,11 +276,11 @@ class TestEngineDataIntegration:
     @pytest.fixture
     def llm_client(self):
         """Create real DashScope LLM client for testing"""
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if dashscope_key:
-            return create_llm_client("dashscope", api_key=dashscope_key)
+            return create_llm_client("litellm", api_key=dashscope_key)
         else:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
     @pytest.mark.asyncio
     async def test_cross_engine_data_consistency(self, llm_client):

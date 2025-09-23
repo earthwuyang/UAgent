@@ -80,7 +80,7 @@ class RepoMasterBridge:
         workspace.mkdir(parents=True, exist_ok=True)
 
         # Ensure RepoMaster uses DashScope unless caller overrides.
-        os.environ.setdefault("DEFAULT_API_PROVIDER", "dashscope")
+        os.environ.setdefault("DEFAULT_API_PROVIDER", "litellm")
 
         # Prep RepoMaster configuration.
         manager = self._mode_manager_cls()

@@ -29,6 +29,13 @@ try:
 except ImportError:
     DASHSCOPE_AVAILABLE = False
 
+try:
+    import litellm
+    LITELLM_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    litellm = None  # type: ignore
+    LITELLM_AVAILABLE = False
+
 
 class LLMClient(ABC):
     """Abstract base class for LLM clients"""
@@ -504,34 +511,189 @@ class DashScopeClient(LLMClient):
                 raise
 
 
+class LiteLLMClient(LLMClient):
+    """LiteLLM-backed client that can proxy multiple LLM providers."""
 
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "gpt-4o-mini",
+        provider: Optional[str] = None,
+        api_base: Optional[str] = None,
+        extra_options: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not LITELLM_AVAILABLE:
+            raise ImportError("litellm package is required for LiteLLMClient")
+
+        self.logger = logging.getLogger(__name__)
+        normalized_model = model.strip() if isinstance(model, str) else str(model)
+        provider_prefix = (provider or "").strip().lower()
+        if provider_prefix and "/" not in normalized_model:
+            normalized_model = f"{provider_prefix}/{normalized_model}"
+        self.model = normalized_model
+        self.api_key = api_key or os.getenv("LITELLM_API_KEY")
+        self.api_base = api_base or os.getenv("LITELLM_API_BASE")
+        self.extra_options: Dict[str, Any] = {}
+        if extra_options:
+            self.extra_options.update(extra_options)
+        env_extra = os.getenv("LITELLM_EXTRA_OPTIONS")
+        if env_extra:
+            try:
+                parsed = json.loads(env_extra)
+                if isinstance(parsed, dict):
+                    self.extra_options.update(parsed)
+            except json.JSONDecodeError:
+                self.logger.warning("Invalid JSON in LITELLM_EXTRA_OPTIONS; ignoring.")
+
+    def _build_request(self, **overrides: Any) -> Dict[str, Any]:
+        payload: Dict[str, Any] = dict(self.extra_options)
+        payload.update(overrides)
+        payload.setdefault("model", self.model)
+        if self.api_key:
+            payload.setdefault("api_key", self.api_key)
+        if self.api_base:
+            payload.setdefault("api_base", self.api_base)
+        return payload
+
+    async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
+        full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification (respond with valid JSON only):"
+        content = await self.generate(full_prompt, max_tokens=512, temperature=0.1)
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as exc:
+            self.logger.error("LiteLLM classification JSON decode error: %s", exc)
+            raise
+
+        if "confidence_score" not in result and "confidence" in result:
+            result["confidence_score"] = result.pop("confidence")
+        result.setdefault("sub_components", {})
+        result.setdefault("reasoning", "")
+        return result
+
+    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        options = self._build_request(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=kwargs.get("temperature", 0.7),
+        )
+        try:
+            response = await litellm.acompletion(**options)
+        except Exception as exc:
+            self.logger.error("LiteLLM generation error: %s", exc)
+            raise
+
+        if isinstance(response, str):
+            return response
+
+        choices = response.get("choices", []) if isinstance(response, dict) else getattr(response, "choices", [])
+        if not choices:
+            return ""
+        first = choices[0]
+        message = first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
+        if isinstance(message, dict):
+            return message.get("content", "")
+        if hasattr(message, "content"):
+            return getattr(message, "content") or ""
+        return ""
+
+    async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
+        messages = [{"role": "user", "content": prompt}]
+        options = self._build_request(
+            messages=messages,
+            temperature=kwargs.get("temperature", 0.7),
+            max_tokens=kwargs.get("max_tokens", 1000),
+            stream=True,
+        )
+        try:
+            stream = await litellm.acompletion(**options)
+        except Exception as exc:
+            self.logger.error("LiteLLM streaming error: %s", exc)
+            raise
+
+        async for chunk in stream:
+            if not chunk:
+                continue
+            if isinstance(chunk, str):
+                yield chunk
+                continue
+            choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            first = choices[0]
+            delta = first.get("delta") if isinstance(first, dict) else getattr(first, "delta", None)
+            delta = delta or {}
+            text = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+            if text:
+                yield text
+
+
+
+
+
+DEFAULT_LITELLM_MODELS: Dict[str, str] = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-sonnet-20240229",
+    "dashscope": "qwen-max-latest",
+    "litellm": "gpt-4o-mini",
+}
 
 
 def create_llm_client(provider: str, api_key: Optional[str] = None, model: Optional[str] = None) -> LLMClient:
     """Factory function to create LLM client
 
     Args:
-        provider: LLM provider ('anthropic', 'openai', 'dashscope', 'mock')
+        provider: Target provider label (e.g., 'openai', 'anthropic', 'dashscope', 'litellm')
         api_key: API key for the provider
-        model: Model name to use
+        model: Model name to use; if missing, sensible defaults are applied per provider
 
     Returns:
         LLM client instance
     """
-    if provider == "anthropic":
-        if not api_key:
-            raise ValueError("API key required for Anthropic client")
-        return AnthropicClient(api_key, model or "claude-3-sonnet-20240229")
 
-    elif provider == "openai":
-        if not api_key:
-            raise ValueError("API key required for OpenAI client")
-        return OpenAIClient(api_key, model or "gpt-4-turbo-preview")
+    normalized_provider = (provider or "litellm").strip().lower()
+    if normalized_provider not in DEFAULT_LITELLM_MODELS:
+        raise ValueError(
+            f"Unknown LLM provider: {provider}. Available providers: "
+            "openai, anthropic, dashscope, litellm"
+        )
 
-    elif provider == "dashscope":
-        if not api_key:
-            raise ValueError("API key required for DashScope client")
-        return DashScopeClient(api_key, model or "qwen-max-latest")
+    resolved_model = model or os.getenv("LLM_MODEL")
+    if not resolved_model:
+        env_key = f"{normalized_provider.upper()}_MODEL"
+        resolved_model = os.getenv(env_key)
+    if not resolved_model:
+        resolved_model = os.getenv("LITELLM_MODEL")
+    if not resolved_model:
+        resolved_model = DEFAULT_LITELLM_MODELS[normalized_provider]
 
-    else:
-        raise ValueError(f"Unknown LLM provider: {provider}. Available providers: anthropic, openai, dashscope")
+    resolved_api_key = api_key or os.getenv("LLM_API_KEY")
+    if not resolved_api_key:
+        resolved_api_key = os.getenv(f"{normalized_provider.upper()}_API_KEY")
+    if not resolved_api_key:
+        resolved_api_key = os.getenv("LITELLM_API_KEY")
+
+    if not resolved_api_key:
+        raise ValueError(
+            f"API key required for provider '{normalized_provider}'. "
+            "Set LITELLM_API_KEY or the provider-specific key."
+        )
+
+    extra_options: Dict[str, Any] = {}
+    env_extra = os.getenv("LITELLM_EXTRA_OPTIONS")
+    if env_extra:
+        try:
+            parsed = json.loads(env_extra)
+            if isinstance(parsed, dict):
+                extra_options.update(parsed)
+        except json.JSONDecodeError:
+            logging.getLogger(__name__).warning(
+                "Invalid JSON in LITELLM_EXTRA_OPTIONS; ignoring.")
+
+    return LiteLLMClient(
+        api_key=resolved_api_key,
+        model=resolved_model,
+        provider=None if normalized_provider == "litellm" else normalized_provider,
+        api_base=os.getenv("LITELLM_API_BASE"),
+        extra_options=extra_options,
+    )

@@ -27,9 +27,9 @@ class TestScientificResearchFlow:
     @pytest.fixture
     def real_llm_client(self):
         """Create REAL DashScope LLM client - no mocking!"""
-        api_key = os.getenv("DASHSCOPE_API_KEY")
+        api_key = os.getenv("LITELLM_API_KEY")
         if not api_key:
-            pytest.skip("DASHSCOPE_API_KEY not set - cannot run real LLM tests")
+            pytest.skip("LITELLM_API_KEY not set - cannot run real LLM tests")
         return DashScopeClient(api_key=api_key)
 
     @pytest.fixture

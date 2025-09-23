@@ -3,20 +3,20 @@ Integration tests for WebSocket streaming system
 Tests real-time research progress and LLM interaction streaming
 """
 
-import pytest
-import pytest_asyncio
 import asyncio
 import json
-import os
 from unittest.mock import AsyncMock
+
+import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 from fastapi.websockets import WebSocketDisconnect
 
 from app.main import app
-from app.core.llm_client import create_llm_client
 from app.core.streaming_llm_client import StreamingLLMClient
 from app.core.websocket_manager import websocket_manager, progress_tracker
 from app.core.app_state import set_app_state
+from ..llm_test_utils import require_litellm_client
 
 
 @pytest.fixture
@@ -28,11 +28,7 @@ def test_client():
 @pytest.fixture
 def real_llm_client():
     """Create real LLM client for integration tests"""
-    api_key = os.getenv("DASHSCOPE_API_KEY")
-    if not api_key:
-        pytest.skip("DASHSCOPE_API_KEY not set, skipping integration tests")
-
-    return create_llm_client("dashscope", api_key=api_key, model="qwen-max-latest")
+    return require_litellm_client()
 
 
 @pytest_asyncio.fixture

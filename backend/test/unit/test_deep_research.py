@@ -11,7 +11,7 @@ from app.core.research_engines.deep_research import (
     SearchResult,
     SearchSource
 )
-from app.core.llm_client import create_llm_client
+from ..llm_test_utils import require_litellm_client
 
 
 class TestDeepResearchEngine:
@@ -19,13 +19,8 @@ class TestDeepResearchEngine:
 
     @pytest.fixture
     def llm_client(self):
-        """Create real DashScope LLM client for testing"""
-        import os
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
-        if dashscope_key:
-            return create_llm_client("dashscope", api_key=dashscope_key)
-        else:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+        """Create real LiteLLM client for testing."""
+        return require_litellm_client()
 
     @pytest.fixture
     def deep_research_engine(self, llm_client):
@@ -220,11 +215,11 @@ class TestSearchEngineIntegration:
     def llm_client(self):
         """Create real DashScope LLM client for testing"""
         import os
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if dashscope_key:
-            return create_llm_client("dashscope", api_key=dashscope_key)
+            return create_llm_client("litellm", api_key=dashscope_key)
         else:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
     @pytest.mark.asyncio
     async def test_concurrent_searches(self, llm_client):
@@ -273,11 +268,11 @@ class TestDeepResearchIntegration:
         """Test complete research workflow"""
         # Arrange
         import os
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         engine = DeepResearchEngine(llm_client)
         query = "quantum computing applications"
 
@@ -299,11 +294,11 @@ class TestDeepResearchIntegration:
         """Test research quality and completeness"""
         # Arrange
         import os
-        dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+        dashscope_key = os.getenv("LITELLM_API_KEY")
         if not dashscope_key:
-            pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+            pytest.skip("LITELLM_API_KEY not available for real LLM testing")
 
-        llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+        llm_client = create_llm_client("litellm", api_key=dashscope_key)
         engine = DeepResearchEngine(llm_client)
         query = "sustainable energy solutions"
 

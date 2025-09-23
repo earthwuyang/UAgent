@@ -4,26 +4,44 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_ENV_FILE="$ROOT_DIR/backend/.env"
+PROJECT_ENV_FILE="$ROOT_DIR/.env"
+LEGACY_ENV_FILE="$ROOT_DIR/backend/.env"
+CUSTOM_ENV_FILE="${1:-}" 
 
-ENV_FILE="${1:-$DEFAULT_ENV_FILE}"
+load_env_file() {
+  local file="$1"
+if [[ -f "$file" ]]; then
+    echo "[start_backend] Loading environment from $file"
+    set -a
+    set +u
+    # shellcheck disable=SC1090
+    source "$file"
+    set -u
+    set +a
+fi
+}
 
-if [[ -f "$ENV_FILE" ]]; then
-  echo "[start_backend] Loading environment from $ENV_FILE"
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+load_env_file "$PROJECT_ENV_FILE"
+if [[ -n "$CUSTOM_ENV_FILE" ]]; then
+  load_env_file "$CUSTOM_ENV_FILE"
+else
+  load_env_file "$LEGACY_ENV_FILE"
 fi
 
-UAGENT_BACKEND_HOST="${UAGENT_BACKEND_HOST:-127.0.0.1}"
-UAGENT_BACKEND_PORT="${UAGENT_BACKEND_PORT:-8001}"
-UAGENT_BACKEND_RELOAD="${UAGENT_BACKEND_RELOAD:-true}"
+BACKEND_HOST="${BACKEND_HOST:-${UAGENT_BACKEND_HOST:-127.0.0.1}}"
+BACKEND_PORT="${BACKEND_PORT:-${UAGENT_BACKEND_PORT:-}}"
+BACKEND_RELOAD="${BACKEND_RELOAD:-${UAGENT_BACKEND_RELOAD:-true}}"
+
+if [[ -z "$BACKEND_PORT" ]]; then
+  echo "[start_backend] ERROR: BACKEND_PORT (or UAGENT_BACKEND_PORT) must be set in the environment." >&2
+  echo "[start_backend] Hint: add BACKEND_PORT to your .env file." >&2
+  exit 1
+fi
 
 cd "$ROOT_DIR/backend"
 
-UVICORN_ARGS=(app.main:app --host "$UAGENT_BACKEND_HOST" --port "$UAGENT_BACKEND_PORT")
-if [[ "$UAGENT_BACKEND_RELOAD" == "true" ]]; then
+UVICORN_ARGS=(app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT")
+if [[ "$BACKEND_RELOAD" == "true" ]]; then
   UVICORN_ARGS+=(--reload)
 fi
 

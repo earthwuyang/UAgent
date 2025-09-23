@@ -4,10 +4,11 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import re
 import uuid
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple, Union, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -482,11 +483,18 @@ class ExperimentDesigner:
 class ExperimentExecutor:
     """Execute experiments and collect results"""
 
-    def __init__(self, llm_client: LLMClient, openhands_client=None, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        openhands_client=None,
+        config: Optional[Dict[str, Any]] = None,
+        progress_logger: Optional[Callable[[str, str, float, str, Optional[Dict[str, Any]], Optional[str], str], Awaitable[str]]] = None,
+    ):
         self.llm_client = llm_client
         self.openhands_client = openhands_client  # For actual code execution
         self.logger = logging.getLogger(__name__)
         self.config = config or {}
+        self._progress_logger = progress_logger
         if self.config.get("allow_simulated_experiments"):
             self.logger.warning(
                 "allow_simulated_experiments is deprecated and ignored; simulated runs are no longer supported"
@@ -545,6 +553,7 @@ class ExperimentExecutor:
         session_context: Optional[OpenHandsSessionContext] = None,
         prior_errors: Optional[List[str]] = None,
         attempt_number: int = 1,
+        attempt_context: Optional[Dict[str, Any]] = None,
     ) -> ExperimentExecution:
         """Execute experiment according to design"""
 
@@ -556,6 +565,7 @@ class ExperimentExecutor:
             workspace_id=session_context.workspace_id if session_context else None,
             session_id=session_context.session_id if session_context else None,
         )
+        attempt_context = attempt_context or {}
 
         prior_errors = list(prior_errors or [])
         try:
@@ -600,6 +610,7 @@ class ExperimentExecutor:
                     execution,
                     session_context,
                     prior_errors,
+                    attempt_context=attempt_context,
                 )
                 execution.output_data.update(data_result or {})
             else:
@@ -725,9 +736,61 @@ class ExperimentExecutor:
         execution: ExperimentExecution,
         session_context: OpenHandsSessionContext,
         prior_errors: Optional[List[str]] = None,
+        attempt_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Collect experimental data using OpenHands code execution."""
         prior_errors = prior_errors or []
+        attempt_context = attempt_context or {}
+
+        parent_node_id = attempt_context.get("parent_node_id")
+        parent_phase = attempt_context.get("parent_phase")
+        progress_anchor = float(attempt_context.get("progress_anchor", execution.progress or 0.0))
+        progress_increment = float(attempt_context.get("progress_increment", 5.0))
+        phase_prefix = attempt_context.get("phase_prefix") or f"{execution.id}_data_collection"
+        codeact_node_id = attempt_context.get("codeact_node_id")
+
+        async def _log_collection_event(
+            suffix: str,
+            message: str,
+            offset: float,
+            metadata_overrides: Optional[Dict[str, Any]] = None,
+            node_type: str = "step",
+        ) -> None:
+            nonlocal codeact_node_id
+            if not self._progress_logger or not execution.session_id or parent_node_id is None:
+                return
+
+            metadata = dict(metadata_overrides or {})
+            metadata.setdefault("parent_id", parent_node_id)
+            metadata.setdefault("node_type", node_type)
+            metadata.setdefault("title", message)
+            metadata.setdefault("phase", suffix)
+            if codeact_node_id:
+                metadata.setdefault("node_id", codeact_node_id)
+
+            phase_name = f"{phase_prefix}_{suffix}"
+            progress_value = max(0.0, min(100.0, progress_anchor + (offset * progress_increment)))
+
+            try:
+                new_node_id = await self._progress_logger(
+                    execution.session_id,
+                    phase_name,
+                    progress_value,
+                    message,
+                    metadata,
+                    parent_phase=parent_phase,
+                    node_type=node_type,
+                )
+                if not codeact_node_id and new_node_id:
+                    codeact_node_id = new_node_id
+            except Exception as exc:  # pragma: no cover - logging best effort
+                self.logger.debug("Failed to log data collection event %s: %s", suffix, exc)
+
+        await _log_collection_event(
+            suffix="start",
+            message="Preparing experimental data collection",
+            offset=0.0,
+        )
 
         error_context = ""
         if prior_errors:
@@ -767,10 +830,22 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             try:
                 ras_result = await self._run_ras_plan(design, execution, session_context)
                 if ras_result:
+                    await _log_collection_event(
+                        suffix="ras_complete",
+                        message="ResearchActionSpec executed successfully",
+                        offset=0.35,
+                        metadata_overrides={"node_type": "step", "status": "completed"},
+                    )
                     return ras_result
             except Exception as ras_exc:
                 self.logger.error("RAS execution failed: %s", ras_exc)
                 prior_errors.append(str(ras_exc))
+                await _log_collection_event(
+                    suffix="ras_error",
+                    message=f"RAS execution failed: {ras_exc}",
+                    offset=0.3,
+                    metadata_overrides={"status": "error", "error": str(ras_exc)},
+                )
 
         codeact_enabled = (
             self.config.get("use_codeact", True)
@@ -809,18 +884,29 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                                 return None
                     return None
 
+                event_offsets = {
+                    "planning": 0.4,
+                    "tool_call": 0.5,
+                    "tool_result": 0.6,
+                    "tool_result_update": 0.65,
+                    "finish": 0.75,
+                    "error": 0.7,
+                }
+
                 async def _cb(event: str, data: Dict[str, Any]) -> None:
-                    try:
-                        await progress_tracker.log_research_progress(
-                            session_id=session_context.session_id,
-                            engine="scientific_research",
-                            phase=f"codeact_{event}",
-                            progress=62.0,
-                            message=f"CodeAct {event}",
-                            metadata=data,
-                        )
-                    except Exception:
-                        pass
+                    await _log_collection_event(
+                        suffix=event,
+                        message=f"CodeAct {event}",
+                        offset=event_offsets.get(event, 0.55),
+                        metadata_overrides={
+                            "node_type": "step",
+                            "node_id": codeact_node_id,
+                            "parent_id": parent_node_id,
+                            "status": data.get("success"),
+                            "preview": data.get("observation_preview"),
+                            "tool": data.get("tool"),
+                        },
+                    )
 
                 base_goal = (
                     f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
@@ -850,6 +936,13 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                     execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
                     final_data = _extract_final_result(result)
                     if final_data:
+                        await _log_collection_event(
+                            suffix="finish",
+                            message="CodeAct completed successfully",
+                            offset=0.85,
+                            metadata_overrides={"node_type": "result", "status": "completed"},
+                            node_type="result",
+                        )
                         payload: Dict[str, Any] = {"success": True}
                         payload.update(final_data)
                         return payload
@@ -862,6 +955,12 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
 
                 raise RuntimeError("CodeAct did not reach a final result after retries")
             except Exception as exc:
+                await _log_collection_event(
+                    suffix="error",
+                    message=f"CodeAct flow error: {exc}",
+                    offset=0.8,
+                    metadata_overrides={"status": "error", "error": str(exc)},
+                )
                 raise RuntimeError(f"CodeAct flow error: {exc}") from exc
 
         raise RuntimeError(
@@ -1112,7 +1211,12 @@ class ScientificResearchEngine:
         # Initialize sub-engines
         self.hypothesis_generator = HypothesisGenerator(llm_client)
         self.experiment_designer = ExperimentDesigner(llm_client)
-        self.experiment_executor = ExperimentExecutor(llm_client, openhands_client, config=self.config)
+        self.experiment_executor = ExperimentExecutor(
+            llm_client,
+            openhands_client,
+            config=self.config,
+            progress_logger=self._log_progress,
+        )
         self.goal_bridge = (
             OpenHandsGoalPlanBridge(openhands_client, llm_client)
             if openhands_client and llm_client
@@ -1174,6 +1278,18 @@ class ScientificResearchEngine:
 
         self._session_phase_nodes: Dict[str, Dict[str, str]] = {}
         self._session_root_nodes: Dict[str, str] = {}
+
+        self.preserve_successful_workspaces = self._to_bool(
+            self._env_or_config("preserve_successful_workspaces", "PRESERVE_SUCCESSFUL_WORKSPACES", True)
+        )
+        archive_dir_cfg = self._env_or_config(
+            "success_workspace_archive_dir",
+            "SUCCESS_WORKSPACE_ARCHIVE_DIR",
+            "./artifacts/successful_experiments",
+        )
+        self.success_workspace_archive_dir = Path(archive_dir_cfg).expanduser().resolve()
+        if self.preserve_successful_workspaces:
+            self.success_workspace_archive_dir.mkdir(parents=True, exist_ok=True)
 
         pool_limit = int(self.config.get("openhands_session_limit", 4))
         self._openhands_session_lock = asyncio.Lock()
@@ -1423,7 +1539,7 @@ class ScientificResearchEngine:
                     title=item.get("title", f"Idea {idx}"),
                     summary=item.get("summary", "Proposed research direction"),
                     objective=item.get("objective", research_question),
-                    plan=item.get("plan", ""),
+                    plan=self._normalize_plan(item.get("plan")),
                     search_queries=queries,
                 )
             )
@@ -1480,7 +1596,7 @@ class ScientificResearchEngine:
                 title=data.get("title", ""),
                 summary=data.get("summary", ""),
                 objective=data.get("objective", ""),
-                plan=data.get("plan", ""),
+                plan=ScientificResearchEngine._normalize_plan(data.get("plan")),
                 search_queries=[
                     str(q).strip() for q in data.get("search_queries", []) if str(q).strip()
                 ],
@@ -1488,6 +1604,26 @@ class ScientificResearchEngine:
             for idx, data in enumerate(ideas, start=1)
         ]
         return ScientificResearchEngine._score_research_ideas(temp_ideas, max_ideas)
+
+    @staticmethod
+    def _normalize_plan(raw_plan: Any) -> str:
+        if isinstance(raw_plan, str):
+            return raw_plan.strip()
+        if isinstance(raw_plan, list):
+            return " ".join(
+                str(item).strip()
+                for item in raw_plan
+                if str(item).strip()
+            )
+        if isinstance(raw_plan, dict):
+            return " ".join(
+                f"{key}: {value}".strip()
+                for key, value in raw_plan.items()
+                if str(value).strip()
+            )
+        if raw_plan is None:
+            return ""
+        return str(raw_plan).strip()
 
     def _record_gepa_example(
         self,
@@ -2064,39 +2200,129 @@ class ScientificResearchEngine:
         parent_phase = f"idea_{idea.id}_experiments_iter_{iteration_number}"
 
         for attempt in range(1, self.max_attempts_per_experiment + 1):
-            execution = await self.experiment_executor.execute_experiment(
-                design,
-                session_context,
-                prior_errors=prior_errors,
-                attempt_number=attempt,
-            )
-            execution_history.append(execution)
+            attempt_progress = attempt_base_progress + per_iteration_increment * min(0.15, 0.05 * attempt)
+            attempt_phase = f"{idea.id}_execution_attempt_{attempt}"
+            attempt_node_id: Optional[str] = None
 
             if session_id and idea.node_id:
-                attempt_progress = attempt_base_progress + per_iteration_increment * min(0.15, 0.05 * attempt)
-                await self._log_progress(
+                attempt_node_id = await self._log_progress(
                     session_id,
-                    phase=f"{idea.id}_execution_{execution.id}_attempt_{attempt}",
+                    phase=attempt_phase,
                     progress=attempt_progress,
-                    message=f"Attempt {attempt} for {design.name} ({execution.status.value})",
+                    message=f"Attempt {attempt} for {design.name} (starting)",
                     metadata={
                         "parent_id": idea.node_id,
                         "node_type": "step",
                         "attempt": attempt,
                         "round": experiment_round,
+                        "status": "starting",
+                    },
+                    parent_phase=parent_phase,
+                ) or attempt_node_id
+
+            execution = await self.experiment_executor.execute_experiment(
+                design,
+                session_context,
+                prior_errors=prior_errors,
+                attempt_number=attempt,
+                attempt_context={
+                    "parent_node_id": attempt_node_id,
+                    "parent_phase": attempt_phase,
+                    "progress_anchor": attempt_progress,
+                    "progress_increment": per_iteration_increment,
+                    "phase_prefix": f"{attempt_phase}_collect",
+                },
+            )
+            execution_history.append(execution)
+
+            if session_id and idea.node_id and attempt_node_id:
+                await self._log_progress(
+                    session_id,
+                    phase=attempt_phase,
+                    progress=attempt_progress,
+                    message=f"Attempt {attempt} for {design.name} ({execution.status.value})",
+                    metadata={
+                        "node_id": attempt_node_id,
+                        "parent_id": idea.node_id,
+                        "node_type": "step",
+                        "attempt": attempt,
+                        "round": experiment_round,
                         "status": execution.status.value,
+                        "execution_id": execution.id,
                         "errors": execution.errors[:2] if execution.errors else [],
                     },
                     parent_phase=parent_phase,
                 )
 
+            execution.output_data.setdefault("attempt", attempt)
+            execution.output_data.setdefault("round", experiment_round)
+
             if execution.status == ExperimentStatus.COMPLETED:
+                await self._archive_successful_execution(
+                    execution,
+                    design,
+                    iteration_number,
+                    attempt,
+                    session_context,
+                )
                 return execution, execution_history
 
             if execution.errors:
                 prior_errors.extend(execution.errors)
 
         return execution_history[-1], execution_history
+
+    async def _archive_successful_execution(
+        self,
+        execution: ExperimentExecution,
+        design: ExperimentDesign,
+        iteration_number: int,
+        attempt_number: int,
+        session_context: Optional[OpenHandsSessionContext],
+    ) -> None:
+        if not self.preserve_successful_workspaces:
+            return
+        if not self.openhands_client:
+            return
+
+        workspace_id = execution.workspace_id or (
+            session_context.workspace_id if session_context else None
+        )
+        if not workspace_id:
+            return
+
+        workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
+        if not workspace_path or not workspace_path.exists():
+            return
+
+        session_label = execution.session_id or (
+            session_context.session_id if session_context else "unknown_session"
+        )
+        archive_root = self.success_workspace_archive_dir / session_label / design.id
+        try:
+            archive_root.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.logger.warning("Unable to prepare archive directory %s: %s", archive_root, exc)
+            return
+
+        archive_basename = archive_root / f"{execution.id}_iter{iteration_number}_attempt{attempt_number}"
+
+        try:
+            archive_path = await asyncio.to_thread(
+                shutil.make_archive,
+                str(archive_basename),
+                "zip",
+                root_dir=str(workspace_path),
+            )
+            execution.output_data["workspace_archive"] = archive_path
+            execution.logs.append(f"Workspace archived to {archive_path}")
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to archive workspace %s for execution %s: %s",
+                workspace_id,
+                execution.id,
+                exc,
+            )
 
     async def _evaluate_idea(
         self,

@@ -20,15 +20,16 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
 
 @pytest.fixture
 def llm_client() -> LLMClient:
-    """Create LLM client for testing - ALWAYS use real DashScope"""
-    # Check for DashScope API key
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+    """Create LLM client for testing using the LiteLLM gateway."""
+    provider = (os.getenv("DEFAULT_API_PROVIDER") or os.getenv("LLM_PROVIDER") or "litellm").strip().lower()
+    api_key = os.getenv("LITELLM_API_KEY") or os.getenv("LLM_API_KEY")
 
-    if dashscope_key:
-        return create_llm_client("dashscope", api_key=dashscope_key)
-    else:
-        # Skip tests if no API key available
-        pytest.skip("DASHSCOPE_API_KEY not available for real LLM testing")
+    if not api_key:
+        pytest.skip("LITELLM_API_KEY not available for real LLM testing")
+
+    model = os.getenv("LITELLM_MODEL") or os.getenv("LLM_MODEL")
+
+    return create_llm_client(provider, api_key=api_key, model=model)
 
 
 @pytest.fixture

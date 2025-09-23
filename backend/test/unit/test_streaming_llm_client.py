@@ -15,11 +15,11 @@ from app.core.llm_client import create_llm_client
 @pytest.fixture
 def real_llm_client():
     """Create real DashScope LLM client"""
-    api_key = os.getenv("DASHSCOPE_API_KEY")
+    api_key = os.getenv("LITELLM_API_KEY")
     if not api_key:
-        pytest.skip("DASHSCOPE_API_KEY not set, skipping real LLM tests")
+        pytest.skip("LITELLM_API_KEY not set, skipping real LLM tests")
 
-    return create_llm_client("dashscope", api_key=api_key, model="qwen-max-latest")
+    return create_llm_client("litellm", api_key=api_key, model="qwen-max-latest")
 
 
 

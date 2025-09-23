@@ -40,7 +40,7 @@ Create a `.env` file in the backend directory:
 
 ```bash
 # backend/.env
-DASHSCOPE_API_KEY=your_dashscope_api_key_here
+LITELLM_API_KEY=your_dashscope_api_key_here
 WORKSPACE_DIR=/tmp/uagent_workspaces
 MAX_ITERATIONS=3
 CONFIDENCE_THRESHOLD=0.8
@@ -48,7 +48,7 @@ CONFIDENCE_THRESHOLD=0.8
 
 **Required Environment Variables:**
 
-- `DASHSCOPE_API_KEY`: Your DashScope API key for Qwen LLM (Required)
+- `LITELLM_API_KEY`: Your DashScope API key for Qwen LLM (Required)
 - `WORKSPACE_DIR`: Directory for OpenHands workspaces (Optional, defaults to `/tmp/uagent_workspaces`)
 - `MAX_ITERATIONS`: Maximum iterations for scientific research (Optional, defaults to 3)
 - `CONFIDENCE_THRESHOLD`: Confidence threshold for research completion (Optional, defaults to 0.8)
@@ -84,7 +84,7 @@ No additional configuration required for development.
 ```bash
 cd backend
 source .venv/bin/activate  # Activate virtual environment
-DASHSCOPE_API_KEY=your_api_key_here uvicorn app.main:app --host 127.0.0.1 --port 8012 --reload
+LITELLM_API_KEY=your_api_key_here uvicorn app.main:app --host 127.0.0.1 --port 8012 --reload
 ```
 
 **Alternative method using environment file:**
@@ -209,11 +209,11 @@ Navigate to `http://localhost:3000/dashboard` to access the real-time research v
 
 #### 1. Backend Fails to Start
 
-**Error**: `DASHSCOPE_API_KEY environment variable is required`
+**Error**: `LITELLM_API_KEY environment variable is required`
 
 **Solution**: Ensure your DashScope API key is properly configured:
 ```bash
-export DASHSCOPE_API_KEY=your_api_key_here
+export LITELLM_API_KEY=your_api_key_here
 ```
 
 #### 2. Frontend Import Errors
@@ -304,7 +304,7 @@ uagent/
 
 ```bash
 # Production environment variables
-DASHSCOPE_API_KEY=your_production_api_key
+LITELLM_API_KEY=your_production_api_key
 WORKSPACE_DIR=/var/lib/uagent/workspaces
 MAX_ITERATIONS=5
 CONFIDENCE_THRESHOLD=0.85

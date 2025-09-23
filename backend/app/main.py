@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -27,6 +28,9 @@ from .integrations.openhands_adapter import OpenHandsAppClient
 from .memory import AgentMemory, AVDBConfig
 
 
+# Load environment configuration from .env before setup
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -42,15 +46,29 @@ async def lifespan(app: FastAPI):
     logger.info("Starting UAgent system...")
 
     # Initialize LLM client
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
-    if not dashscope_key:
-        logger.warning("DASHSCOPE_API_KEY not found - some features may not work")
+    provider_env = os.getenv("DEFAULT_API_PROVIDER") or os.getenv("LLM_PROVIDER")
+    provider = (provider_env or "litellm").strip().lower()
+
+    api_key = (
+        os.getenv("LLM_API_KEY")
+        or os.getenv(f"{provider.upper()}_API_KEY")
+        or os.getenv("LITELLM_API_KEY")
+    )
+    model_name = (
+        os.getenv("LLM_MODEL")
+        or os.getenv(f"{provider.upper()}_MODEL")
+        or os.getenv("LITELLM_MODEL")
+    )
+
+    try:
+        llm_client = create_llm_client(provider, api_key=api_key, model=model_name)
+        logger.info("Initialized LLM client using provider=%s model=%s", provider, model_name or "default")
+    except ValueError as exc:
+        logger.error("Failed to initialize LLM client: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="DASHSCOPE_API_KEY environment variable is required"
-        )
-
-    llm_client = create_llm_client("dashscope", api_key=dashscope_key)
+            detail=str(exc),
+        ) from exc
 
     # Initialize cache
     cache = create_cache("memory")
@@ -134,11 +152,15 @@ async def lifespan(app: FastAPI):
     research_graph = ResearchGraphService(research_graph_path)
     playwright_headless = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
     browser_service = PlaywrightCaptureService(headless=playwright_headless)
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
     vision_analyzer = None
-    try:
-        vision_analyzer = QwenVisionAnalyzer(api_key=dashscope_key)
-    except Exception as vision_exc:
-        logger.warning("Qwen-VL analyzer unavailable: %s", vision_exc)
+    if dashscope_key:
+        try:
+            vision_analyzer = QwenVisionAnalyzer(api_key=dashscope_key)
+        except Exception as vision_exc:
+            logger.warning("Qwen-VL analyzer unavailable: %s", vision_exc)
+    else:
+        logger.debug("Skipping Qwen-VL analyzer initialization; no DashScope key provided")
     connectors = {
         "arxiv": ArxivClient(),
         "openalex": OpenAlexClient(mailto=os.getenv("OPENALEX_MAILTO")),
