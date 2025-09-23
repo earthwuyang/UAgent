@@ -13,7 +13,7 @@ Universal Agent (UAgent) is an intelligent research system with multi-engine orc
 - Python 3.8+
 - Node.js 16+
 - npm or yarn
-- DashScope API Key (Qwen LLM)
+- At least one LLM API key (OpenAI, Anthropic, OpenRouter, etc.)
 
 ## Environment Setup
 
@@ -36,29 +36,20 @@ pip install -r requirements.txt
 
 #### Environment Variables
 
-Create a `.env` file in the backend directory:
+Copy `.env.example` to `.env` at the repository root and fill in the values relevant to your setup:
 
 ```bash
-# backend/.env
-LITELLM_API_KEY=your_dashscope_api_key_here
-WORKSPACE_DIR=/tmp/uagent_workspaces
-MAX_ITERATIONS=3
-CONFIDENCE_THRESHOLD=0.8
+cp .env.example .env
 ```
 
-**Required Environment Variables:**
+Key entries:
 
-- `LITELLM_API_KEY`: Your DashScope API key for Qwen LLM (Required)
-- `WORKSPACE_DIR`: Directory for OpenHands workspaces (Optional, defaults to `/tmp/uagent_workspaces`)
-- `MAX_ITERATIONS`: Maximum iterations for scientific research (Optional, defaults to 3)
-- `CONFIDENCE_THRESHOLD`: Confidence threshold for research completion (Optional, defaults to 0.8)
+- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`: provide at least one LLM key.
+- `LITELLM_MODEL`: defaults to `openai/glm-4.5`; adjust if you prefer another provider.
+- `UAGENT_WORKSPACE_DIR`: host path where UAgent stores session workspaces.
+- `SANDBOX_VOLUMES` / `SANDBOX_USER_ID`: configure when running OpenHands in Docker so the runtime can access your workspace with the correct UID.
 
-#### Get DashScope API Key
-
-1. Visit [DashScope Console](https://dashscope.console.aliyun.com/)
-2. Sign up/Login to your Alibaba Cloud account
-3. Create an API key for Qwen models
-4. Copy the API key to your `.env` file
+You can further tweak advanced LiteLLM settings with `LITELLM_EXTRA_OPTIONS` and `LITELLM_CLASSIFICATION_MAX_TOKENS` if needed.
 
 ### 3. Frontend Setup
 
@@ -135,6 +126,16 @@ The frontend will start on `http://localhost:3000`
 - **Homepage**: `http://localhost:3000/`
 - **Research Dashboard**: `http://localhost:3000/dashboard`
 - **System Status**: `http://localhost:3000/status`
+
+### 3. (Optional) OpenHands Runtime Quickstart
+
+Use the helper scripts under `scripts/` depending on your environment:
+
+- `scripts/openhands_local.sh` – launches OpenHands via `uv` on the host (recommended first test).
+- `scripts/openhands_docker.sh` – runs OpenHands in Docker (requires `CODE_PATH` to be set to your workspace path and mounts the host Docker socket).
+- `scripts/oh_smoke.sh` – quick health check against the running OpenHands server.
+
+For Linux hosts, if the runtime cannot reach its sandbox container, export `SANDBOX_USE_HOST_NETWORK=true` and `DOCKER_HOST_ADDR=127.0.0.1` before starting as a last resort.
 
 ## Using the Research Dashboard
 
@@ -304,10 +305,14 @@ uagent/
 
 ```bash
 # Production environment variables
-LITELLM_API_KEY=your_production_api_key
-WORKSPACE_DIR=/var/lib/uagent/workspaces
-MAX_ITERATIONS=5
-CONFIDENCE_THRESHOLD=0.85
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+OPENROUTER_API_KEY=
+LITELLM_MODEL=openai/glm-4.5
+LITELLM_CLASSIFICATION_MAX_TOKENS=64000
+UAGENT_WORKSPACE_DIR=/var/lib/uagent/workspaces
+SANDBOX_VOLUMES=/var/lib/uagent/workspaces:/workspace:rw
+SANDBOX_USER_ID=1000
 CORS_ORIGINS=https://yourdomain.com
 ```
 
@@ -339,6 +344,6 @@ For issues and questions:
 - **System Version**: 1.0.0
 - **Backend**: FastAPI + Python 3.8+
 - **Frontend**: React + TypeScript + Vite
-- **LLM Provider**: DashScope (Qwen)
+- **LLM Providers**: Configurable via LiteLLM (OpenAI / Anthropic / OpenRouter / GLM)
 - **Code Execution**: OpenHands CLI
 - **Real-time Updates**: WebSocket connections

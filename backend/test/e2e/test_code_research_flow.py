@@ -34,7 +34,10 @@ class TestCodeResearchFlow:
     @pytest.fixture
     def real_openhands_client(self):
         """Create REAL OpenHands client for code execution"""
-        workspace_dir = os.getenv("WORKSPACE_DIR", "/tmp/uagent_test_workspaces")
+        workspace_dir = os.getenv(
+            "UAGENT_WORKSPACE_DIR",
+            os.getenv("WORKSPACE_DIR", "/tmp/uagent_test_workspaces"),
+        )
         return OpenHandsClient(base_workspace_dir=workspace_dir)
 
     @pytest.mark.asyncio

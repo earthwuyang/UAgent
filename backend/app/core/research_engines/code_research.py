@@ -663,7 +663,12 @@ class CodeResearchEngine:
         workflow_plan: Optional[Dict[str, Any]],
     ) -> RepoMasterBridgeResult:
         bridge = self._get_repomaster_bridge()
-        workspace_root = Path(os.getenv("WORKSPACE_DIR", "/tmp/uagent_workspaces"))
+        workspace_root = Path(
+            os.getenv(
+                "UAGENT_WORKSPACE_DIR",
+                os.getenv("WORKSPACE_DIR", "/tmp/uagent_workspaces"),
+            )
+        )
         workspace = workspace_root / session_id / "repomaster"
 
         repository_hint = None

@@ -35,7 +35,10 @@ class TestScientificResearchFlow:
     @pytest.fixture
     def real_openhands_client(self):
         """Create REAL OpenHands client for scientific experiments"""
-        workspace_dir = os.getenv("WORKSPACE_DIR", "/tmp/uagent_scientific_workspaces")
+        workspace_dir = os.getenv(
+            "UAGENT_WORKSPACE_DIR",
+            os.getenv("WORKSPACE_DIR", "/tmp/uagent_scientific_workspaces"),
+        )
         return OpenHandsClient(base_workspace_dir=workspace_dir)
 
     @pytest.fixture
