@@ -65,13 +65,12 @@ class OpenHandsGoalPlanBridge:
         self._bootstrap_goal = os.getenv(
             "CODEACT_BOOTSTRAP_GOAL",
             """
-Prepare the workspace for complex software experiments **without** installing new system packages.
-- Do NOT run `apt-get`, `sudo`, or any other system package manager. Assume required toolchains already exist.
-- Inspect the current environment (e.g., versions of git, python, postgres, duckdb) and record findings in `workspace/env_report.txt`. If a tool is missing, note it clearly instead of attempting an install.
-- Create any runtime directories needed under the workspace (for example `workspace/db/postgres`, `workspace/db/duckdb`) and ensure permissions allow the current user to write there.
-- Generate a shell script `workspace/env.sh` exporting runtime variables such as PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, DUCKDB_PATH, etc., pointing them at workspace locations or reasonable defaults. This script must be idempotent and safe to source multiple times.
-- Where services are required (e.g., Postgres, DuckDB), prepare start-up scripts or document the commands needed using existing binaries, but do not attempt to install or start privileged daemons.
-- Finish by summarising the prepared resources and any gaps in `workspace/bootstrap_summary.md`.
+Prepare the workspace for software and data experiments **without** installing new system packages. Operate only within the provided directory tree.
+- Do NOT run `apt-get`, `sudo`, or any system package manager. Assume required toolchains already exist.
+- Inspect the current environment (e.g., git, python, compilers, databases found on PATH) and record findings in `workspace/env_report.txt`. If a tool is missing, note it instead of attempting installation.
+- Only create directories or files that the current task explicitly requires. Avoid hard-coded technology names; prefer generic locations such as `workspace/run/` or `workspace/tmp/` as needed.
+- Generate a shell script `workspace/env.sh` that exports environment variables actually used in the current workspace (leave placeholders commented when no concrete values exist). The script must be idempotent and safe to source multiple times.
+- Summarise the inspection results, outstanding gaps, and created resources in `workspace/bootstrap_summary.md`.
 All actions must be idempotent and keep the workspace self-contained.
 """,
         )

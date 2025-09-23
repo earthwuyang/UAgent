@@ -924,6 +924,27 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
             )
 
         ras_spec = ResearchActionSpec.parse_obj(spec_payload)
+
+        design_context = {
+            "description": getattr(design, "description", None),
+            "methodology": getattr(design, "methodology", None),
+            "analysis_plan": getattr(design, "analysis_plan", None),
+            "data_collection_plan": getattr(design, "data_collection_plan", None),
+            "code_requirements": getattr(design, "code_requirements", None),
+            "resource_requirements": getattr(design, "resource_requirements", None),
+        }
+        try:
+            validate_research_action_spec(
+                ras_spec,
+                design_context=design_context,
+            )
+        except RASValidationError as exc:
+            origin_label = spec_origin or f"experiments/{design.id}/ras_spec.json"
+            message = f"RAS spec at {origin_label} failed validation: {exc}"
+            execution.intermediate_results.setdefault("ras_validation_errors", []).append(message)
+            self.logger.warning(message)
+            raise RuntimeError(message) from exc
+
         ras_executor = RASExecutor(ws_mgr=self.openhands_client.workspace_manager)
         run_dir = workspace_path
 
@@ -967,7 +988,18 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         except Exception as exc:  # pragma: no cover - defensive parsing
             self.logger.warning("Failed to parse observations: %s", exc)
 
-        bench_summary["success"] = True
+        # Determine success based on assertions (if present)
+        assertions = bench_summary.get("assertions")
+        if assertions:
+            failed = [item for item in assertions if item.get("status") != "passed"]
+            if failed:
+                raise RuntimeError(
+                    "RAS assertions failed: "
+                    + ", ".join(
+                        f"{entry.get('type', 'unknown')}={entry.get('status')}" for entry in failed
+                    )
+                )
+        bench_summary["success"] = not assertions or not failed
         return bench_summary
 
     async def _analyze_experimental_data(self, design: ExperimentDesign, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -3172,3 +3204,4 @@ if GEPAOptimizer is not None:
             return {"raw": response, "prompt": prompt_text, "ideas": idea_dicts}
 from ..exec.ras import ResearchActionSpec
 from ..exec.ras_executor import RASExecutor, RASExecutionError
+from ..exec.ras_validator import RASValidationError, validate_research_action_spec
