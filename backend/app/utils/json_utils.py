@@ -40,6 +40,17 @@ def sanitize_json_strings(payload: str) -> str:
     if not payload:
         return payload
 
+    payload = (
+        payload.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+    )
+
     result: list[str] = []
     in_string = False
     escape = False

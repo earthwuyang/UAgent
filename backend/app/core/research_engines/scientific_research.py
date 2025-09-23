@@ -515,6 +515,14 @@ class ExperimentDesigner:
         try:
             data = safe_json_loads(sanitized)
         except JsonParseError as exc:
+            preview = (payload or "").strip().replace("\n", " ")
+            if len(preview) > 500:
+                preview = preview[:497] + "..."
+            logging.getLogger(__name__).error(
+                "Experiment design JSON parse failed: %s | raw=%s",
+                exc,
+                preview or "<empty>",
+            )
             raise RuntimeError(f"Experiment design returned invalid JSON: {exc}") from exc
 
         if not isinstance(data, dict):
@@ -552,7 +560,7 @@ class ExperimentDesigner:
         10. "code_requirements": Programming/implementation requirements
         11. "dependencies": External dependencies needed
 
-        Respond with valid JSON only.
+        Respond with a raw JSON object only (no markdown fences, no commentary, no code blocks).
         """
 
         response = await self.llm_client.generate(
