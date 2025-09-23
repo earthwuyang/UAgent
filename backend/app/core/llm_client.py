@@ -5,10 +5,13 @@ import logging
 import os
 import asyncio
 import random
+import re
 import time
 from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
+
+from ..utils.json_utils import JsonParseError, safe_json_loads
 
 try:
     import anthropic
@@ -556,14 +559,33 @@ class LiteLLMClient(LLMClient):
         return payload
 
     async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
-        full_prompt = f"{prompt}\n\nUser request: {request}\n\nClassification (respond with valid JSON only):"
-        content = await self.generate(full_prompt, max_tokens=512, temperature=0.1)
+        classification_tokens = int(os.getenv("LITELLM_CLASSIFICATION_MAX_TOKENS", "64000"))
+        full_prompt = (
+            f"{prompt}\n\nUser request: {request}\n\n"
+            "Respond with a raw JSON object only. Do not include markdown fences, code blocks, or extra commentary."
+        )
+        content = await self.generate(full_prompt, max_tokens=classification_tokens, temperature=0.1)
         try:
-            result = json.loads(content)
-        except json.JSONDecodeError as exc:
-            self.logger.error("LiteLLM classification JSON decode error: %s", exc)
+            parsed = safe_json_loads(content)
+        except JsonParseError as exc:
+            snippet = (content or "").strip().replace("\n", " ")
+            if len(snippet) > 300:
+                snippet = snippet[:297] + "..."
+            self.logger.error(
+                "LiteLLM classification JSON decode error: %s | raw=%s",
+                exc,
+                snippet or "<empty>",
+            )
             raise
 
+        if not isinstance(parsed, dict):
+            self.logger.error(
+                "LiteLLM classification returned non-dict payload of type %s",
+                type(parsed).__name__,
+            )
+            raise JsonParseError("Classification response was not a JSON object")
+
+        result = dict(parsed)
         if "confidence_score" not in result and "confidence" in result:
             result["confidence_score"] = result.pop("confidence")
         result.setdefault("sub_components", {})
@@ -591,11 +613,44 @@ class LiteLLMClient(LLMClient):
             return ""
         first = choices[0]
         message = first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
+        content_text = self._extract_message_content(message)
+        return self._strip_reasoning_tags(content_text)
+
+    @staticmethod
+    def _extract_message_content(message: Any) -> str:
+        if message is None:
+            return ""
+
+        def _from_content(content: Any) -> str:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        text_val = item.get("text") or item.get("content")
+                        if isinstance(text_val, str):
+                            parts.append(text_val)
+                return "\n".join(parts)
+            return str(content)
+
         if isinstance(message, dict):
-            return message.get("content", "")
-        if hasattr(message, "content"):
-            return getattr(message, "content") or ""
-        return ""
+            return _from_content(message.get("content"))
+
+        content_attr = getattr(message, "content", None)
+        if content_attr is not None:
+            return _from_content(content_attr)
+
+        return str(message)
+
+    @staticmethod
+    def _strip_reasoning_tags(text: str) -> str:
+        if not isinstance(text, str):
+            return ""
+        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return cleaned.strip()
 
     async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
         messages = [{"role": "user", "content": prompt}]

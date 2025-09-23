@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.llm_client import LLMClient
@@ -129,6 +131,13 @@ class CodeActRunner:
             return {"success": False, "error": "OpenHands action runner is unavailable"}
 
         session = await self.action_runner.open_session(workspace_path)
+        workspace_path = Path(workspace_path)
+        logs_dir = workspace_path / "logs"
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logs_dir = workspace_path
+        transcript_file = logs_dir / "codeact_steps.jsonl"
         steps: List[CodeActStep] = []
         transcript: List[str] = []
         try:
@@ -150,16 +159,31 @@ class CodeActRunner:
                         func, params = _parse_tool_call(str(raw))
                     except Exception:
                         message = await self._fallback_plain_response(goal, transcript, raw)
-                        steps.append(
-                            CodeActStep(
-                                thought="fallback_final",
-                                tool="fallback_plain",
-                                params={},
-                                observation=message,
-                                success=bool(message.strip()),
-                            )
+                        fallback_step = CodeActStep(
+                            thought="fallback_final",
+                            tool="fallback_plain",
+                            params={},
+                            observation=message,
+                            success=bool(message.strip()),
                         )
+                        steps.append(fallback_step)
                         transcript.append(f"FALLBACK: {message}")
+                        try:
+                            with transcript_file.open("a", encoding="utf-8") as fp:
+                                fp.write(
+                                    json.dumps(
+                                        {
+                                            "step_index": step_idx,
+                                            "tool": "fallback_plain",
+                                            "params": {},
+                                            "success": bool(message.strip()),
+                                            "observation": message,
+                                        }
+                                    )
+                                    + "\n"
+                                )
+                        except Exception:
+                            pass
                         if progress_cb:
                             try:
                                 await progress_cb(
@@ -192,8 +216,25 @@ class CodeActRunner:
                     except Exception:
                         pass
                 observation_text, ok = await self._execute_tool(session, func, params, timeout_per_action)
-                steps.append(CodeActStep(thought="", tool=func, params=params, observation=observation_text, success=ok))
+                step_record = CodeActStep(thought="", tool=func, params=params, observation=observation_text, success=ok)
+                steps.append(step_record)
                 transcript.append(f"TOOL {func}: {params}\nOBS:\n{observation_text}")
+                try:
+                    with transcript_file.open("a", encoding="utf-8") as fp:
+                        fp.write(
+                            json.dumps(
+                                {
+                                    "step_index": step_idx,
+                                    "tool": func,
+                                    "params": params,
+                                    "success": ok,
+                                    "observation": observation_text,
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
                 if progress_cb:
                     try:
                         await progress_cb(

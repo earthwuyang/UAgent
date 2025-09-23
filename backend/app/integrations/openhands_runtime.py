@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import shlex
 import os
 import secrets
 import socket
@@ -141,7 +142,19 @@ class OpenHandsActionServerRunner:
                 if remapped:
                     args["path"] = remapped
                     if action_name == "read" and os.path.isdir(remapped):
-                        action_name = "list"
+                        command = (
+                            f"ls -pa {shlex.quote(str(remapped))} | head -n 200"
+                        )
+                        args = {
+                            "command": command,
+                            "is_input": False,
+                            "thought": "",
+                            "blocking": True,
+                            "is_static": False,
+                            "cwd": None,
+                            "hidden": False,
+                        }
+                        action_name = "run"
                 if action_name == "write" and "start" not in args:
                     args.setdefault("start", 1)
                     args.setdefault("end", -1)
@@ -168,10 +181,6 @@ class OpenHandsActionServerRunner:
             if action_name and rewritten_action.get("action") != action_name:
                 rewritten_action["action"] = action_name
             payload = {"action": rewritten_action}
-
-            if action_name == "list":
-                args.pop("start", None)
-                args.pop("end", None)
 
             preview = {}
             for key in ("command", "path", "code", "file_text", "content"):

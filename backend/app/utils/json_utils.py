@@ -70,6 +70,25 @@ def sanitize_json_strings(payload: str) -> str:
     return "".join(result)
 
 
+def _balance_json_delimiters(candidate: str) -> str:
+    """Append missing closing braces/brackets to balance delimiters."""
+
+    if not candidate:
+        return candidate
+
+    open_brace = candidate.count("{")
+    close_brace = candidate.count("}")
+    open_bracket = candidate.count("[")
+    close_bracket = candidate.count("]")
+
+    balanced = candidate
+    if close_brace < open_brace:
+        balanced += "}" * (open_brace - close_brace)
+    if close_bracket < open_bracket:
+        balanced += "]" * (open_bracket - close_bracket)
+    return balanced
+
+
 def safe_json_loads(raw: str) -> Any:
     """Parse JSON from arbitrary LLM output, raising JsonParseError on failure."""
 
@@ -85,6 +104,20 @@ def safe_json_loads(raw: str) -> Any:
     except json.JSONDecodeError:
         candidate = _extract_json_candidate(text)
         if candidate is None:
+            stripped = text.strip()
+            if stripped.startswith("```"):
+                lines = stripped.splitlines()
+                if len(lines) > 1:
+                    candidate = "\n".join(lines[1:])
+                    if candidate.endswith("```"):
+                        candidate = candidate[: candidate.rfind("```")]
+                    candidate = candidate.strip()
+                    if candidate:
+                        candidate = sanitize_json_strings(candidate)
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            pass
             raise JsonParseError("No JSON candidate found in response")
 
         candidate = sanitize_json_strings(candidate)
@@ -95,7 +128,11 @@ def safe_json_loads(raw: str) -> Any:
             repaired = candidate.replace("'", '"').replace(",}", "}").replace(",]", "]")
             try:
                 return json.loads(sanitize_json_strings(repaired))
-            except json.JSONDecodeError as exc2:
-                raise JsonParseError(f"Unable to parse JSON candidate: {exc2}") from exc2
+            except json.JSONDecodeError:
+                brace_fixed = _balance_json_delimiters(repaired)
+                try:
+                    return json.loads(sanitize_json_strings(brace_fixed))
+                except json.JSONDecodeError as exc2:
+                    raise JsonParseError(f"Unable to parse JSON candidate: {exc2}") from exc2
     except Exception as exc:  # pragma: no cover - unexpected exceptions
         raise JsonParseError(f"Unexpected error parsing JSON: {exc}") from exc
