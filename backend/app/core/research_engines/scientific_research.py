@@ -255,6 +255,7 @@ class HypothesisGenerator:
         prompt = hypothesis_prompt.rstrip() + "\n\nRespond with a valid JSON array only. Do not include code fences or prose."
 
         hypotheses_data: Any = None
+        last_response: str | None = None
         for attempt in range(1, self.max_json_retries + 1):
             response = await self.llm_client.generate(
                 prompt,
@@ -267,7 +268,11 @@ class HypothesisGenerator:
                 response,
             )
 
-            if not str(response).strip():
+            raw_response = str(response)
+            sanitized_response = self._sanitize_llm_json(raw_response)
+            last_response = raw_response
+
+            if not raw_response.strip():
                 self.logger.warning(
                     "Hypothesis generation returned empty response on attempt %s",
                     attempt,
@@ -279,26 +284,31 @@ class HypothesisGenerator:
                 continue
 
             try:
-                hypotheses_data = safe_json_loads(response)
+                hypotheses_data = safe_json_loads(sanitized_response)
+                if isinstance(hypotheses_data, dict):
+                    hypotheses_data = [hypotheses_data]
                 break
             except JsonParseError as exc:
                 self.logger.warning(
-                    "Failed to parse hypothesis JSON on attempt %s: %s",
+                    "Failed to parse hypothesis JSON on attempt %s: %s. Raw response: %s",
                     attempt,
                     exc,
-                    extra={"raw_response": response},
+                    raw_response,
                 )
-                if attempt == self.max_json_retries:
-                    raise RuntimeError(
-                        f"Hypothesis generation returned invalid JSON after {self.max_json_retries} attempts: {exc}"
-                    ) from exc
+                if attempt < self.max_json_retries:
+                    prompt = (
+                        hypothesis_prompt
+                        + "\n\nIMPORTANT: Your previous answer was not valid JSON and raised the following parsing error\n"
+                        f"{exc}.\n"
+                        "Return ONLY a valid JSON array (no backticks, no extra commentary) following the schema above."
+                    )
 
-                prompt = (
-                    hypothesis_prompt
-                    + "\n\nIMPORTANT: Your previous answer was not valid JSON and raised the following parsing error\n"
-                    f"{exc}.\n"
-                    "Return ONLY a valid JSON array (no backticks, no extra commentary) following the schema above."
-                )
+        if hypotheses_data is None and last_response:
+            self.logger.warning(
+                "Hypothesis generation falling back to text coercion; raw response: %s",
+                last_response,
+            )
+            hypotheses_data = self._coerce_hypotheses_from_text(last_response)
 
         if not isinstance(hypotheses_data, list):
             raise RuntimeError(
@@ -322,9 +332,128 @@ class HypothesisGenerator:
                 self.logger.debug("Failed to parse hypothesis item %s: %s", hyp_data, item_exc)
 
         if not hypotheses:
+            self.logger.error(
+                "Hypothesis generation produced zero valid hypotheses; using structured fallback"
+            )
+            fallback_payload = self._fallback_hypotheses(research_question)
+            for i, hyp_data in enumerate(fallback_payload):
+                try:
+                    hypothesis = ResearchHypothesis(
+                        id=f"hyp_{uuid.uuid4().hex[:8]}",
+                        statement=hyp_data.get("statement", f"Fallback hypothesis {i+1}"),
+                        reasoning=hyp_data.get("reasoning", ""),
+                        testable_predictions=hyp_data.get("testable_predictions", []),
+                        success_criteria=hyp_data.get("success_criteria", {}),
+                        variables=hyp_data.get("variables", {}),
+                    )
+                    hypotheses.append(hypothesis)
+                except Exception as item_exc:
+                    self.logger.debug(
+                        "Failed to parse fallback hypothesis item %s: %s", hyp_data, item_exc
+                    )
+
+        if not hypotheses:
             raise RuntimeError("Hypothesis generation produced zero valid hypotheses")
 
         return hypotheses
+
+    def _coerce_hypotheses_from_text(self, raw: str) -> List[Dict[str, Any]]:
+        """Best-effort parsing for non-JSON hypothesis responses."""
+
+        text = (raw or "").strip()
+        if not text:
+            return []
+
+        blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+        results: List[Dict[str, Any]] = []
+
+        def _extract_field(block: str, label: str) -> Optional[str]:
+            pattern = re.compile(rf"{label}\s*[:\-]\s*(.+)", re.IGNORECASE)
+            match = pattern.search(block)
+            return match.group(1).strip() if match else None
+
+        for block in blocks:
+            statement = _extract_field(block, "statement")
+            reasoning = _extract_field(block, "reasoning") or ""
+            predictions_text = _extract_field(block, "testable_predictions") or ""
+            success_text = _extract_field(block, "success_criteria") or ""
+            variables_text = _extract_field(block, "variables") or ""
+
+            if not statement:
+                # Use the first non-empty line as statement fallback.
+                first_line = block.splitlines()[0].strip()
+                statement = first_line
+
+            predictions: List[str] = []
+            if predictions_text:
+                predictions = [item.strip("-• ") for item in predictions_text.split("\n") if item.strip()]
+
+            success_criteria: Dict[str, Any] = {}
+            if success_text:
+                success_criteria = {"detail": success_text}
+
+            variables: Dict[str, Any] = {}
+            if variables_text:
+                variables = {"description": variables_text}
+
+            results.append(
+                {
+                    "statement": statement,
+                    "reasoning": reasoning or "Additional reasoning not provided",
+                    "testable_predictions": predictions,
+                    "success_criteria": success_criteria,
+                    "variables": variables,
+                }
+            )
+
+        if not results and text:
+            results.append(
+                {
+                    "statement": text.splitlines()[0],
+                    "reasoning": "Hypothesis generated from unstructured response",
+                    "testable_predictions": [],
+                    "success_criteria": {},
+                    "variables": {},
+                }
+            )
+
+        return results
+
+    @staticmethod
+    def _sanitize_llm_json(payload: str) -> str:
+        """Collapse literal newlines inside JSON strings into spaces."""
+
+        if not payload:
+            return payload
+
+        result: List[str] = []
+        in_string = False
+        escape = False
+
+        for ch in payload:
+            if in_string:
+                if escape:
+                    result.append(ch)
+                    escape = False
+                    continue
+                if ch == "\\":
+                    result.append(ch)
+                    escape = True
+                    continue
+                if ch in ("\n", "\r"):
+                    result.append(" ")
+                    continue
+                if ch == '"':
+                    in_string = False
+                result.append(ch)
+            else:
+                result.append(ch)
+                if ch == '"':
+                    in_string = True
+                else:
+                    escape = False
+
+        return "".join(result)
 
     def _fallback_hypotheses(self, research_question: str) -> List[Dict[str, Any]]:
         """Fallback structure when the LLM response is invalid."""
@@ -374,24 +503,30 @@ class HypothesisGenerator:
         Respond with valid JSON only.
         """
 
+        response = await self.llm_client.generate(refinement_prompt)
+
         try:
-            response = await self.llm_client.generate(refinement_prompt)
+            refined_data = safe_json_loads(response)
+        except JsonParseError as exc:
+            self.logger.error("Hypothesis refinement returned invalid JSON: %s", exc)
+            raise RuntimeError(
+                f"Hypothesis refinement returned invalid JSON: {exc}"
+            ) from exc
 
-            import json
-            refined_data = json.loads(response)
+        if not isinstance(refined_data, dict):
+            raise RuntimeError("Hypothesis refinement must return a JSON object")
 
-            # Update hypothesis with refined data
-            hypothesis.statement = refined_data.get("statement", hypothesis.statement)
-            hypothesis.reasoning = refined_data.get("reasoning", hypothesis.reasoning)
-            hypothesis.testable_predictions = refined_data.get("testable_predictions", hypothesis.testable_predictions)
-            hypothesis.success_criteria = refined_data.get("success_criteria", hypothesis.success_criteria)
-            hypothesis.variables = refined_data.get("variables", hypothesis.variables)
+        hypothesis.statement = refined_data.get("statement", hypothesis.statement)
+        hypothesis.reasoning = refined_data.get("reasoning", hypothesis.reasoning)
+        hypothesis.testable_predictions = refined_data.get(
+            "testable_predictions", hypothesis.testable_predictions
+        )
+        hypothesis.success_criteria = refined_data.get(
+            "success_criteria", hypothesis.success_criteria
+        )
+        hypothesis.variables = refined_data.get("variables", hypothesis.variables)
 
-            return hypothesis
-
-        except Exception as e:
-            self.logger.error(f"Error refining hypothesis: {e}")
-            return hypothesis
+        return hypothesis
 
 
 class ExperimentDesigner:
@@ -403,20 +538,18 @@ class ExperimentDesigner:
 
     @staticmethod
     def _safe_loads(payload: str) -> Dict[str, Any]:
-        if not payload:
-            return {}
+        """Parse experiment design JSON or raise a descriptive error."""
+
         try:
-            return json.loads(payload)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", payload, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group())
-                except json.JSONDecodeError:
-                    return {}
-        except TypeError:
-            return {}
-        return {}
+            data = safe_json_loads(payload)
+        except JsonParseError as exc:
+            raise RuntimeError(f"Experiment design returned invalid JSON: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "Experiment design must return a JSON object with named fields"
+            )
+        return data
 
     async def design_experiment(
         self,
@@ -450,46 +583,26 @@ class ExperimentDesigner:
         Respond with valid JSON only.
         """
 
-        try:
-            response = await self.llm_client.generate(design_prompt)
-            design_data = self._safe_loads(response)
+        response = await self.llm_client.generate(design_prompt)
+        design_data = self._safe_loads(response)
 
-            design = ExperimentDesign(
-                id=f"exp_{uuid.uuid4().hex[:8]}",
-                hypothesis_id=hypothesis.id,
-                name=design_data.get("name", f"Experiment for {hypothesis.id}"),
-                description=design_data.get("description", "Experimental validation"),
-                methodology=design_data.get("methodology", "Standard experimental methodology"),
-                variables=design_data.get("variables", hypothesis.variables),
-                controls=design_data.get("controls", []),
-                data_collection_plan=design_data.get("data_collection_plan", {}),
-                analysis_plan=design_data.get("analysis_plan", "Statistical analysis of results"),
-                expected_duration=design_data.get("expected_duration", "1-2 hours"),
-                resource_requirements=design_data.get("resource_requirements", {}),
-                code_requirements=design_data.get("code_requirements", []),
-                dependencies=design_data.get("dependencies", [])
-            )
+        design = ExperimentDesign(
+            id=f"exp_{uuid.uuid4().hex[:8]}",
+            hypothesis_id=hypothesis.id,
+            name=design_data.get("name", f"Experiment for {hypothesis.id}"),
+            description=design_data.get("description", "Experimental validation"),
+            methodology=design_data.get("methodology", "Standard experimental methodology"),
+            variables=design_data.get("variables", hypothesis.variables),
+            controls=design_data.get("controls", []),
+            data_collection_plan=design_data.get("data_collection_plan", {}),
+            analysis_plan=design_data.get("analysis_plan", "Statistical analysis of results"),
+            expected_duration=design_data.get("expected_duration", "1-2 hours"),
+            resource_requirements=design_data.get("resource_requirements", {}),
+            code_requirements=design_data.get("code_requirements", []),
+            dependencies=design_data.get("dependencies", []),
+        )
 
-            return design
-
-        except Exception as e:
-            self.logger.warning(f"Error designing experiment: {e}")
-            # Fallback experiment design
-            return ExperimentDesign(
-                id=f"exp_{uuid.uuid4().hex[:8]}",
-                hypothesis_id=hypothesis.id,
-                name=f"Validation Experiment for {hypothesis.id}",
-                description="Experimental validation of hypothesis",
-                methodology="Controlled experimental methodology with statistical analysis",
-                variables=hypothesis.variables,
-                controls=["control_group", "baseline_measurement"],
-                data_collection_plan={"method": "automated", "samples": 100},
-                analysis_plan="Statistical significance testing with 95% confidence interval",
-                expected_duration="2-3 hours",
-                resource_requirements={"cpu": "2 cores", "memory": "4GB", "storage": "1GB"},
-                code_requirements=["Python 3.8+", "scientific libraries"],
-                dependencies=["numpy", "pandas", "scipy", "matplotlib"]
-            )
+        return design
 
 
 class ExperimentExecutor:
@@ -888,12 +1001,15 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                             None,
                         ) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
                         if line:
+                            json_str = line.split(":", 1)[1].strip()
                             try:
-                                json_str = line.split(":", 1)[1].strip()
-                                data = json.loads(json_str)
-                                return data if isinstance(data, dict) else None
-                            except Exception:
+                                data = safe_json_loads(json_str)
+                            except JsonParseError as exc:
+                                self.logger.debug(
+                                    "CodeAct final result JSON parse failed: %s", exc
+                                )
                                 return None
+                            return data if isinstance(data, dict) else None
                     return None
 
                 event_offsets = {

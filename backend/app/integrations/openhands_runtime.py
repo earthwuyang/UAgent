@@ -390,11 +390,17 @@ class OpenHandsActionServerRunner:
             extras_meta = observation["extras"].get("metadata")
             if isinstance(extras_meta, dict):
                 metadata = extras_meta
+        action_name = metadata.get("action") or metadata.get("command") or ""
         exit_code = metadata.get("exit_code", -1)
         output = observation.get("content", "")
         command_text = metadata.get("command") or metadata.get("action", "")
         working_dir = metadata.get("cwd", ".")
         env_snapshot = metadata.get("env", {}) if isinstance(metadata.get("env"), dict) else {}
+
+        # Directory listings (and some file reads) return exit_code=-1 even when successful.
+        if exit_code != 0 and isinstance(output, str) and output.strip():
+            if action_name in {"list", "read"}:
+                exit_code = 0
 
         return ExecutionResult(
             success=exit_code == 0,

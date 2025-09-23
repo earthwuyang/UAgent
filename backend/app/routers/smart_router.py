@@ -110,6 +110,32 @@ async def route_and_execute(request: RouterRequest):
         session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
         logger.info(f"Routing and scheduling request: {request.user_request[:100]}... (session={session_id})")
 
+        existing_record = await session_manager.get_session(session_id)
+        if existing_record and existing_record.get("status") in {"pending", "running"}:
+            logger.info(
+                "Session %s already active with status %s; skipping re-execution",
+                session_id,
+                existing_record.get("status"),
+            )
+            cached_classification = existing_record.get("classification") or {}
+            try:
+                classification_response = RouterResponse(**cached_classification)
+            except Exception:
+                classification_response = RouterResponse(
+                    primary_engine=cached_classification.get("primary_engine", "SCIENTIFIC_RESEARCH"),
+                    confidence_score=cached_classification.get("confidence_score", 0.0),
+                    sub_components=cached_classification.get("sub_components", {}),
+                    reasoning=cached_classification.get("reasoning", "Cached session"),
+                    workflow_plan=cached_classification.get("workflow_plan", {}),
+                    user_request=cached_classification.get("user_request", request.user_request),
+                )
+
+            return RouteAndExecuteAck(
+                session_id=session_id,
+                status=existing_record.get("status", "running"),
+                classification=classification_response,
+            )
+
         classification_request = ClassificationRequest(
             user_request=request.user_request,
             context=request.context
