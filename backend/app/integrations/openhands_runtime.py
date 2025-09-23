@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import json
 import os
 import secrets
 import socket
@@ -32,6 +33,19 @@ logger = logging.getLogger(__name__)
 # Avoid importing OpenHands modules in the parent process to prevent heavy deps.
 CmdRunAction = None  # type: ignore
 event_to_dict = None  # type: ignore
+
+
+def _collect_output_text(observation: object, keys: tuple[str, ...]) -> str:
+    if not isinstance(observation, dict):
+        return str(observation or "").strip()
+    parts: list[str] = []
+    for key in keys:
+        value = observation.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            if text not in parts:
+                parts.append(text)
+    return "\n".join(parts).strip()
 
 
 def _find_free_port() -> int:
@@ -151,6 +165,8 @@ class OpenHandsActionServerRunner:
             # Persist any rewrites made above back onto the outgoing payload
             rewritten_action = dict(action_dict)
             rewritten_action["args"] = args
+            if action_name and rewritten_action.get("action") != action_name:
+                rewritten_action["action"] = action_name
             payload = {"action": rewritten_action}
 
             if action_name == "list":
@@ -171,11 +187,50 @@ class OpenHandsActionServerRunner:
                 preview,
             )
             response = await self._post_action(payload, timeout)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                observation: dict[str, object]
+                error_detail: str = ""
+                try:
+                    parsed = exc.response.json()
+                    if isinstance(parsed, dict):
+                        observation = dict(parsed)
+                    else:
+                        observation = {"content": str(parsed)}
+                except ValueError:
+                    error_detail = exc.response.text
+                    observation = {"content": error_detail or exc.message}
+
+                metadata = observation.get("metadata") if isinstance(observation, dict) else None
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                    observation["metadata"] = metadata
+                metadata.setdefault("action", action_name)
+                metadata.setdefault("exit_code", observation.get("exit_code", -1))
+                stdout_text = _collect_output_text(observation, ("content", "stdout", "detail"))
+                stderr_text = _collect_output_text(observation, ("stderr",)) if isinstance(observation, dict) else ""
+                exec_result = self._runner._observation_to_execution_result(observation)
+                logger.error(
+                    "[CodeAct] action=%s server error status=%s detail=%s",
+                    action_name,
+                    exc.response.status_code if exc.response is not None else "unknown",
+                    stdout_text or stderr_text or error_detail or str(exc),
+                )
+                return OpenHandsActionResult(
+                    execution_result=exec_result,
+                    raw_observation=observation,
+                    stdout=stdout_text,
+                    stderr=stderr_text,
+                    server_logs=stdout_text or stderr_text or error_detail or str(exc),
+                )
+
             observation = response.json()
+            stdout_text = _collect_output_text(observation, ("content", "stdout"))
+            stderr_text = _collect_output_text(observation, ("stderr",)) if isinstance(observation, dict) else ""
             execution_result = self._runner._observation_to_execution_result(observation)
-            preview = observation.get("content") or observation.get("stdout") or ""
-            if isinstance(preview, str) and len(preview) > 200:
+            preview = stdout_text or stderr_text
+            if preview and len(preview) > 200:
                 preview = preview[:197] + "..."
             logger.info(
                 "[CodeAct] action=%s exit_code=%s success=%s output=%s",
@@ -187,8 +242,8 @@ class OpenHandsActionServerRunner:
             return OpenHandsActionResult(
                 execution_result=execution_result,
                 raw_observation=observation,
-                stdout=observation.get("content", ""),
-                stderr="",
+                stdout=stdout_text,
+                stderr=stderr_text,
                 server_logs="",
             )
 
@@ -405,23 +460,42 @@ class OpenHandsActionServerRunner:
             extras_meta = observation["extras"].get("metadata")
             if isinstance(extras_meta, dict):
                 metadata = extras_meta
-        action_name = metadata.get("action") or metadata.get("command") or ""
-        exit_code = metadata.get("exit_code", -1)
-        output = observation.get("content", "")
+
+        action_name = (
+            metadata.get("action")
+            or observation.get("action")
+            or metadata.get("command")
+            or metadata.get("tool_name")
+            or observation.get("tool_name")
+            or ""
+        )
+
+        exit_code = metadata.get("exit_code")
+        if exit_code is None:
+            exit_code = observation.get("exit_code")
+        if exit_code is None:
+            exit_code = -1
+
+        success_flag = observation.get("success")
+        stdout_text = _collect_output_text(observation, ("content", "stdout"))
+        stderr_text = _collect_output_text(observation, ("stderr",)) if isinstance(observation, dict) else ""
+        output = stdout_text
         command_text = metadata.get("command") or metadata.get("action", "")
         working_dir = metadata.get("cwd", ".")
         env_snapshot = metadata.get("env", {}) if isinstance(metadata.get("env"), dict) else {}
 
         # Directory listings (and some file reads) return exit_code=-1 even when successful.
-        if exit_code != 0 and isinstance(output, str) and output.strip():
-            if action_name in {"list", "read"}:
+        if exit_code != 0:
+            if success_flag is True:
+                exit_code = 0
+            elif isinstance(output, str) and output.strip() and action_name in {"list", "read"}:
                 exit_code = 0
 
         return ExecutionResult(
             success=exit_code == 0,
             exit_code=exit_code,
-            stdout=output,
-            stderr="",
+            stdout=stdout_text,
+            stderr=stderr_text,
             execution_time=0.0,
             files_created=[],
             files_modified=[],

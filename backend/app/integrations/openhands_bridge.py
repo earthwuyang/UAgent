@@ -71,7 +71,7 @@ class OpenHandsGoalPlanBridge:
             """
 Prepare the workspace for software and data experiments **without** installing new system packages. Operate only within the provided directory tree.
 - Do NOT run `apt-get`, `sudo`, or any system package manager. Assume required toolchains already exist.
-- Inspect the current environment (e.g., git, python, compilers, databases found on PATH) and record findings in `workspace/env_report.txt`. If a tool is missing, note it instead of attempting installation.
+- Inspect the current environment (e.g., git, python, compilers, databases found on PATH) and record findings in `workspace/env_report.txt`. Capture only the presence of tools you expect to use; avoid sweeping version scans or heavyweight discovery loops. If a tool is missing, note it instead of attempting installation.
 - Only create directories or files that the current task explicitly requires. Avoid hard-coded technology names; prefer generic locations such as `workspace/run/` or `workspace/tmp/` as needed.
 - Generate a shell script `workspace/env.sh` that exports environment variables actually used in the current workspace (leave placeholders commented when no concrete values exist). The script must be idempotent and safe to source multiple times.
 - Summarise the inspection results, outstanding gaps, and created resources in `workspace/bootstrap_summary.md`.

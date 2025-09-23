@@ -88,6 +88,35 @@ class CodeActRunner:
         self.llm = llm_client
         self.action_runner = action_runner
 
+    @staticmethod
+    def _render_action_output(action_result) -> str:
+        parts: list[str] = []
+
+        def _append(text: Optional[str]) -> None:
+            if isinstance(text, str):
+                stripped = text.strip()
+                if stripped and stripped not in parts:
+                    parts.append(stripped)
+
+        _append(getattr(action_result, "stdout", None))
+        _append(getattr(action_result, "stderr", None))
+
+        exec_result = getattr(action_result, "execution_result", None)
+        if exec_result is not None:
+            _append(getattr(exec_result, "stdout", None))
+            _append(getattr(exec_result, "stderr", None))
+
+        if not parts:
+            raw = getattr(action_result, "raw_observation", None)
+            if isinstance(raw, dict):
+                for key in ("content", "stdout", "stderr"):
+                    value = raw.get(key)
+                    _append(value)
+            elif raw is not None:
+                _append(str(raw))
+
+        return "\n".join(parts).strip()
+
     async def run(
         self,
         workspace_path,
@@ -244,8 +273,7 @@ class CodeActRunner:
             if func == "execute_bash":
                 cmd = params.get("command", "")
                 res = await session.run_cmd(cmd, timeout=timeout, blocking=True)
-                obs = res.raw_observation
-                content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+                content = self._render_action_output(res)
                 return content, res.execution_result.success
 
             if func == "str_replace_editor":
@@ -269,8 +297,7 @@ class CodeActRunner:
                         )
                 if command == "view":
                     res = await session.file_read(path, timeout=timeout)
-                    obs = res.raw_observation
-                    content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+                    content = self._render_action_output(res)
                     return content, res.execution_result.success
 
                 res = await session.file_edit(
@@ -282,30 +309,26 @@ class CodeActRunner:
                     insert_line=int(params.get("insert_line")) if params.get("insert_line") else None,
                     timeout=timeout,
                 )
-                obs = res.raw_observation
-                content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+                content = self._render_action_output(res)
                 return content, res.execution_result.success
 
             if func == "file_read":
                 path = params.get("path", "").strip()
                 res = await session.file_read(path, timeout=timeout)
-                obs = res.raw_observation
-                content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+                content = self._render_action_output(res)
                 return content, res.execution_result.success
 
             if func == "write":
                 path = params.get("path", "").strip()
                 content_text = params.get("content", "")
                 res = await session.file_write(path, content_text, timeout=timeout)
-                obs = res.raw_observation
-                content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+                content = self._render_action_output(res)
                 return content, res.execution_result.success
 
             if func == "ipython_run":
                 code = params.get("code", "")
                 res = await session.ipython_run(code, timeout=timeout)
-                obs = res.raw_observation
-                content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+                content = self._render_action_output(res)
                 return content, res.execution_result.success
 
             # Unknown function; treat as no-op
