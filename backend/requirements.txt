@@ -37,3 +37,4 @@ dspy
 agentvectordb
 python-json-logger
 termcolor
+toml
