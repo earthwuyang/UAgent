@@ -117,7 +117,34 @@ class CodeActRunner:
                     # Ask again with stricter instruction
                     strict_prompt = prompt + "\nRespond with exactly one tool call as specified."
                     raw = await self.llm.generate(strict_prompt, max_tokens=600, temperature=0.1)
-                    func, params = _parse_tool_call(str(raw))
+                    try:
+                        func, params = _parse_tool_call(str(raw))
+                    except Exception:
+                        message = await self._fallback_plain_response(goal, transcript, raw)
+                        steps.append(
+                            CodeActStep(
+                                thought="fallback_final",
+                                tool="fallback_plain",
+                                params={},
+                                observation=message,
+                                success=bool(message.strip()),
+                            )
+                        )
+                        transcript.append(f"FALLBACK: {message}")
+                        if progress_cb:
+                            try:
+                                await progress_cb(
+                                    "finish",
+                                    {"message": message, "mode": "fallback_no_tool"},
+                                )
+                            except Exception:
+                                pass
+                        return {
+                            "success": bool(message.strip()),
+                            "message": message,
+                            "steps": [s.__dict__ for s in steps],
+                            "fallback_used": True,
+                        }
 
                 if func == FINISH_NAME:
                     message = params.get("message", "")
@@ -151,6 +178,31 @@ class CodeActRunner:
         finally:
             await session.close()
 
+    async def _fallback_plain_response(
+        self,
+        goal: str,
+        transcript: List[str],
+        raw: Any,
+    ) -> str:
+        """Produce a plain-text response when the model cannot emit tool calls."""
+        message = str(raw or "").strip()
+        if message and "<function=" not in message:
+            return message
+
+        fallback_prompt = self._build_fallback_prompt(goal, transcript)
+        try:
+            generated = await self.llm.generate(
+                fallback_prompt,
+                max_tokens=600,
+                temperature=0.3,
+            )
+            message = str(generated or "").strip() or message
+        except Exception:
+            # Keep the best effort response even if the retry fails
+            pass
+
+        return message or "Unable to complete the request without tool calls."
+
     def _build_prompt(self, goal: str, transcript: List[str]) -> str:
         history = "\n\n".join(transcript[-6:]) if transcript else ""
         instructions = (
@@ -167,6 +219,17 @@ class CodeActRunner:
             f"Recent transcript:\n{history}\n\n"
             f"Tools:\n{TOOL_SPEC}\n\n"
             "Respond with exactly one tool call."
+        )
+
+    def _build_fallback_prompt(self, goal: str, transcript: List[str]) -> str:
+        history = "\n\n".join(transcript[-6:]) if transcript else "(no prior tool calls)"
+        return (
+            "Tool execution mode is unavailable. Provide the best possible final answer "
+            "in plain text, summarizing the actions or guidance needed to achieve the goal. "
+            "Do not include any <function> tags or tool specifications.\n\n"
+            f"Goal:\n{goal}\n\n"
+            f"Context:\n{history}\n\n"
+            "Final answer:"
         )
 
     async def _execute_tool(
