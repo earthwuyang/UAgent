@@ -225,6 +225,37 @@ Created: {asyncio.get_event_loop().time()}
             except Exception:
                 pass
 
+        # Add a simple runner to stream command output into a stable log file
+        run_script = workspace_path / "scripts" / "run_with_logs.sh"
+        if not run_script.exists():
+            run_script.write_text(
+                (
+                    "#!/usr/bin/env bash\n"
+                    "# Usage: run_with_logs.sh \"<command>\" [log_dir] [log_name]\n"
+                    "set -Eeuo pipefail\n"
+                    "CMD=\"${1:-}\"\n"
+                    "ART=\"${2:-./logs}\"\n"
+                    "LOGNAME=\"${3:-codeact_exec.log}\"\n"
+                    "mkdir -p \"$ART\"\n"
+                    "LOG=\"$ART/$LOGNAME\"\n"
+                    "echo \"[run] $(date -Is) $CMD\" | tee -a \"$LOG\"\n"
+                    "# Stream stdout/stderr line-buffered to both console and log\n"
+                    "( bash -lc \"$CMD\" 2>&1 | stdbuf -oL -eL awk '{print; fflush()}' | tee -a \"$LOG\" ) &\n"
+                    "PID=$!\n"
+                    "SEC=0\n"
+                    "while kill -0 $PID 2>/dev/null; do\n"
+                    "  sleep 5; SEC=$((SEC+5)); echo \"[heartbeat] ${SEC}s elapsed...\" | tee -a \"$LOG\"\n"
+                    "done\n"
+                    "wait $PID; RC=$?\n"
+                    "echo \"[exit] rc=$RC\" | tee -a \"$LOG\"\n"
+                    "exit $RC\n"
+                ).strip()
+            )
+            try:
+                os.chmod(run_script, 0o755)
+            except Exception:
+                pass
+
     async def get_workspace_status(self, workspace_id: str) -> Optional[WorkspaceStatus]:
         """Get current status of a workspace
 

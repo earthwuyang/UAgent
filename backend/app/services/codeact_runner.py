@@ -11,10 +11,15 @@ import asyncio
 import re
 import json
 from dataclasses import dataclass
+import os
+import time
+import shlex
+import httpx
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.llm_client import LLMClient
+from ..utils.json_utils import safe_json_loads
 from ..integrations.openhands_runtime import OpenHandsActionServerRunner
 
 
@@ -71,6 +76,8 @@ TOOL_SELECTION_RUBRIC = (
     "2) Avoid repeating directory listings if no new files appear.\n"
     "3) Translate unsupported verbs: list/lsdir-> run 'ls -pa'; cat-> file_read; edit/write/create -> str_replace_editor.\n"
     "4) For downloads/builds (git/wget/curl/pip), opt-in to proxy only when needed by prefixing: `source scripts/net_proxy.sh && <command>`.\n"
+    "5) For pip installs on slow networks, prefer the Tsinghua mirror: add `-i https://pypi.tuna.tsinghua.edu.cn/simple`.\n"
+    "6) Avoid source builds of heavy frameworks; prefer wheel indexes (e.g., PyTorch CPU wheels via `--extra-index-url https://download.pytorch.org/whl/cpu`, DGL via `-f https://data.dgl.ai/wheels/repo.html`).\n"
 )
 
 
@@ -526,10 +533,9 @@ class CodeActRunner:
 
             if func == "execute_bash":
                 cmd = params.get("command", "")
-                # Extend timeout for long-running operations
-                low = (cmd or "").lower()
-                long_ops = ("pip install" in low) or ("git clone" in low) or ("poetry install" in low) or ("npm install" in low)
-                eff_timeout = max(timeout, 900) if long_ops else timeout
+                # Enforce per-command timeout (default 120s). On timeout, consult LLM for next action.
+                base_timeout = int(os.getenv("CODEACT_PER_COMMAND_TIMEOUT", "120"))
+                eff_timeout = base_timeout
                 # Guard against cloning OpenHands repo – it's already integrated
                 low = cmd.lower()
                 if "git clone" in low and ("openhands" in low or "all-hands-ai/openhands" in low):
@@ -543,7 +549,124 @@ class CodeActRunner:
                         "Operate within the current workspace and implement the task logic instead.",
                         False,
                     )
-                res = await session.run_cmd(cmd, timeout=eff_timeout, blocking=True)
+                # Wrap command to stream output to a stable log file inside workspace
+                # so the heartbeat can tail and forward chunks to the UI.
+                log_rel = "logs/codeact_exec.log"
+                wrapped = f"bash scripts/run_with_logs.sh {shlex.quote(cmd)} logs codeact_exec.log"
+
+                # Tail the log file during heartbeat
+                log_abs = None
+                try:
+                    ws_base = Path(workspace_path)
+                    log_abs = ws_base / log_rel
+                except Exception:
+                    log_abs = None
+
+                last_size = 0
+
+                async def _stream_tail() -> None:
+                    nonlocal last_size
+                    if not progress_cb:
+                        return
+                    if not log_abs or not log_abs.exists():
+                        return
+                    try:
+                        # Read new bytes since last_size
+                        with log_abs.open("rb") as fp:
+                            fp.seek(last_size)
+                            chunk = fp.read(4096)
+                            if not chunk:
+                                return
+                            last_size += len(chunk)
+                            text = chunk.decode(errors="ignore")
+                            preview = text[-400:]
+                            await progress_cb(
+                                "tool_result_update",
+                                {
+                                    "tool": func,
+                                    "success": None,
+                                    "observation_preview": preview,
+                                    "log_path": str(log_rel),
+                                },
+                            )
+                    except Exception:
+                        # Best-effort; ignore tailing errors
+                        return
+
+                # Upgrade heartbeat to also stream log tail
+                original_hb = _heartbeat
+
+                async def _heartbeat_with_tail():
+                    while heartbeat_running:
+                        try:
+                            if progress_cb:
+                                await progress_cb(
+                                    "tool_result_update",
+                                    {"tool": func, "success": None, "observation_preview": "[heartbeat] running..."},
+                                )
+                            await _stream_tail()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(5)
+
+                # Start heartbeat for potentially long tools (streaming tail)
+                # Cancel any previously-started generic heartbeat to avoid duplicate updates
+                try:
+                    if heartbeat_task:
+                        heartbeat_running = False
+                        heartbeat_task.cancel()
+                        with contextlib.suppress(Exception):
+                            await heartbeat_task
+                except Exception:
+                    pass
+                heartbeat_running = True
+                heartbeat_task = asyncio.create_task(_heartbeat_with_tail())
+
+                # Ensure logs directory exists before running
+                try:
+                    (Path(workspace_path) / "logs").mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
+                try:
+                    res = await session.run_cmd(wrapped, timeout=eff_timeout, blocking=True)
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, httpx.TimeoutException, asyncio.TimeoutError) as texc:
+                    # Notify progress stream about timeout
+                    if progress_cb:
+                        try:
+                            await progress_cb(
+                                "tool_result_update",
+                                {
+                                    "tool": func,
+                                    "success": None,
+                                    "observation_preview": f"[timeout] command exceeded {eff_timeout}s: {cmd[:140]}",
+                                },
+                            )
+                        except Exception:
+                            pass
+                    # Ask LLM how to proceed
+                    advise = await self._advise_on_timeout(cmd, eff_timeout, log_rel)
+                    # Try to follow LLM advice if it suggests increasing timeout
+                    if advise.get("action") == "increase_timeout":
+                        try_timeout = int(advise.get("new_timeout", eff_timeout * 2))
+                        try_timeout = max(try_timeout, eff_timeout + 60)
+                        try_timeout = min(try_timeout, int(os.getenv("CODEACT_MAX_TIMEOUT", "1800")))
+                        if progress_cb:
+                            try:
+                                await progress_cb(
+                                    "tool_result_update",
+                                    {
+                                        "tool": func,
+                                        "success": None,
+                                        "observation_preview": f"[retry] increasing timeout to {try_timeout}s per LLM advice: {advise.get('reason','')}"[:400],
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        res = await session.run_cmd(wrapped, timeout=try_timeout, blocking=True)
+                    else:
+                        # Return timeout as failure
+                        return (f"[timeout] {cmd} after {eff_timeout}s. Advice: {advise}", False)
                 content = self._render_action_output(res)
                 return content, res.execution_result.success
 
@@ -614,5 +737,40 @@ class CodeActRunner:
             except Exception:
                 pass
 
+
+    async def _advise_on_timeout(self, command: str, timeout_s: int, log_rel_path: str) -> Dict[str, Any]:
+        """Ask the LLM how to proceed after a timeout.
+
+        Returns a dict with fields:
+        - action: 'increase_timeout' | 'background' | 'abort'
+        - new_timeout: int (optional)
+        - reason: str
+        """
+        prompt = (
+            "A shell command timed out. Provide a JSON with fields:\n"
+            "{\n  \"action\": one of ['increase_timeout','background','abort'],\n"
+            "  \"new_timeout\": integer seconds if action=='increase_timeout',\n"
+            "  \"reason\": short explanation\n}\n\n"
+            f"Command: {command}\n"
+            f"Timeout: {timeout_s}s\n"
+            f"Log file: {log_rel_path}\n"
+            "Keep the advice minimal, valid JSON only."
+        )
+        try:
+            resp = await self.llm.generate(prompt, max_tokens=200, temperature=0.1, response_format={"type":"json_object"})
+        except Exception:
+            resp = await self.llm.generate(prompt, max_tokens=200, temperature=0.1)
+        try:
+            data = safe_json_loads(resp)
+            if isinstance(data, dict):
+                action = str(data.get("action","increase_timeout")).strip()
+                if action not in {"increase_timeout","background","abort"}:
+                    action = "increase_timeout"
+                nt = data.get("new_timeout")
+                reason = str(data.get("reason",""))
+                return {"action": action, "new_timeout": nt, "reason": reason}
+        except Exception:
+            pass
+        return {"action": "increase_timeout", "new_timeout": timeout_s * 2, "reason": "Fallback advice"}
 
 __all__ = ["CodeActRunner"]

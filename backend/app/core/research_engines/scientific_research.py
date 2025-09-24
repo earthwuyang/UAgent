@@ -563,10 +563,21 @@ class ExperimentDesigner:
         Respond with a raw JSON object only (no markdown fences, no commentary, no code blocks).
         """
 
-        response = await self.llm_client.generate(
-            design_prompt,
-            max_tokens=self.max_generation_tokens,
-        )
+        # Try strict JSON mode first (providers that support it via LiteLLM)
+        try:
+            response = await self.llm_client.generate(
+                design_prompt,
+                max_tokens=self.max_generation_tokens,
+                temperature=0.3,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            # Fallback to plain text response and sanitize/repair
+            response = await self.llm_client.generate(
+                design_prompt,
+                max_tokens=self.max_generation_tokens,
+                temperature=0.3,
+            )
         design_data = self._safe_loads(response)
 
         design = ExperimentDesign(
