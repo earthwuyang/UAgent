@@ -1498,7 +1498,12 @@ class ScientificResearchEngine:
         # Configuration
         self.max_iterations = self.config.get("max_iterations", 3)
         self.confidence_threshold = self.config.get("confidence_threshold", 0.8)
-        self.experiments_per_hypothesis = max(1, int(self.config.get("experiments_per_hypothesis", 2)))
+        # Check environment variable first for experiments per hypothesis
+        env_experiments = os.getenv("EXPERIMENTS_PER_HYPOTHESIS")
+        if env_experiments:
+            self.experiments_per_hypothesis = max(1, int(env_experiments))
+        else:
+            self.experiments_per_hypothesis = max(1, int(self.config.get("experiments_per_hypothesis", 2)))
         self.max_attempts_per_experiment = max(1, int(self.config.get("max_attempts_per_experiment", 5)))
         default_resources = self.config.get("default_openhands_resources") or {}
         if not isinstance(default_resources, dict):
@@ -1974,7 +1979,12 @@ class ScientificResearchEngine:
         )
 
     def _max_parallel_ideas(self, total: int) -> int:
-        configured = int(self.config.get("max_parallel_ideas", 2))
+        # First check environment variable, then config, then default
+        env_value = os.getenv("MAX_PARALLEL_IDEAS")
+        if env_value:
+            configured = int(env_value)
+        else:
+            configured = int(self.config.get("max_parallel_ideas", 2))
         return max(1, min(configured, max(1, total)))
 
     async def _generate_research_ideas(
@@ -1982,7 +1992,12 @@ class ScientificResearchEngine:
         research_question: str,
         session_id: Optional[str],
     ) -> List[ResearchIdea]:
-        max_ideas = int(self.config.get("max_ideas", 3))
+        # First check environment variable, then config, then default
+        env_max_ideas = os.getenv("MAX_RESEARCH_IDEAS")
+        if env_max_ideas:
+            max_ideas = int(env_max_ideas)
+        else:
+            max_ideas = int(self.config.get("max_ideas", 3))
         await self._maybe_run_gepa(
             stage="idea_generation",
             last_reward=self._gepa_last_reward.get("idea_generation", 0.0),
@@ -2105,17 +2120,31 @@ class ScientificResearchEngine:
 
         if include_literature:
             try:
-                literature_result = await self.deep_research_engine.research(query, session_id=None)
+                # Add timeout for deep research (default 300 seconds)
+                timeout = float(os.getenv("DEEP_RESEARCH_TIMEOUT", "300"))
+                literature_result = await asyncio.wait_for(
+                    self.deep_research_engine.research(query, session_id=None),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning("Deep research timeout for idea %s after %s seconds", idea.id, timeout)
             except Exception as exc:  # pragma: no cover - defensive
                 self.logger.warning("Deep research failed for idea %s: %s", idea.id, exc)
 
         if include_code:
             try:
-                code_result = await self.code_research_engine.research_code(
-                    query,
-                    include_analysis=True,
-                    session_id=None,
+                # Add timeout for code research (default 300 seconds)
+                timeout = float(os.getenv("CODE_RESEARCH_TIMEOUT", "300"))
+                code_result = await asyncio.wait_for(
+                    self.code_research_engine.research_code(
+                        query,
+                        include_analysis=True,
+                        session_id=None,
+                    ),
+                    timeout=timeout
                 )
+            except asyncio.TimeoutError:
+                self.logger.warning("Code research timeout for idea %s after %s seconds", idea.id, timeout)
             except Exception as exc:  # pragma: no cover - defensive
                 self.logger.warning("Code research failed for idea %s: %s", idea.id, exc)
 
@@ -2726,11 +2755,23 @@ Return JSON only.
 
             openhands_context: Optional[OpenHandsSessionContext] = None
             try:
-                openhands_context = await self._acquire_openhands_session(
-                    research_session_id=session_id,
-                    idea_id=idea.id,
-                    resource_requirements=self.default_openhands_resources,
+                # Add timeout for acquiring OpenHands session (default 90 seconds)
+                openhands_timeout = float(os.getenv("OPENHANDS_ACQUIRE_TIMEOUT", "90"))
+                openhands_context = await asyncio.wait_for(
+                    self._acquire_openhands_session(
+                        research_session_id=session_id,
+                        idea_id=idea.id,
+                        resource_requirements=self.default_openhands_resources,
+                    ),
+                    timeout=openhands_timeout
                 )
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    "Timeout acquiring OpenHands session for idea %s after %s seconds",
+                    idea.id,
+                    openhands_timeout
+                )
+                openhands_context = None
             except Exception as exc:
                 self.logger.warning(
                     "Failed to acquire OpenHands session for idea %s: %s",
@@ -2808,10 +2849,17 @@ Return JSON only.
                     session_id,
                     base_progress + progress_window * 0.95,
                 )
-                return idea
-            finally:
+
+                # Release OpenHands session after ALL operations are complete successfully
                 if openhands_context:
                     await self._release_openhands_session(openhands_context)
+
+                return idea
+            except Exception as exc:
+                # Release OpenHands session on error
+                if openhands_context:
+                    await self._release_openhands_session(openhands_context)
+                raise exc
 
     async def conduct_research(
         self,
@@ -2884,22 +2932,32 @@ Return JSON only.
             idea_count = len(ideas)
             semaphore = asyncio.Semaphore(self._max_parallel_ideas(idea_count))
 
-            processed_ideas = await asyncio.gather(
-                *[
-                    self._process_idea(
-                        idea,
-                        research_question,
-                        session_id,
-                        semaphore,
-                        idx,
-                        idea_count,
-                        include_literature_review,
-                        include_code_analysis,
-                        enable_iteration,
-                    )
-                    for idx, idea in enumerate(ideas)
-                ]
-            )
+            # Add timeout for all idea processing (default 1200 seconds = 20 minutes)
+            idea_processing_timeout = float(os.getenv("IDEA_PROCESSING_TIMEOUT", "1200"))
+            try:
+                processed_ideas = await asyncio.wait_for(
+                    asyncio.gather(
+                        *[
+                            self._process_idea(
+                                idea,
+                                research_question,
+                                session_id,
+                                semaphore,
+                                idx,
+                                idea_count,
+                                include_literature_review,
+                                include_code_analysis,
+                                enable_iteration,
+                            )
+                            for idx, idea in enumerate(ideas)
+                        ]
+                    ),
+                    timeout=idea_processing_timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Idea processing timeout after %s seconds", idea_processing_timeout)
+                # Return ideas processed so far
+                processed_ideas = ideas
 
             result.ideas = processed_ideas
             result.idea_evaluations = {

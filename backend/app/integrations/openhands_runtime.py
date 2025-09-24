@@ -421,7 +421,25 @@ class OpenHandsActionServerRunner:
             env=env,
         )
 
-        await self._wait_until_ready(process, port, session_api_key)
+        # Add timeout for waiting for action server to be ready (default 60 seconds)
+        wait_timeout = float(os.getenv("OPENHANDS_WAIT_TIMEOUT", "60"))
+        try:
+            await asyncio.wait_for(
+                self._wait_until_ready(process, port, session_api_key),
+                timeout=wait_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error("[CodeAct] Action server failed to start within %s seconds on port %s", wait_timeout, port)
+            # Kill the process if it's still running
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+            raise RuntimeError(f"OpenHands action server failed to start within {wait_timeout} seconds")
+
         return OpenHandsActionServerRunner.Session(self, process, port, session_api_key, workspace_path)
 
     async def execute_python_file(
