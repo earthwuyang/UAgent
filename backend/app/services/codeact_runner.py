@@ -440,6 +440,8 @@ class CodeActRunner:
                         repeat_message = (
                             f"Command '{repeat_key[1]}' produced identical output {count} times."
                         )
+                        stagnation_hints_applied += 1
+                        logger.warning(f"[CodeAct] Repeat guard triggered: {repeat_message}, stagnation_hints_applied={stagnation_hints_applied}, count={count}")
                         # Instead of aborting immediately, inject corrective guidance and continue
                         steps.append(CodeActStep(
                             thought="repeat_guard",
@@ -454,7 +456,6 @@ class CodeActRunner:
                         )
                         transcript.append(repeat_message)
                         transcript.append(hint)
-                        stagnation_hints_applied += 1
                         try:
                             with transcript_file.open("a", encoding="utf-8") as fp:
                                 fp.write(
@@ -480,15 +481,19 @@ class CodeActRunner:
                                 )
                             except Exception:
                                 pass
-                        # If we've hinted multiple times, bail out to avoid infinite loops
-                        if stagnation_hints_applied >= 2:
+                        # If we've hinted once and still stuck, bail out to avoid infinite loops
+                        # This is aggressive but prevents infinite loops in production
+                        if stagnation_hints_applied >= 1:
+                            error_msg = f"Execution stalled: {repeat_message}. Unable to make progress after {stagnation_hints_applied} correction attempts."
+                            logger.warning(f"[CodeAct] Bailing out due to repetition: {error_msg}")
                             return {
                                 "success": False,
-                                "error": repeat_message,
+                                "error": error_msg,
                                 "steps": [s.__dict__ for s in steps],
                                 "repetition_guard": True,
                             }
-                        # Otherwise continue to next planning step
+                        # Otherwise continue to next planning step, but don't increment step counter
+                        # since we didn't actually complete a meaningful action
                         continue
 
             return {"success": False, "error": "Max steps reached", "steps": [s.__dict__ for s in steps]}
