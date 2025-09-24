@@ -38,15 +38,17 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
   const wsRef = useRef<WebSocket | null>(null);
   const engineWsRef = useRef<WebSocket | null>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
-  const rafRef = useRef<number | null>(null);
+  const scrollTimeoutRef = useRef<number | null>(null);
   const eventSignaturesRef = useRef<Set<string>>(new Set());
   const journalSignaturesRef = useRef<Set<string>>(new Set());
 
   const scrollToBottom = () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(() => {
-      eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    });
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+    scrollTimeoutRef.current = window.setTimeout(() => {
+      eventsEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    }, 16);
   };
 
   const makeEventSignature = (evt: ProgressEvent): string => (
@@ -124,10 +126,12 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
     journalSignaturesRef.current.clear();
   }, [sessionId]);
 
-  // Cancel any pending scroll rAF on unmount
+  // Cancel any pending scroll timers on unmount
   useEffect(() => {
     return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
     };
   }, []);
 

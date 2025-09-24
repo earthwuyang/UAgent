@@ -213,6 +213,9 @@ async def lifespan(app: FastAPI):
     if cache:
         await cache.clear()
     await session_manager.shutdown()
+    scientific_engine = get_app_state().get("engines", {}).get("scientific")
+    if hasattr(scientific_engine, "shutdown"):
+        await scientific_engine.shutdown()
     openhands_app_client = get_app_state().get("openhands_app")
     if isinstance(openhands_app_client, OpenHandsAppClient):
         await openhands_app_client.shutdown()

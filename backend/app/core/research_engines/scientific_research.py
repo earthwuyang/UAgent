@@ -1612,35 +1612,46 @@ class ScientificResearchEngine:
             self._openhands_session_semaphore.release()
             raise
 
-    async def _release_openhands_session(self, context: OpenHandsSessionContext) -> None:
+    async def _release_openhands_session(self, context: OpenHandsSessionContext, *, force: bool = False) -> None:
         if not context:
             return
 
         key = self._openhands_session_key(context.research_session_id, context.idea_id)
 
         async with self._openhands_session_lock:
-            existing = self._openhands_sessions.pop(key, None)
+            target = self._openhands_sessions.pop(key, None)
+
+        if not target:
+            target = context
 
         try:
-            if existing:
-                try:
-                    await self.openhands_client.close_session(existing.session_id)
+            if target:
+                retain_sessions = os.getenv("UAGENT_RETAIN_OPENHANDS_SESSIONS", "true").lower() != "false"
+                if retain_sessions and not force:
                     self.logger.debug(
-                        "Closed OpenHands session %s (workspace=%s)",
-                        existing.session_id,
-                        existing.workspace_id,
+                        "Retention enabled; keeping OpenHands session %s (workspace=%s) active",
+                        target.session_id,
+                        target.workspace_id,
                     )
-                except Exception as exc:  # pragma: no cover - defensive cleanup
-                    self.logger.warning(
-                        "Failed to close OpenHands session %s: %s",
-                        existing.session_id,
-                        exc,
-                    )
+                else:
+                    try:
+                        await self.openhands_client.close_session(target.session_id)
+                        self.logger.debug(
+                            "Closed OpenHands session %s (workspace=%s)",
+                            target.session_id,
+                            target.workspace_id,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive cleanup
+                        self.logger.warning(
+                            "Failed to close OpenHands session %s: %s",
+                            target.session_id,
+                            exc,
+                        )
         finally:
-            if existing:
+            if target:
                 self._openhands_session_semaphore.release()
 
-    async def _release_all_openhands_sessions(self, research_session_id: Optional[str]) -> None:
+    async def _release_all_openhands_sessions(self, research_session_id: Optional[str], *, force: bool = False) -> None:
         if not self.openhands_client:
             return
 
@@ -1653,23 +1664,16 @@ class ScientificResearchEngine:
 
         for key in keys:
             async with self._openhands_session_lock:
-                ctx = self._openhands_sessions.pop(key, None)
+                ctx = self._openhands_sessions.get(key)
             if ctx:
-                try:
-                    try:
-                        await self.openhands_client.close_session(ctx.session_id)
-                        self.logger.debug(
-                            "Closed OpenHands session %s during cleanup",
-                            ctx.session_id,
-                        )
-                    except Exception as exc:  # pragma: no cover - defensive
-                        self.logger.warning(
-                            "Failed to close OpenHands session %s during cleanup: %s",
-                            ctx.session_id,
-                            exc,
-                        )
-                finally:
-                    self._openhands_session_semaphore.release()
+                await self._release_openhands_session(ctx, force=force)
+
+    async def shutdown(self) -> None:
+        """Ensure all OpenHands sessions are closed during application shutdown."""
+        try:
+            await self._release_all_openhands_sessions(None, force=True)
+        except Exception as exc:  # pragma: no cover - defensive shutdown
+            self.logger.warning("Failed to release OpenHands sessions on shutdown: %s", exc)
 
     @staticmethod
     def _safe_parse_json_block(content: str) -> Any:
@@ -2850,15 +2854,17 @@ Return JSON only.
                     base_progress + progress_window * 0.95,
                 )
 
-                # Release OpenHands session after ALL operations are complete successfully
-                if openhands_context:
-                    await self._release_openhands_session(openhands_context)
+                # DON'T release OpenHands session here - it should be kept alive for reuse
+                # The session will be cleaned up later by the cleanup methods
+                # if openhands_context:
+                #     await self._release_openhands_session(openhands_context)
 
                 return idea
             except Exception as exc:
-                # Release OpenHands session on error
-                if openhands_context:
-                    await self._release_openhands_session(openhands_context)
+                # DON'T release OpenHands session even on error - let it be reused or cleaned up later
+                # if openhands_context:
+                #     await self._release_openhands_session(openhands_context)
+                self.logger.error(f"Error processing idea {idea.id}: {exc}")
                 raise exc
 
     async def conduct_research(
