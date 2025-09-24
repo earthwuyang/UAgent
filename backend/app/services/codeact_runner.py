@@ -117,6 +117,18 @@ class CodeActRunner:
             elif raw is not None:
                 _append(str(raw))
 
+        if not parts:
+            command_text = None
+            exec_result = getattr(action_result, "execution_result", None)
+            if exec_result is not None:
+                command_text = getattr(exec_result, "command", None)
+            if not command_text:
+                command_text = getattr(action_result, "command", None)
+            if command_text:
+                parts.append(f"[command produced no output] {command_text}")
+            else:
+                parts.append("[command produced no observable output]")
+
         return "\n".join(parts).strip()
 
     async def run(
