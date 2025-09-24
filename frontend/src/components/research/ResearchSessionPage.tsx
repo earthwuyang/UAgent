@@ -31,6 +31,7 @@ const ResearchSessionPage: React.FC = () => {
   const [events, setEvents] = useState<any[]>([])
   const [hasFetchedReport, setHasFetchedReport] = useState(false)
   const [isFetchingReport, setIsFetchingReport] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
   const [sessionRecord, setSessionRecord] = useState<any | null>(null)
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoStartAttemptedRef = useRef(false)
@@ -211,6 +212,30 @@ const ResearchSessionPage: React.FC = () => {
     }
   }, [storedResult, sessionId, hasFetchedReport, fetchReport])
 
+  const handleManualStart = useCallback(async () => {
+    if (!sessionId || !requestSummary?.trim()) {
+      console.warn('Cannot start session without a request summary')
+      return
+    }
+    setIsStarting(true)
+    try {
+      const ack = await UAgentAPI.routeAndExecute({
+        user_request: requestSummary,
+        session_id: sessionId,
+        context: { source: 'session_manual_start' }
+      })
+      setClassification(ack.classification as ClassificationResult)
+      persistSessionData(null, ack.classification as ClassificationResult)
+      autoStartAttemptedRef.current = true
+    } catch (error) {
+      console.error('Manual start failed', error)
+    } finally {
+      setIsStarting(false)
+    }
+  }, [sessionId, requestSummary, persistSessionData])
+
+  const canStartSession = !classification || sessionRecord?.status === 'error'
+
   useEffect(() => {
     if (!sessionId) return
     if (events.length === 0) return
@@ -288,6 +313,16 @@ const ResearchSessionPage: React.FC = () => {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {canStartSession && (
+              <Button
+                variant="default"
+                onClick={handleManualStart}
+                disabled={isStarting || !requestSummary?.trim()}
+                className="text-sm"
+              >
+                {isStarting ? 'Starting...' : 'Start Research'}
+              </Button>
+            )}
             {TABS.map((tab) => (
               <Button
                 key={tab.id}
