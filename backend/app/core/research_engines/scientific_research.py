@@ -766,7 +766,18 @@ class ExperimentExecutor:
             execution.status = ExperimentStatus.FAILED
             execution.errors.append(str(e))
             execution.end_time = datetime.now()
-            self.logger.error(f"Experiment execution failed: {e}")
+            execution.logs.append(
+                f"Experiment execution failed: {str(e)}"
+            )
+            if prior_errors:
+                execution.logs.append(
+                    f"Prior errors when failing: {prior_errors[-3:]}"
+                )
+            self.logger.exception(
+                "Experiment execution failed for %s (%s)",
+                design.id,
+                design.name,
+            )
 
         execution.output_data.setdefault("attempt_number", attempt_number)
         if prior_errors:
@@ -894,21 +905,24 @@ class ExperimentExecutor:
             except Exception as exc:  # pragma: no cover - logging best effort
                 self.logger.debug("Failed to log data collection event %s: %s", suffix, exc)
 
-        await _log_collection_event(
-            suffix="start",
-            message="Preparing experimental data collection",
-            offset=0.0,
-        )
+        codeact_failures: List[Dict[str, Any]] = []
 
-        error_context = ""
-        if prior_errors:
-            error_context = (
-                "\nKnown issues to resolve (latest first):\n"
-                f"{json.dumps(prior_errors[-3:], indent=2)}\n"
-                "Update the implementation to fix these problems explicitly."
+        try:
+            await _log_collection_event(
+                suffix="start",
+                message="Preparing experimental data collection",
+                offset=0.0,
             )
 
-        data_collection_prompt = f"""
+            error_context = ""
+            if prior_errors:
+                error_context = (
+                    "\nKnown issues to resolve (latest first):\n"
+                    f"{json.dumps(prior_errors[-3:], indent=2)}\n"
+                    "Update the implementation to fix these problems explicitly."
+                )
+
+            data_collection_prompt = f"""
 Generate pure Python (no markdown fences) that collects **real** experimental data for the following study.
 
 Experiment: {design.name}
@@ -930,153 +944,196 @@ Non-negotiable constraints:
 
 The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics derived from actual execution.
 """
-        execution.intermediate_results.setdefault("data_collection_prompt", data_collection_prompt)
+            execution.intermediate_results.setdefault("data_collection_prompt", data_collection_prompt)
 
 
-        ras_result: Optional[Dict[str, Any]] = None
-        if self.ras_spec_path:
-            try:
-                ras_result = await self._run_ras_plan(design, execution, session_context)
-                if ras_result:
-                    await _log_collection_event(
-                        suffix="ras_complete",
-                        message="ResearchActionSpec executed successfully",
-                        offset=0.35,
-                        metadata_overrides={"node_type": "step", "status": "completed"},
-                    )
-                    return ras_result
-            except Exception as ras_exc:
-                self.logger.error("RAS execution failed: %s", ras_exc)
-                prior_errors.append(str(ras_exc))
-                await _log_collection_event(
-                    suffix="ras_error",
-                    message=f"RAS execution failed: {ras_exc}",
-                    offset=0.3,
-                    metadata_overrides={"status": "error", "error": str(ras_exc)},
-                )
-
-        codeact_enabled = (
-            self.config.get("use_codeact", True)
-            and self.openhands_client
-            and getattr(self.openhands_client, "action_runner", None)
-            and self.openhands_client.action_runner.is_available
-        )
-
-        if codeact_enabled:
-            try:
-                workspace_path = self.openhands_client.workspace_manager.get_workspace_path(
-                    session_context.workspace_id
-                )
-                if not workspace_path:
-                    raise RuntimeError("OpenHands workspace path unavailable for CodeAct execution")
-
-                from ...services.codeact_runner import CodeActRunner  # lazy import
-
-                runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
-
-                def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-                    obs_text = "\n".join(
-                        [step.get("observation", "") for step in steps_dict.get("steps", [])]
-                    ) if isinstance(steps_dict, dict) else ""
-                    if ("Final result:" in obs_text) or ("Result:" in obs_text):
-                        line = next(
-                            (l for l in obs_text.splitlines() if "Final result:" in l),
-                            None,
-                        ) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
-                        if line:
-                            json_str = line.split(":", 1)[1].strip()
-                            try:
-                                data = safe_json_loads(sanitize_json_strings(json_str))
-                            except JsonParseError as exc:
-                                self.logger.debug(
-                                    "CodeAct final result JSON parse failed: %s", exc
-                                )
-                                return None
-                            return data if isinstance(data, dict) else None
-                    return None
-
-                event_offsets = {
-                    "planning": 0.4,
-                    "tool_call": 0.5,
-                    "tool_result": 0.6,
-                    "tool_result_update": 0.65,
-                    "finish": 0.75,
-                    "error": 0.7,
-                }
-
-                async def _cb(event: str, data: Dict[str, Any]) -> None:
-                    await _log_collection_event(
-                        suffix=event,
-                        message=f"CodeAct {event}",
-                        offset=event_offsets.get(event, 0.55),
-                        metadata_overrides={
-                            "node_type": "step",
-                            "node_id": codeact_node_id,
-                            "parent_id": parent_node_id,
-                            "status": data.get("success"),
-                            "preview": data.get("observation_preview"),
-                            "tool": data.get("tool"),
-                        },
-                    )
-
-                base_goal = (
-                    f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
-                    f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
-                    f"followed by a compact JSON dict of results. Do not simulate, mock, or fabricate metrics. Do not use the words 'simulate', 'simulation', 'mock', 'placeholder', 'synthetic', 'random.uniform', or 'np.random'. "
-                    f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
-                    f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run. "
-                    f"If a ResearchActionSpec JSON does not already exist at experiments/{design.id}/ras_spec.json, author one describing each command sequence, required capabilities, artifacts, and assertions so the orchestrator can execute the workflow autonomously."
-                )
-
-                outer_rounds = int(self.config.get("codeact_rounds", 3))
-                last_obs_preview = ""
-                for round_idx in range(1, outer_rounds + 1):
-                    goal_text = base_goal
-                    if last_obs_preview:
-                        goal_text += (
-                            "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
-                            + "\nAddress these issues explicitly before running again."
-                        )
-                    result = await runner.run(
-                        workspace_path=workspace_path,
-                        goal=goal_text,
-                        max_steps=int(self.config.get("codeact_max_steps", 10)),
-                        timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
-                        progress_cb=_cb,
-                    )
-                    execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
-                    final_data = _extract_final_result(result)
-                    if final_data:
+            ras_result: Optional[Dict[str, Any]] = None
+            if self.ras_spec_path:
+                try:
+                    ras_result = await self._run_ras_plan(design, execution, session_context)
+                    if ras_result:
                         await _log_collection_event(
-                            suffix="finish",
-                            message="CodeAct completed successfully",
-                            offset=0.85,
-                            metadata_overrides={"node_type": "result", "status": "completed"},
-                            node_type="result",
+                            suffix="ras_complete",
+                            message="ResearchActionSpec executed successfully",
+                            offset=0.35,
+                            metadata_overrides={"node_type": "step", "status": "completed"},
                         )
-                        payload: Dict[str, Any] = {"success": True}
-                        payload.update(final_data)
-                        return payload
+                        return ras_result
+                except Exception as ras_exc:
+                    self.logger.error("RAS execution failed: %s", ras_exc)
+                    prior_errors.append(str(ras_exc))
+                    await _log_collection_event(
+                        suffix="ras_error",
+                        message=f"RAS execution failed: {ras_exc}",
+                        offset=0.3,
+                        metadata_overrides={"status": "error", "error": str(ras_exc)},
+                    )
 
-                    try:
-                        obs_list = [s.get("observation", "") for s in result.get("steps", [])]
-                        last_obs_preview = "\n".join(obs_list[-5:]) if obs_list else ""
-                    except Exception:
-                        last_obs_preview = ""
+            codeact_enabled = (
+                self.config.get("use_codeact", True)
+                and self.openhands_client
+                and getattr(self.openhands_client, "action_runner", None)
+                and self.openhands_client.action_runner.is_available
+            )
 
-                raise RuntimeError("CodeAct did not reach a final result after retries")
-            except Exception as exc:
-                await _log_collection_event(
-                    suffix="error",
-                    message=f"CodeAct flow error: {exc}",
-                    offset=0.8,
-                    metadata_overrides={"status": "error", "error": str(exc)},
-                )
-                raise RuntimeError(f"CodeAct flow error: {exc}") from exc
+            if codeact_enabled:
+                try:
+                    workspace_path = self.openhands_client.workspace_manager.get_workspace_path(
+                        session_context.workspace_id
+                    )
+                    if not workspace_path:
+                        raise RuntimeError("OpenHands workspace path unavailable for CodeAct execution")
 
-        raise RuntimeError(
-            "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
-        )
+                    from ...services.codeact_runner import CodeActRunner  # lazy import
+
+                    runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
+
+                    def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                        obs_text = "\n".join(
+                            [step.get("observation", "") for step in steps_dict.get("steps", [])]
+                        ) if isinstance(steps_dict, dict) else ""
+                        if ("Final result:" in obs_text) or ("Result:" in obs_text):
+                            line = next(
+                                (l for l in obs_text.splitlines() if "Final result:" in l),
+                                None,
+                            ) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
+                            if line:
+                                json_str = line.split(":", 1)[1].strip()
+                                try:
+                                    data = safe_json_loads(sanitize_json_strings(json_str))
+                                except JsonParseError as exc:
+                                    self.logger.debug(
+                                        "CodeAct final result JSON parse failed: %s", exc
+                                    )
+                                    return None
+                                return data if isinstance(data, dict) else None
+                        return None
+
+                    event_offsets = {
+                        "planning": 0.4,
+                        "tool_call": 0.5,
+                        "tool_result": 0.6,
+                        "tool_result_update": 0.65,
+                        "finish": 0.75,
+                        "error": 0.7,
+                    }
+
+                    async def _cb(event: str, data: Dict[str, Any]) -> None:
+                        await _log_collection_event(
+                            suffix=event,
+                            message=f"CodeAct {event}",
+                            offset=event_offsets.get(event, 0.55),
+                            metadata_overrides={
+                                "node_type": "step",
+                                "node_id": codeact_node_id,
+                                "parent_id": parent_node_id,
+                                "status": data.get("success"),
+                                "preview": data.get("observation_preview"),
+                                "tool": data.get("tool"),
+                            },
+                        )
+
+                    base_goal = (
+                        f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
+                        f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
+                        f"followed by a compact JSON dict of results. Do not simulate, mock, or fabricate metrics. Do not use the words 'simulate', 'simulation', 'mock', 'placeholder', 'synthetic', 'random.uniform', or 'np.random'. "
+                        f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
+                        f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run. "
+                        f"If a ResearchActionSpec JSON does not already exist at experiments/{design.id}/ras_spec.json, author one describing each command sequence, required capabilities, artifacts, and assertions so the orchestrator can execute the workflow autonomously."
+                    )
+
+                    outer_rounds = int(self.config.get("codeact_rounds", 3))
+                    last_obs_preview = ""
+                    for round_idx in range(1, outer_rounds + 1):
+                        goal_text = base_goal
+                        if last_obs_preview:
+                            goal_text += (
+                                "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
+                                + "\nAddress these issues explicitly before running again."
+                            )
+                        result = await runner.run(
+                            workspace_path=workspace_path,
+                            goal=goal_text,
+                            max_steps=int(self.config.get("codeact_max_steps", 10)),
+                            timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
+                            progress_cb=_cb,
+                        )
+                        execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
+                        final_data = _extract_final_result(result)
+                        if final_data:
+                            await _log_collection_event(
+                                suffix="finish",
+                                message="CodeAct completed successfully",
+                                offset=0.85,
+                                metadata_overrides={"node_type": "result", "status": "completed"},
+                                node_type="result",
+                            )
+                            payload: Dict[str, Any] = {"success": True}
+                            payload.update(final_data)
+                            return payload
+
+                        try:
+                            obs_list = [s.get("observation", "") for s in result.get("steps", [])]
+                            last_obs_preview = "\n".join(obs_list[-5:]) if obs_list else ""
+                        except Exception:
+                            last_obs_preview = ""
+
+                        failure_msg = (
+                            result.get("message")
+                            or result.get("error")
+                            or (last_obs_preview[:400] if last_obs_preview else "No result emitted")
+                        )
+                        failure_entry = {
+                            "round": round_idx,
+                            "message": failure_msg,
+                            "observation_preview": last_obs_preview[:800] if last_obs_preview else "",
+                            "success": result.get("success"),
+                        }
+                        codeact_failures.append(failure_entry)
+                        execution.logs.append(
+                            f"CodeAct round {round_idx} did not produce a final result: {failure_msg}"
+                        )
+                        execution.output_data.setdefault("codeact_failures", []).append(failure_entry)
+                        await _log_collection_event(
+                            suffix=f"round_{round_idx}_failed",
+                            message=f"CodeAct round {round_idx} incomplete",
+                            offset=0.7,
+                            metadata_overrides={
+                                "status": "error",
+                                "error": failure_msg,
+                                "round": round_idx,
+                            },
+                        )
+
+                    raise RuntimeError("CodeAct did not reach a final result after retries")
+                except Exception as exc:
+                    await _log_collection_event(
+                        suffix="error",
+                        message=f"CodeAct flow error: {exc}",
+                        offset=0.8,
+                        metadata_overrides={"status": "error", "error": str(exc)},
+                    )
+                    raise RuntimeError(f"CodeAct flow error: {exc}") from exc
+
+            raise RuntimeError(
+                "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
+            )
+        except Exception as exc:
+            await _log_collection_event(
+                suffix="failure",
+                message=f"Data collection error: {exc}",
+                offset=0.95,
+                metadata_overrides={"status": "error", "error": str(exc)},
+            )
+            self.logger.exception(
+                "Data collection failed for experiment %s (%s)",
+                design.id,
+                design.name,
+            )
+            failure_payload: Dict[str, Any] = {"success": False, "error": str(exc)}
+            if codeact_failures:
+                failure_payload["codeact_failures"] = codeact_failures
+            return failure_payload
 
     async def _run_ras_plan(
         self,
