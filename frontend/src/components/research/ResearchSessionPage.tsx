@@ -31,10 +31,16 @@ const ResearchSessionPage: React.FC = () => {
   const [events, setEvents] = useState<any[]>([])
   const [hasFetchedReport, setHasFetchedReport] = useState(false)
   const [isFetchingReport, setIsFetchingReport] = useState(false)
-  const [autoStartTriggered, setAutoStartTriggered] = useState(false)
+  const [sessionRecord, setSessionRecord] = useState<any | null>(null)
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoStartAttemptedRef = useRef(false)
 
   const storageKey = useMemo(() => `${STORAGE_PREFIX}${sessionId}`, [sessionId])
+
+  useEffect(() => {
+    autoStartAttemptedRef.current = false
+    setSessionRecord(null)
+  }, [sessionId])
 
   const syncFromStorage = useCallback(() => {
     if (!sessionId) return
@@ -76,6 +82,63 @@ const ResearchSessionPage: React.FC = () => {
       window.removeEventListener('storage', handleStorage)
     }
   }, [sessionId, storageKey, syncFromStorage])
+
+  // Check backend for existing session to support resume across refreshes
+  useEffect(() => {
+    if (!sessionId) return
+    let cancelled = false
+
+    const hydrateFromBackend = async () => {
+      try {
+        const record = await UAgentAPI.getResearchSession(sessionId)
+        if (cancelled || !record) return
+
+        setSessionRecord(record)
+
+        if (typeof record.request === 'string' && record.request.trim()) {
+          setRequestSummary((prev) => prev || (record.request as string))
+        }
+
+        if (record.classification) {
+          setClassification((prev) => prev ?? (record.classification as ClassificationResult))
+        }
+
+        if (record.result) {
+          setStoredResult((prev) => {
+            if (prev) return prev
+            setHasFetchedReport(true)
+            return record.result as RouteAndExecuteResponse
+          })
+        }
+
+        const payload: Record<string, unknown> = {
+          updatedAt: new Date().toISOString()
+        }
+        if (typeof record.request === 'string' && record.request.trim()) {
+          payload.request = record.request
+        }
+        if (record.classification) {
+          payload.classification = record.classification
+        }
+        if (record.result) {
+          payload.result = record.result
+        }
+        if (payload.request || payload.classification || payload.result) {
+          try {
+            window.localStorage.setItem(storageKey, JSON.stringify(payload))
+          } catch {}
+        }
+      } catch (e) {
+        console.error('Resume check failed', e)
+      }
+    }
+
+    hydrateFromBackend()
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, storageKey])
 
   useEffect(() => {
     if (!sessionId || !sessionId.startsWith('session_')) {
@@ -158,15 +221,17 @@ const ResearchSessionPage: React.FC = () => {
   }, [events, sessionId, fetchReport])
 
   useEffect(() => {
-    if (!sessionId || autoStartTriggered) return
+    if (!sessionId) return
+    if (autoStartAttemptedRef.current) return
     if (!requestSummary?.trim()) return
     if (classification) return
+    if (sessionRecord && sessionRecord.status && sessionRecord.status !== 'pending') return
 
     let cancelled = false
+    autoStartAttemptedRef.current = true
 
-    const triggerAutoStart = async () => {
+    ;(async () => {
       try {
-        setAutoStartTriggered(true)
         const ack = await UAgentAPI.routeAndExecute({
           user_request: requestSummary,
           session_id: sessionId,
@@ -177,18 +242,14 @@ const ResearchSessionPage: React.FC = () => {
         persistSessionData(null, ack.classification as ClassificationResult)
       } catch (error) {
         console.error('Auto-start research failed', error)
-        if (!cancelled) {
-          setAutoStartTriggered(false)
-        }
+        autoStartAttemptedRef.current = false
       }
-    }
-
-    triggerAutoStart()
+    })()
 
     return () => {
       cancelled = true
     }
-  }, [sessionId, requestSummary, classification, autoStartTriggered, persistSessionData])
+  }, [sessionId, requestSummary, classification, sessionRecord, persistSessionData])
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -251,9 +312,11 @@ const ResearchSessionPage: React.FC = () => {
           />
         </div>
 
-        <div className={activeTab === 'tree' ? 'block' : 'hidden'}>
-          <ResearchTreeVisualization sessionId={sessionId} />
-        </div>
+        {activeTab === 'tree' && (
+          <div>
+            <ResearchTreeVisualization sessionId={sessionId} />
+          </div>
+        )}
 
         <div className={activeTab === 'results' ? 'block' : 'hidden'}>
           {storedResult ? (

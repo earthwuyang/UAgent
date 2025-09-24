@@ -118,14 +118,12 @@ export class UAgentAPI {
 
   // Resume existing session metadata (does not start new work)
   static async resumeSession(sessionId: string): Promise<any | null> {
-    try {
-      const response = await api.get(`/sessions/${sessionId}/resume`);
-      return response.data;
-    } catch (err: any) {
-      if (err?.response?.status === 404) return null;
-      console.error('Resume session error:', err);
-      return null;
-    }
+    // Treat 404 as a valid, non-error response (session not found yet)
+    const response = await api.get(`/sessions/${sessionId}/resume`, {
+      validateStatus: (status) => status === 200 || status === 404,
+    });
+    if (response.status === 404) return null;
+    return response.data;
   }
 }
 

@@ -38,11 +38,15 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
   const wsRef = useRef<WebSocket | null>(null);
   const engineWsRef = useRef<WebSocket | null>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number | null>(null);
   const eventSignaturesRef = useRef<Set<string>>(new Set());
   const journalSignaturesRef = useRef<Set<string>>(new Set());
 
   const scrollToBottom = () => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
   };
 
   const makeEventSignature = (evt: ProgressEvent): string => (
@@ -61,7 +65,6 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
     eventSignaturesRef.current.add(signature);
     setEvents((prev) => {
       const next = [...prev, evt];
-      onEventsUpdate?.(next);
       return next;
     });
     if (typeof evt.progress_percentage === 'number') {
@@ -93,7 +96,6 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
     });
 
     setEvents(snapshotEvents);
-    onEventsUpdate?.(snapshotEvents);
     setJournalEntries(snapshotJournal);
     setEngineStatuses(snapshot.engine_statuses ?? {});
 
@@ -120,8 +122,21 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
     setConnected(false);
     eventSignaturesRef.current.clear();
     journalSignaturesRef.current.clear();
-    onEventsUpdate?.([]);
-  }, [sessionId, onEventsUpdate]);
+  }, [sessionId]);
+
+  // Cancel any pending scroll rAF on unmount
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  // Propagate events to parent after render to avoid render-phase updates
+  useEffect(() => {
+    if (onEventsUpdate) {
+      onEventsUpdate(events);
+    }
+  }, [events, onEventsUpdate]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -251,7 +266,7 @@ export const ResearchProgressStream: React.FC<ResearchProgressStreamProps> = ({
         engineWsRef.current.close(1000, 'Component unmounting');
       }
     };
-  }, [sessionId, onConnectionChange, onEventsUpdate]);
+  }, [sessionId, onConnectionChange]);
 
   const getEventIcon = (eventType: string) => {
     switch (eventType) {

@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+import logging
 
 from ..core.llm_client import LLMClient
 from ..core.openhands import OpenHandsClient, CodeGenerationRequest, CodeGenerationResult
@@ -52,6 +53,9 @@ class GoalPlan:
     goal: str
     summary: str
     steps: List[GoalPlanStep] = field(default_factory=list)
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenHandsGoalPlanBridge:
@@ -138,12 +142,51 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
 """
 
         response = await self._llm_client.generate(plan_prompt, max_tokens=700, temperature=0.3)
-        parsed = _safe_json_loads(response)
-        if not isinstance(parsed, dict):
+
+        def _coerce_plan_payload(raw_parsed: Any) -> Optional[Dict[str, Any]]:
+            # Already a dict
+            if isinstance(raw_parsed, dict):
+                return raw_parsed
+            # Common case: model returns a list of steps
+            if isinstance(raw_parsed, list):
+                steps: List[Dict[str, Any]] = []
+                for idx, item in enumerate(raw_parsed, start=1):
+                    if isinstance(item, dict):
+                        steps.append(item)
+                    elif isinstance(item, str):
+                        steps.append({
+                            "id": f"step-{idx}",
+                            "description": item.strip(),
+                            "expected_output": "",
+                            "dependencies": [],
+                        })
+                if steps:
+                    return {"summary": "Generated plan", "steps": steps}
+                return None
+            # Sometimes models double-encode JSON as a string
+            if isinstance(raw_parsed, str):
+                nested = _safe_json_loads(raw_parsed)
+                if nested is not None:
+                    return _coerce_plan_payload(nested)
+                return None
+            return None
+
+        parsed_any = _safe_json_loads(response)
+        plan_dict = _coerce_plan_payload(parsed_any)
+        if not isinstance(plan_dict, dict):
+            preview = (response or "")[:500].replace("\n", " ")
+            logger.warning("OpenHands plan generation returned non-dict; preview=%s", preview)
             raise RuntimeError("OpenHands plan generation returned non-dict payload; refusing fallback")
 
+        # Normalize alternate step keys if necessary
+        if "steps" not in plan_dict:
+            for alt_key in ("plan", "actions", "tasks", "items"):
+                if isinstance(plan_dict.get(alt_key), list):
+                    plan_dict["steps"] = plan_dict[alt_key]
+                    break
+
         steps: List[GoalPlanStep] = []
-        for raw in parsed.get("steps", []) or []:
+        for raw in plan_dict.get("steps", []) or []:
             if not isinstance(raw, dict):
                 continue
             step_id = str(raw.get("id") or f"step-{len(steps)+1}")
@@ -161,7 +204,7 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
         plan = GoalPlan(
             plan_id=f"plan_{uuid.uuid4().hex[:8]}",
             goal=goal,
-            summary=str(parsed.get("summary") or "Generated OpenHands plan"),
+            summary=str(plan_dict.get("summary") or "Generated OpenHands plan"),
             steps=steps,
         )
         return plan
