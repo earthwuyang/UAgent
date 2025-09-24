@@ -70,6 +70,7 @@ venv/
 
 # Project specific
 backend/job_logs/
+backend/data
 checkpoints/
 wandb/
 mlruns/
