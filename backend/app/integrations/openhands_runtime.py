@@ -226,6 +226,24 @@ class OpenHandsActionServerRunner:
                     exc.response.status_code if exc.response is not None else "unknown",
                     stdout_text or stderr_text or error_detail or str(exc),
                 )
+                # best-effort action trace
+                try:
+                    logs_dir = self._workspace_path / "logs"
+                    logs_dir.mkdir(parents=True, exist_ok=True)
+                    trace_path = logs_dir / "openhands_actions.jsonl"
+                    import json as _json, time as _time
+                    with trace_path.open("a", encoding="utf-8") as fp:
+                        fp.write(_json.dumps({
+                            "ts": _time.time(),
+                            "action": action_name,
+                            "args": args,
+                            "success": False,
+                            "status": int(exc.response.status_code) if exc.response is not None else None,
+                            "stdout": stdout_text,
+                            "stderr": stderr_text or error_detail,
+                        }) + "\n")
+                except Exception:
+                    pass
                 return OpenHandsActionResult(
                     execution_result=exec_result,
                     raw_observation=observation,
@@ -248,6 +266,24 @@ class OpenHandsActionServerRunner:
                 execution_result.success,
                 preview,
             )
+            # best-effort action trace
+            try:
+                logs_dir = self._workspace_path / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                trace_path = logs_dir / "openhands_actions.jsonl"
+                import json as _json, time as _time
+                with trace_path.open("a", encoding="utf-8") as fp:
+                    fp.write(_json.dumps({
+                        "ts": _time.time(),
+                        "action": action_name,
+                        "args": args,
+                        "success": bool(execution_result.success),
+                        "exit_code": int(execution_result.exit_code) if execution_result.exit_code is not None else None,
+                        "stdout": stdout_text,
+                        "stderr": stderr_text,
+                    }) + "\n")
+            except Exception:
+                pass
             return OpenHandsActionResult(
                 execution_result=execution_result,
                 raw_observation=observation,
@@ -364,17 +400,10 @@ class OpenHandsActionServerRunner:
         env["SESSION_API_KEY"] = session_api_key
         env.setdefault("PYTHONUNBUFFERED", "1")
 
-        # Optional: apply a local proxy to the action server env only when explicitly enabled
-        # to avoid forcing proxy usage for all commands. Users can set UAGENT_AUTO_PROXY=true
-        # if they want automatic proxy environment injection.
-        use_auto_proxy = os.getenv("UAGENT_AUTO_PROXY", "false").lower() in {"1","true","yes","on"}
-        if use_auto_proxy:
-            proxy_url = _detect_local_proxy()
-            if proxy_url:
-                for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
-                    env.setdefault(key, proxy_url)
-                env.setdefault("GIT_HTTP_PROXY", proxy_url)
-                env.setdefault("GIT_HTTPS_PROXY", proxy_url)
+        # Forward proxy variables if set; no Docker here, so inherit host env safely
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "no_proxy"):
+            if key in os.environ:
+                env[key] = os.environ[key]
 
         workspace_mount = f"{workspace_path}:/workspace:rw"
         sandbox_volumes = env.get("SANDBOX_VOLUMES")
@@ -387,6 +416,14 @@ class OpenHandsActionServerRunner:
             env["SANDBOX_USER_ID"] = str(os.getuid())
         except AttributeError:
             env.setdefault("SANDBOX_USER_ID", "1000")
+
+        # Prepend workspace .venv/bin if present so subprocesses see user-space tools
+        try:
+            venv_bin = (workspace_path / ".venv" / "bin").resolve()
+            if venv_bin.exists():
+                env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+        except Exception:
+            pass
 
         username = _lookup_username()
         try:
@@ -527,6 +564,11 @@ class OpenHandsActionServerRunner:
                     cmd_l.startswith(prefix)
                     for prefix in ("cat ", "cat -n ", "ls ", "ls -pa ")
                 ):
+                    exit_code = 0
+            # Editor actions often omit exit_code; treat semantic success as success
+            if action_name in {"edit", "write", "str_replace_editor"}:
+                msg = (output or "").lower()
+                if success_flag is True or "created" in msg or "updated" in msg or "success" in msg:
                     exit_code = 0
 
         return ExecutionResult(

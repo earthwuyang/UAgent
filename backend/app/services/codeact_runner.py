@@ -273,6 +273,44 @@ class CodeActRunner:
         except Exception:
             pass
         stagnation_hints_applied = 0
+        # If workspace appears empty, inject an initial create step to avoid list/view loops
+        try:
+            code_dir = workspace_path / "code"
+            has_files = code_dir.exists() and any(code_dir.rglob("*.*"))
+        except Exception:
+            has_files = True
+        already_bootstrapped = False
+        if not has_files:
+            try:
+                entry_path = "code/entrypoint.py"
+                bootstrap_content = (
+                    "#!/usr/bin/env python3\n"
+                    "import json, platform, os\n"
+                    "def main():\n"
+                    "  info = {\"os\": platform.platform(), \"cwd\": os.getcwd()}\n"
+                    "  print('Final result: ' + json.dumps(info))\n"
+                    "if __name__ == '__main__': main()\n"
+                )
+                content, ok = await self._execute_tool(
+                    session,
+                    "str_replace_editor",
+                    {"command": "create", "path": entry_path, "file_text": bootstrap_content},
+                    timeout_per_action,
+                    progress_cb,
+                    str(workspace_path),
+                )
+                # Run it once to seed logs/results and prove execution pipeline
+                _, _ = await self._execute_tool(
+                    session,
+                    "execute_bash",
+                    {"command": f"python3 {entry_path}"},
+                    timeout_per_action,
+                    progress_cb,
+                    str(workspace_path),
+                )
+                already_bootstrapped = True
+            except Exception:
+                already_bootstrapped = False
         try:
             for step_idx in range(1, max_steps + 1):
                 prompt = self._build_prompt(goal, transcript)
