@@ -71,6 +71,7 @@ class OpenHandsGoalPlanBridge:
             """
 Prepare the workspace for software and data experiments **without** installing new system packages. Operate only within the provided directory tree.
 - Do NOT run `apt-get`, `sudo`, or any system package manager. Assume required toolchains already exist.
+- Do NOT clone external repositories (e.g., OpenHands). Work entirely within the current workspace.
 - Inspect the current environment (e.g., git, python, compilers, databases found on PATH) and record findings in `workspace/env_report.txt`. Capture only the presence of tools you expect to use; avoid sweeping version scans or heavyweight discovery loops. If a tool is missing, note it instead of attempting installation.
 - Only create directories or files that the current task explicitly requires. Avoid hard-coded technology names; prefer generic locations such as `workspace/run/` or `workspace/tmp/` as needed.
 - Generate a shell script `workspace/env.sh` that exports environment variables actually used in the current workspace (leave placeholders commented when no concrete values exist). The script must be idempotent and safe to source multiple times.
@@ -109,6 +110,11 @@ All actions must be idempotent and keep the workspace self-contained.
 You are an expert CodeAct/CodeReact planning assistant inside the OpenHands framework.
 Break the high-level scientific goal into executable coding steps that an autonomous agent can follow.
 
+Constraints:
+- Operate strictly inside the provided workspace; prefer creating/editing files and running commands there.
+- Do NOT clone unrelated repositories. In particular, do NOT clone the OpenHands repository — the runtime is already integrated.
+- Avoid `sudo`/`apt-get` unless explicitly required by the user.
+
 Goal:
 "{goal}"
 
@@ -128,7 +134,7 @@ Respond **only** with JSON using the following schema:
   ]
 }}
 
-Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps.
+Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do not include actions that clone OpenHands or unrelated repositories.
 """
 
         response = await self._llm_client.generate(plan_prompt, max_tokens=700, temperature=0.3)

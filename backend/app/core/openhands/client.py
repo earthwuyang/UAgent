@@ -239,7 +239,7 @@ class OpenHandsClient:
                     runner = CodeActRunner(llm_client, self.action_runner)
                     goal = (
                         f"Generate real, runnable code to accomplish: {request.task_description}. "
-                        f"No Simulation Policy: do NOT use simulate/simulation/mock/placeholder/synthetic/random.uniform/np.random. "
+                        f"Avoid fabricated outputs; rely on actual execution and measurements. If you need randomness, justify it explicitly and document the seed. "
                         f"Create a Python file under code/, run it with bash (python3 path.py), and print a single line 'Result: ' + JSON."
                     )
                     result = await runner.run(

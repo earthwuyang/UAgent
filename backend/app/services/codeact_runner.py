@@ -19,7 +19,11 @@ from ..integrations.openhands_runtime import OpenHandsActionServerRunner
 
 
 TOOL_SPEC = """
-You can call these tools; reply ONLY with a single tool call in the following format:
+You can call these tools; reply ONLY with a single tool call in the following format.
+Guidance:
+- If the target file does not exist or the directory is empty, your next action should be to CREATE the file using str_replace_editor with command=create.
+- Prefer creating/editing files under the code/ directory when implementing new functionality.
+- Avoid repeatedly listing or viewing the same paths; move on to create or edit as needed.
 
 <function=execute_bash>
 <parameter=command>
@@ -91,6 +95,27 @@ class CodeActRunner:
         self.action_runner = action_runner
 
     @staticmethod
+    def _is_placeholder_text(text: Optional[str]) -> bool:
+        if not isinstance(text, str):
+            return False
+        t = text.strip().lower()
+        if not t:
+            return False
+        tokens = [
+            "placeholder",
+            "this is a placeholder",
+            "todo:",
+            "todo -",
+            "stub implementation",
+            "skeleton",
+            "template only",
+            "example only",
+            "dummy implementation",
+            "boilerplate",
+        ]
+        return any(tok in t for tok in tokens)
+
+    @staticmethod
     def _render_action_output(action_result) -> str:
         parts: list[str] = []
 
@@ -150,8 +175,27 @@ class CodeActRunner:
         except Exception:
             logs_dir = workspace_path
         transcript_file = logs_dir / "codeact_steps.jsonl"
+        repeat_tracker: Dict[tuple, Dict[str, int]] = {}
         steps: List[CodeActStep] = []
         transcript: List[str] = []
+        # Inject a lightweight workspace snapshot to steer the model away from repeated listings
+        try:
+            wp = Path(workspace_path)
+            code_dir = wp / "code"
+            exp_dir = wp / "experiments"
+            code_entries = sorted([p.name for p in code_dir.iterdir()]) if code_dir.exists() else []
+            exp_entries = sorted([p.name for p in exp_dir.iterdir()]) if exp_dir.exists() else []
+            snapshot = {
+                "workspace": str(wp),
+                "code_dir_exists": code_dir.exists(),
+                "code_entries": code_entries[:20],
+                "experiments_dir_exists": exp_dir.exists(),
+                "experiments_entries": exp_entries[:20],
+            }
+            transcript.append("SYSTEM_CONTEXT: " + json.dumps(snapshot))
+        except Exception:
+            pass
+        stagnation_hints_applied = 0
         try:
             for step_idx in range(1, max_steps + 1):
                 prompt = self._build_prompt(goal, transcript)
@@ -256,6 +300,71 @@ class CodeActRunner:
                     except Exception:
                         pass
 
+                repeat_key = None
+                if func == "execute_bash":
+                    repeat_key = ("execute_bash", params.get("command", "").strip())
+                elif func == "str_replace_editor" and params.get("command") == "view":
+                    repeat_key = ("view", params.get("path", "").strip())
+
+                if repeat_key and repeat_key[1]:
+                    tracker = repeat_tracker.setdefault(repeat_key, {})
+                    count = tracker.get(observation_text, 0) + 1
+                    tracker[observation_text] = count
+                    if count >= 3:
+                        repeat_message = (
+                            f"Command '{repeat_key[1]}' produced identical output {count} times."
+                        )
+                        # Instead of aborting immediately, inject corrective guidance and continue
+                        steps.append(CodeActStep(
+                            thought="repeat_guard",
+                            tool=func,
+                            params=params,
+                            observation=repeat_message,
+                            success=False,
+                        ))
+                        hint = (
+                            "HINT: Stop repeatedly listing/viewing. If the target file does not exist or the directory is empty, "
+                            "use str_replace_editor with command=create to create a new Python file under code/ and implement the required logic."
+                        )
+                        transcript.append(repeat_message)
+                        transcript.append(hint)
+                        stagnation_hints_applied += 1
+                        try:
+                            with transcript_file.open("a", encoding="utf-8") as fp:
+                                fp.write(
+                                    json.dumps(
+                                        {
+                                            "step_index": step_idx,
+                                            "tool": func,
+                                            "params": params,
+                                            "success": False,
+                                            "observation": repeat_message,
+                                            "reason": "repeat_guard",
+                                        }
+                                    )
+                                    + "\n"
+                                )
+                        except Exception:
+                            pass
+                        if progress_cb:
+                            try:
+                                await progress_cb(
+                                    "tool_result_update",
+                                    {"tool": func, "success": False, "observation_preview": repeat_message[:160]},
+                                )
+                            except Exception:
+                                pass
+                        # If we've hinted multiple times, bail out to avoid infinite loops
+                        if stagnation_hints_applied >= 2:
+                            return {
+                                "success": False,
+                                "error": repeat_message,
+                                "steps": [s.__dict__ for s in steps],
+                                "repetition_guard": True,
+                            }
+                        # Otherwise continue to next planning step
+                        continue
+
             return {"success": False, "error": "Max steps reached", "steps": [s.__dict__ for s in steps]}
         finally:
             await session.close()
@@ -292,8 +401,9 @@ class CodeActRunner:
             "Use tools to create/edit files and run bash. Ensure code is runnable and executed. "
             "When executing Python, prefer `python3 ...` from bash. "
             "If an error occurs, inspect files/logs and fix by editing. "
-            "No Simulation Policy: Do NOT fabricate or simulate results. Do NOT use 'simulate', 'simulation', 'mock', 'placeholder', "
-            "'synthetic', 'random.uniform', 'np.random' or similar. Collect real outputs by running real commands/programs. "
+            "Do not fabricate or simulate results; collect real outputs by running actual commands and programs. "
+            "Avoid inserting placeholder, template, or boilerplate content; write production-ready code with concrete logic and error handling. "
+            "Avoid randomly generated values (e.g. random.uniform, np.random) unless explicitly required. "
             "Every step must operate on the actual workspace and produce verifiable artifacts/logs."
         )
         return (
@@ -325,6 +435,14 @@ class CodeActRunner:
         try:
             if func == "execute_bash":
                 cmd = params.get("command", "")
+                # Guard against cloning OpenHands repo – it's already integrated
+                low = cmd.lower()
+                if "git clone" in low and ("openhands" in low or "all-hands-ai/openhands" in low):
+                    return (
+                        "Cloning the OpenHands repository is not required (runtime already integrated). "
+                        "Operate within the current workspace and implement the task logic instead.",
+                        False,
+                    )
                 res = await session.run_cmd(cmd, timeout=timeout, blocking=True)
                 content = self._render_action_output(res)
                 return content, res.execution_result.success
@@ -336,6 +454,14 @@ class CodeActRunner:
                     res = await session.file_read(path, timeout=timeout)
                     content = self._render_action_output(res)
                     return content, res.execution_result.success
+
+                # Production-use guard: reject placeholder content before sending to runtime
+                if self._is_placeholder_text(params.get("file_text")):
+                    msg = (
+                        "Placeholder content detected. Write production-ready code that performs real work, "
+                        "with concrete logic, error handling, and verifiable outputs."
+                    )
+                    return msg, False
 
                 res = await session.file_edit(
                     path,
@@ -358,6 +484,11 @@ class CodeActRunner:
             if func == "write":
                 path = params.get("path", "").strip()
                 content_text = params.get("content", "")
+                if self._is_placeholder_text(content_text):
+                    msg = (
+                        "Placeholder content detected. Provide a complete, runnable implementation instead of a template."
+                    )
+                    return msg, False
                 res = await session.file_write(path, content_text, timeout=timeout)
                 content = self._render_action_output(res)
                 return content, res.execution_result.success
