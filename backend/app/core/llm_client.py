@@ -559,7 +559,8 @@ class LiteLLMClient(LLMClient):
         return payload
 
     async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
-        classification_tokens = int(os.getenv("LITELLM_CLASSIFICATION_MAX_TOKENS", "64000"))
+        env_tokens = int(os.getenv("LITELLM_CLASSIFICATION_MAX_TOKENS", "8192"))
+        classification_tokens = max(1, min(env_tokens, 8192))
         full_prompt = (
             f"{prompt}\n\nUser request: {request}\n\n"
             "Respond with a raw JSON object only. Do not include markdown fences, code blocks, or extra commentary."

@@ -46,8 +46,11 @@ Key entries:
 
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`: provide at least one LLM key.
 - `LITELLM_MODEL`: defaults to `openai/glm-4.5`; adjust if you prefer another provider.
+- `LITELLM_CLASSIFICATION_MAX_TOKENS`: defaults to `8192` (upper bound for LiteLLM classification calls).
 - `UAGENT_WORKSPACE_DIR`: host path where UAgent stores session workspaces.
 - `SANDBOX_VOLUMES` / `SANDBOX_USER_ID`: configure when running OpenHands in Docker so the runtime can access your workspace with the correct UID.
+- `SANDBOX_RUNTIME_CONTAINER_IMAGE`: optional custom OpenHands runtime image (see `sandbox_env/openhands-runtime.Dockerfile`).
+- `PG_DSN`, `DUCKDB_DB`, `GROUNDTRUTH_ART_DIR`: used by the scientific ground-truth runner to reach PostgreSQL / DuckDB and persist measurement artifacts.
 
 You can further tweak advanced LiteLLM settings with `LITELLM_EXTRA_OPTIONS` and `LITELLM_CLASSIFICATION_MAX_TOKENS` if needed.
 
@@ -133,9 +136,15 @@ Use the helper scripts under `scripts/` depending on your environment:
 
 - `scripts/openhands_local.sh` – launches OpenHands via `uv` on the host (recommended first test).
 - `scripts/openhands_docker.sh` – runs OpenHands in Docker (requires `CODE_PATH` to be set to your workspace path and mounts the host Docker socket).
-- `scripts/oh_smoke.sh` – quick health check against the running OpenHands server.
+- `scripts/oh_smoke.sh` – connectivity/dependency smoke test to verify the runtime can import `duckdb`/`psycopg` and reach PostgreSQL before executing experiments (`PG_DSN` must be set).
 
 For Linux hosts, if the runtime cannot reach its sandbox container, export `SANDBOX_USE_HOST_NETWORK=true` and `DOCKER_HOST_ADDR=127.0.0.1` before starting as a last resort.
+
+### 4. Scientific Ground-truth Utilities
+
+- `sandbox_env/openhands-runtime.Dockerfile` – sample Dockerfile extending the OpenHands runtime with database drivers (`duckdb`, `psycopg[binary]`, etc.). Build and export its image via `SANDBOX_RUNTIME_CONTAINER_IMAGE` when you need those dependencies baked in.
+- `backend/scientific_research/groundtruth_runner.py` – helper module used by the scientific engine to run PostgreSQL/DuckDB queries with structured logging (writes JSONL + CSV artifacts under `GROUNDTRUTH_ART_DIR`).
+- Ensure `PG_DSN` points at the PostgreSQL instance accessible from inside the runtime. Set `DUCKDB_DB` if you want a persistent DuckDB file (otherwise DuckDB runs in-memory).
 
 ## Using the Research Dashboard
 
@@ -309,7 +318,7 @@ OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 OPENROUTER_API_KEY=
 LITELLM_MODEL=openai/glm-4.5
-LITELLM_CLASSIFICATION_MAX_TOKENS=64000
+LITELLM_CLASSIFICATION_MAX_TOKENS=8192
 UAGENT_WORKSPACE_DIR=/var/lib/uagent/workspaces
 SANDBOX_VOLUMES=/var/lib/uagent/workspaces:/workspace:rw
 SANDBOX_USER_ID=1000

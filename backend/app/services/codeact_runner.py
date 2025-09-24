@@ -320,22 +320,6 @@ class CodeActRunner:
             if func == "str_replace_editor":
                 command = params.get("command", "").strip()
                 path = params.get("path", "").strip()
-                # No-simulation policy: block writes that contain mock/simulation tokens
-                if command in {"create", "write", "str_replace", "insert"}:
-                    candidate = (
-                        params.get("file_text")
-                        or params.get("content")
-                        or params.get("new_str")
-                        or ""
-                    )
-                    lower = candidate.lower()
-                    banned = ("simulate", "simulation", "mock", "placeholder", "synthetic", "random.uniform", "np.random")
-                    if any(tok in lower for tok in banned):
-                        return (
-                            "Policy violation: write/create content contains disallowed simulation tokens. "
-                            "Remove simulation/mocking and produce real execution code.",
-                            False,
-                        )
                 if command == "view":
                     res = await session.file_read(path, timeout=timeout)
                     content = self._render_action_output(res)

@@ -38,6 +38,9 @@ interface ResearchNode {
   parent_id?: string;
   children?: string[];
   depth?: number;
+  levelIndex?: number;
+  displayLabel?: string;
+  isImportant?: boolean;
 }
 
 interface ProgressEvent {
@@ -119,6 +122,11 @@ const ResearchNodeComponent: React.FC<{ data: { node: ResearchNode, isSelected?:
           <div className="px-2 py-1 bg-white bg-opacity-70 rounded text-xs font-medium">
             {node.engine.replace('_', ' ').toUpperCase()}
           </div>
+          {node.displayLabel && (
+            <div className="px-2 py-1 bg-blue-100 border border-blue-200 text-blue-800 rounded text-xs font-semibold">
+              {node.displayLabel}
+            </div>
+          )}
         </div>
         <div className="flex items-center space-x-1">
           <span className="text-lg">{getStatusIcon(node.status)}</span>
@@ -248,6 +256,12 @@ const DetailedSidebar: React.FC<{
             <label className="text-sm font-medium text-gray-600">Type</label>
             <div className="text-sm">{selectedNode.type.toUpperCase()}</div>
           </div>
+          {selectedNode.displayLabel && (
+            <div>
+              <label className="text-sm font-medium text-gray-600">Level</label>
+              <div className="text-sm font-semibold text-blue-700">{selectedNode.displayLabel}</div>
+            </div>
+          )}
           <div>
             <label className="text-sm font-medium text-gray-600">Phase</label>
             <div className="text-sm">{selectedNode.phase || 'General'}</div>
@@ -262,7 +276,7 @@ const DetailedSidebar: React.FC<{
         <div className="space-y-2">
           <div>
             <label className="text-sm font-medium text-gray-600">Title</label>
-            <div className="text-sm">{selectedNode.title}</div>
+            <div className="text-sm">{selectedNode.metadata?.original_title || selectedNode.title}</div>
           </div>
           {selectedNode.description && (
             <div>
@@ -417,6 +431,79 @@ const nodeTypes: NodeTypes = {
   researchNode: ResearchNodeComponent,
 };
 
+const IMPORTANT_PHASE_TOKENS = [
+  'goal_plan',
+  'execution_attempt',
+  'collect_ground_truth',
+  'analysis',
+  'summary',
+  'report',
+  'validation',
+  'setup',
+  'planning'
+];
+
+function filterImportantNodes(nodes: ResearchNode[]): ResearchNode[] {
+  const byId = new Map<string, ResearchNode>();
+  nodes.forEach((node) => byId.set(node.id, node));
+
+  const important = new Set<string>();
+  const markImportant = (nodeId?: string) => {
+    if (!nodeId || important.has(nodeId)) return;
+    const node = byId.get(nodeId);
+    if (!node) return;
+    important.add(nodeId);
+    if (node.parent_id) markImportant(node.parent_id);
+  };
+
+  nodes.forEach((node) => {
+    if (node.metadata?.hide_in_tree) {
+      return;
+    }
+    const phase = (node.metadata?.phase || node.phase || '').toLowerCase();
+    const nodeType = (node.metadata?.node_type || node.type || '').toLowerCase();
+    const title = (node.metadata?.original_title || node.title || '').toLowerCase();
+    const isBranch = !!(node.children && node.children.length > 0);
+
+    const phaseImportant = IMPORTANT_PHASE_TOKENS.some((token) => phase.includes(token));
+    const nodeTypeImportant = ['result', 'attempt', 'experiment', 'analysis', 'execution_attempt', 'collect_ground_truth']
+      .some((token) => nodeType.includes(token));
+    const titleImportant = /(attempt|analysis|ground|result|plan|validation|router|update)/.test(title);
+
+    const shouldKeep =
+      node.type === 'engine' ||
+      node.status === 'error' ||
+      node.metadata?.status === 'error' ||
+      node.type === 'result' ||
+      node.metadata?.important === true ||
+      phaseImportant ||
+      nodeTypeImportant ||
+      titleImportant ||
+      isBranch;
+
+    if (shouldKeep) {
+      markImportant(node.id);
+    }
+  });
+
+  nodes
+    .filter((node) => !node.parent_id)
+    .forEach((root) => markImportant(root.id));
+
+  const filtered = nodes.filter((node) => important.has(node.id) && node.metadata?.hide_in_tree !== true);
+  const filteredIds = new Set(filtered.map((node) => node.id));
+
+  filtered.forEach((node) => {
+    node.isImportant = true;
+    node.children = (node.children || []).filter((childId) => filteredIds.has(childId));
+    if (node.parent_id && !filteredIds.has(node.parent_id)) {
+      node.parent_id = undefined;
+    }
+  });
+
+  return filtered;
+}
+
 // Convert research progress to tree nodes
 function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
   const nodeMap = new Map<string, ResearchNode>()
@@ -536,7 +623,8 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
     }
   })
 
-  return Array.from(nodeMap.values())
+  const nodeArray = Array.from(nodeMap.values())
+  return filterImportantNodes(nodeArray)
 }
 
 // Convert to ReactFlow format
@@ -592,6 +680,35 @@ function convertToFlowNodes(researchNodes: ResearchNode[]): Node[] {
   roots.forEach((root, index) => {
     const startX = index * 500
     assignLayout(root.id, 0, startX)
+  })
+
+  const levelCounters = new Map<number, number>()
+  const sortedForLabel = [...researchNodes].sort((a, b) => {
+    const depthA = a.depth ?? 0
+    const depthB = b.depth ?? 0
+    if (depthA !== depthB) return depthA - depthB
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0
+    return timeA - timeB
+  })
+
+  sortedForLabel.forEach((node) => {
+    const depth = node.depth ?? 0
+    const currentIndex = (levelCounters.get(depth) ?? 0) + 1
+    levelCounters.set(depth, currentIndex)
+    node.levelIndex = currentIndex
+    node.displayLabel = `Lv${depth}-N${currentIndex}`
+    node.metadata = node.metadata || {}
+
+    const baseTitle = typeof node.metadata.original_title === 'string'
+      ? node.metadata.original_title
+      : node.title || node.phase || node.id
+
+    if (typeof node.metadata.original_title !== 'string') {
+      node.metadata.original_title = baseTitle
+    }
+
+    node.title = `${node.displayLabel} · ${baseTitle}`
   })
 
   return researchNodes.map((node) => {

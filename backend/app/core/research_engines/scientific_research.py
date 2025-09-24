@@ -1096,7 +1096,7 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         execution.output_data.setdefault("codeact_failures", []).append(failure_entry)
                         await _log_collection_event(
                             suffix=f"round_{round_idx}_failed",
-                            message=f"CodeAct round {round_idx} incomplete",
+                            message=f"CodeAct round {round_idx} failed: {failure_msg[:160]}",
                             offset=0.7,
                             metadata_overrides={
                                 "status": "error",
@@ -1121,7 +1121,7 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
         except Exception as exc:
             await _log_collection_event(
                 suffix="failure",
-                message=f"Data collection error: {exc}",
+                message=f"Data collection error: {str(exc)[:160]}",
                 offset=0.95,
                 metadata_overrides={"status": "error", "error": str(exc)},
             )
