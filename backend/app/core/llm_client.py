@@ -613,8 +613,19 @@ class LiteLLMClient(LLMClient):
             temperature=kwargs.get("temperature", 0.7),
             **extra,
         )
+
+        # Add timeout (default 120 seconds, configurable via env var)
+        timeout = float(os.getenv("LITELLM_TIMEOUT", "120"))
+        options["timeout"] = timeout
+
         try:
-            response = await litellm.acompletion(**options)
+            response = await asyncio.wait_for(
+                litellm.acompletion(**options),
+                timeout=timeout + 5  # Give a bit more time for the underlying call
+            )
+        except asyncio.TimeoutError:
+            self.logger.error("LiteLLM generation timeout after %s seconds", timeout)
+            raise TimeoutError(f"LLM request timed out after {timeout} seconds")
         except Exception as exc:
             self.logger.error("LiteLLM generation error: %s", exc)
             raise
