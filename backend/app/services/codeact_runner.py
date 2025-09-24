@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.llm_client import LLMClient
+import contextlib
 from ..utils.json_utils import safe_json_loads
 from ..integrations.openhands_runtime import OpenHandsActionServerRunner
 
@@ -73,11 +74,24 @@ TOOL_SELECTION_RUBRIC = (
     "1) If the workspace snapshot shows no code files under `code/`, your FIRST non-trivial action should be one of:\n"
     "   - str_replace_editor.create (create a new file under code/)\n"
     "   - str_replace_editor.write  (write initial content into a path under code/)\n"
-    "2) Avoid repeating directory listings if no new files appear.\n"
-    "3) Translate unsupported verbs: list/lsdir-> run 'ls -pa'; cat-> file_read; edit/write/create -> str_replace_editor.\n"
-    "4) For downloads/builds (git/wget/curl/pip), opt-in to proxy only when needed by prefixing: `source scripts/net_proxy.sh && <command>`.\n"
-    "5) For pip installs on slow networks, prefer the Tsinghua mirror: add `-i https://pypi.tuna.tsinghua.edu.cn/simple`.\n"
-    "6) Avoid source builds of heavy frameworks; prefer wheel indexes (e.g., PyTorch CPU wheels via `--extra-index-url https://download.pytorch.org/whl/cpu`, DGL via `-f https://data.dgl.ai/wheels/repo.html`).\n"
+    "2) Avoid repeating directory listings if no new files appear; take a constructive action (create/write/edit).\n"
+    "3) Translate unsupported verbs: list/lsdir -> run 'ls -pa'; cat -> file_read; edit/write/create -> str_replace_editor.\n"
+    "4) For network downloads/builds (git/wget/curl/pip), opt-in to proxy ONLY when needed by prefixing: `source scripts/net_proxy.sh && <command>`.\n"
+    "5) For pip installs on slow networks, prefer the Tsinghua mirror: add `-i https://pypi.tuna.tsinghua.edu.cn/simple` (and extra wheel indexes when appropriate).\n"
+    "6) Avoid large source builds (torch/dgl) when wheels exist; prefer official wheel indexes (e.g., PyTorch CPU wheels via `--extra-index-url https://download.pytorch.org/whl/cpu`, DGL via `-f https://data.dgl.ai/wheels/repo.html`).\n"
+)
+
+SUPERVISOR_PROMPT = (
+    "Workspace rules:\n"
+    "- Use ONLY the current workspace; do NOT create plan_plan_* directories; do NOT clone the OpenHands repo; do NOT delete openhands_session_* directories.\n"
+    "- All outputs must live under this workspace. Use $WORKSPACE_ROOT (from workspace/env.sh). Never try to write to /workspace.\n\n"
+    "Acceptance criteria (must pass):\n"
+    "- After running code/collect_data.py (or equivalent), create non-empty artifacts under experiments/<exp_id>/results (e.g., .csv/.jsonl/.parquet).\n"
+    "- Write a non-trivial log to experiments/<exp_id>/logs/data_collection.log (include errors if any).\n"
+    "- Exit rc=0 and print an artifact index (paths + file sizes) or summarize where outputs are written.\n"
+    "- If artifacts are missing/empty or the script prints placeholder text (e.g., 'Nothing to do yet'), treat as failure: summarize the log tail and propose the next concrete fix (missing deps, proxy, path, etc.).\n\n"
+    "Anti-stagnation:\n"
+    "- Do not repeat list/read when outputs are identical across two attempts. Create or write the needed file(s) under code/ and proceed to execution.\n"
 )
 
 
@@ -267,7 +281,7 @@ class CodeActRunner:
                         await progress_cb("planning", {"step": step_idx, "goal": goal})
                     except Exception:
                         pass
-                prompt_with_rubric = f"{prompt}\n\n{TOOL_SELECTION_RUBRIC}"
+                prompt_with_rubric = f"{prompt}\n\n{TOOL_SELECTION_RUBRIC}\n\n{SUPERVISOR_PROMPT}"
                 raw = await self.llm.generate(prompt_with_rubric, max_tokens=800, temperature=0.2)
                 try:
                     func, params = _parse_tool_call(str(raw))
@@ -338,7 +352,31 @@ class CodeActRunner:
                         await progress_cb("tool_call", {"tool": func, "params": params})
                     except Exception:
                         pass
-                observation_text, ok = await self._execute_tool(session, func, params, timeout_per_action, progress_cb)
+                observation_text, ok = await self._execute_tool(
+                    session, func, params, timeout_per_action, progress_cb, str(workspace_path)
+                )
+                # If a collector stub is detected, treat as failure and nudge the model to implement real logic
+                if func == "execute_bash":
+                    cmd_lower = params.get("command", "").lower()
+                    if "code/collect_data.py" in cmd_lower and "nothing to do yet" in observation_text.lower():
+                        hint = (
+                            "Detected a stub collector. Replace code/collect_data.py with production-ready logic that fetches/generates real data, "
+                            "writes non-empty artifacts under experiments/<exp_id>/results, logs to experiments/<exp_id>/logs/data_collection.log, and exits rc=0."
+                        )
+                        ok = False
+                        transcript.append(hint)
+                        try:
+                            with transcript_file.open("a", encoding="utf-8") as fp:
+                                fp.write(json.dumps({
+                                    "step_index": step_idx,
+                                    "tool": func,
+                                    "params": params,
+                                    "success": False,
+                                    "observation": hint,
+                                    "reason": "collector_stub"
+                                }) + "\n")
+                        except Exception:
+                            pass
                 step_record = CodeActStep(thought="", tool=func, params=params, observation=observation_text, success=ok)
                 steps.append(step_record)
                 transcript.append(f"TOOL {func}: {params}\nOBS:\n{observation_text}")
@@ -498,6 +536,7 @@ class CodeActRunner:
         params: Dict[str, str],
         timeout: int,
         progress_cb: Optional[Any] = None,
+        workspace_base: Optional[str] = None,
     ) -> Tuple[str, bool]:
         # No OpenHands imports in parent; use Session helpers that build raw action dicts
         try:
@@ -557,8 +596,9 @@ class CodeActRunner:
                 # Tail the log file during heartbeat
                 log_abs = None
                 try:
-                    ws_base = Path(workspace_path)
-                    log_abs = ws_base / log_rel
+                    ws_base = Path(workspace_base) if workspace_base else None
+                    if ws_base:
+                        log_abs = ws_base / log_rel
                 except Exception:
                     log_abs = None
 
@@ -624,7 +664,8 @@ class CodeActRunner:
 
                 # Ensure logs directory exists before running
                 try:
-                    (Path(workspace_path) / "logs").mkdir(parents=True, exist_ok=True)
+                    if workspace_base:
+                        (Path(workspace_base) / "logs").mkdir(parents=True, exist_ok=True)
                 except Exception:
                     pass
 
