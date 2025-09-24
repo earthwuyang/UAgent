@@ -565,7 +565,16 @@ class LiteLLMClient(LLMClient):
             f"{prompt}\n\nUser request: {request}\n\n"
             "Respond with a raw JSON object only. Do not include markdown fences, code blocks, or extra commentary."
         )
-        content = await self.generate(full_prompt, max_tokens=classification_tokens, temperature=0.1)
+        # Try strict JSON mode where provider supports it; fall back to plain text
+        try:
+            content = await self.generate(
+                full_prompt,
+                max_tokens=classification_tokens,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            content = await self.generate(full_prompt, max_tokens=classification_tokens, temperature=0.1)
         try:
             parsed = safe_json_loads(content)
         except JsonParseError as exc:
@@ -595,10 +604,14 @@ class LiteLLMClient(LLMClient):
 
     async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
         messages = [{"role": "user", "content": prompt}]
+        extra: Dict[str, Any] = {}
+        if "response_format" in kwargs:
+            extra["response_format"] = kwargs["response_format"]
         options = self._build_request(
             messages=messages,
             max_tokens=max_tokens,
             temperature=kwargs.get("temperature", 0.7),
+            **extra,
         )
         try:
             response = await litellm.acompletion(**options)

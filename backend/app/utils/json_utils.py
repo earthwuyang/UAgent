@@ -10,6 +10,8 @@ from typing import Any
 _JSON_BLOCK_RE = re.compile(r"```json\s*([\s\S]*?)```", re.IGNORECASE)
 _GENERIC_BLOCK_RE = re.compile(r"```\s*([\s\S]*?)```", re.IGNORECASE)
 _JSON_LIKE_RE = re.compile(r"(\{[\s\S]*\}|\[[\s\S]*\])")
+_TRAILING_COMMAS_RE = re.compile(r",(\s*[}\]])")  # match ,} or ,]
+_SINGLE_QUOTE_OBJ_RE = re.compile(r"([{,]\s*)'(\w+)'\s*:")
 
 
 class JsonParseError(ValueError):
@@ -100,6 +102,20 @@ def _balance_json_delimiters(candidate: str) -> str:
     return balanced
 
 
+def _repair_common_issues(candidate: str) -> str:
+    """Apply additional repairs: trailing commas, single quotes keys, and fence cleanup."""
+    if not candidate:
+        return candidate
+    # strip any residual fences
+    if candidate.startswith("```"):
+        candidate = _GENERIC_BLOCK_RE.sub(lambda m: m.group(1), candidate)
+    # remove trailing commas before } or ]
+    candidate = _TRAILING_COMMAS_RE.sub(r"\1", candidate)
+    # convert simple single-quoted keys to double quotes
+    candidate = _SINGLE_QUOTE_OBJ_RE.sub(r'\1"\2" :', candidate)
+    return candidate
+
+
 def safe_json_loads(raw: str) -> Any:
     """Parse JSON from arbitrary LLM output, raising JsonParseError on failure."""
 
@@ -131,12 +147,12 @@ def safe_json_loads(raw: str) -> Any:
                             pass
             raise JsonParseError("No JSON candidate found in response")
 
-        candidate = sanitize_json_strings(candidate)
+        candidate = sanitize_json_strings(_repair_common_issues(candidate))
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
             # Attempt minimal repairs for trailing commas or single quotes
-            repaired = candidate.replace("'", '"').replace(",}", "}").replace(",]", "]")
+            repaired = _repair_common_issues(candidate).replace("'", '"').replace(",}", "}").replace(",]", "]")
             try:
                 return json.loads(sanitize_json_strings(repaired))
             except json.JSONDecodeError:

@@ -186,7 +186,7 @@ const DetailedSidebar: React.FC<{
   events: ProgressEvent[];
   sessionId?: string;
 }> = ({ selectedNode, onClose, events, sessionId }) => {
-  const [activeTab, setActiveTab] = useState<'details' | 'llm' | 'events'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'llm' | 'events' | 'artifacts'>('details');
 
   const nodeEvents = events.filter(event =>
     selectedNode && event.data.engine === selectedNode.engine
@@ -240,6 +240,18 @@ const DetailedSidebar: React.FC<{
         >
           📊 Events
         </button>
+        {sessionId && (
+          <button
+            onClick={() => setActiveTab('artifacts')}
+            className={`flex-1 px-4 py-2 text-sm font-medium ${
+              activeTab === 'artifacts'
+                ? 'text-blue-600 border-b-2 border-blue-600 bg-white'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            📁 Artifacts
+          </button>
+        )}
       </div>
 
       {/* Content */}
@@ -422,6 +434,11 @@ const DetailedSidebar: React.FC<{
             </div>
           </div>
         )}
+        {activeTab === 'artifacts' && sessionId && (
+          <div className="h-full">
+            <ArtifactsPanel sessionId={sessionId} defaultPath="experiments" />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -502,6 +519,55 @@ function filterImportantNodes(nodes: ResearchNode[]): ResearchNode[] {
   });
 
   return filtered;
+}
+
+// Enforce a single root per session and attach orphans
+function enforceSingleRoot(nodes: ResearchNode[], sessionId?: string): ResearchNode[] {
+  if (!nodes.length || !sessionId) return nodes
+  const rootId = `root-${sessionId}`
+  const byId = new Map<string, ResearchNode>()
+  nodes.forEach((n) => byId.set(n.id, n))
+
+  // Create or ensure a single root
+  if (!byId.has(rootId)) {
+    byId.set(rootId, {
+      id: rootId,
+      type: 'engine',
+      engine: 'smart_router',
+      phase: 'root',
+      status: 'running',
+      title: 'Research Session',
+      parent_id: undefined,
+      children: [],
+      displayLabel: `Lv0-N1`,
+      isImportant: true,
+      metadata: { node_type: 'root', important: true }
+    })
+  }
+
+  // Attach nodes without parents to the root
+  for (const n of nodes) {
+    if (!n.parent_id || !byId.has(n.parent_id)) {
+      if (n.id !== rootId) {
+        n.parent_id = rootId
+      }
+    }
+  }
+
+  // Ensure children arrays are coherent
+  const filtered = Array.from(byId.values())
+  const childrenMap = new Map<string, string[]>()
+  filtered.forEach((n) => {
+    if (!n.parent_id) return
+    const arr = childrenMap.get(n.parent_id) || []
+    if (!arr.includes(n.id)) arr.push(n.id)
+    childrenMap.set(n.parent_id, arr)
+  })
+  filtered.forEach((n) => {
+    n.children = childrenMap.get(n.id) || n.children || []
+  })
+
+  return filtered
 }
 
 // Convert research progress to tree nodes
@@ -624,7 +690,7 @@ function convertToResearchNodes(events: ProgressEvent[]): ResearchNode[] {
   })
 
   const nodeArray = Array.from(nodeMap.values())
-  return filterImportantNodes(nodeArray)
+  return nodeArray
 }
 
 // Convert to ReactFlow format
@@ -841,6 +907,15 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
 
     const seedFromRest = async () => {
       try {
+        // Try resuming the session metadata (non-fatal if not found)
+        try {
+          const resumeRes = await fetch(`${HTTP_BASE_URL}/api/sessions/${sessionId}/resume`, { credentials: 'omit' })
+          if (resumeRes.ok) {
+            // no-op: existence is sufficient to avoid accidental restarts elsewhere
+            await resumeRes.json()
+          }
+        } catch {}
+
         const res = await fetch(`${HTTP_BASE_URL}/api/research/sessions/${sessionId}/full`, {
           credentials: 'omit'
         });
@@ -879,12 +954,19 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
     };
   }, [sessionId, propEvents, internalEvents]);
 
+  // Show all vs important nodes toggle
+  const [showAllNodes, setShowAllNodes] = useState(false)
+
   const flowData = useMemo(() => {
     console.debug('ResearchTree events count', events?.length ?? 0);
     if (!events || events.length === 0) return { nodes: [], edges: [] };
 
     try {
-      const researchNodes = convertToResearchNodes(events);
+      let researchNodes = convertToResearchNodes(events);
+      researchNodes = enforceSingleRoot(researchNodes, sessionId);
+      if (!showAllNodes) {
+        researchNodes = filterImportantNodes(researchNodes)
+      }
       console.debug('ResearchTree converted nodes', researchNodes.length);
       const flowNodes = convertToFlowNodes(researchNodes).map(flowNode => ({
         ...flowNode,
@@ -900,7 +982,7 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
       console.error('Error converting research data:', error);
       return { nodes: [], edges: [], researchNodes: [] };
     }
-  }, [events, selectedNodeId]);
+  }, [events, selectedNodeId, sessionId, showAllNodes]);
 
   useEffect(() => {
     setNodes(flowData.nodes);
@@ -986,6 +1068,17 @@ const FlowContent: React.FC<ResearchTreeVisualizationProps> = ({
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <path d="M3 3h6v6H3V3zm12 0h6v6h-6V3zM3 15h6v6H3v-6zm12 0h6v6h-6v-6zm-4-4h2v2h-2v-2zm-4 0h2v2H7v-2zm8 0h2v2h-2v-2zm-4-4h2v2h-2V7z"/>
             </svg>
+          </ControlButton>
+          <ControlButton onClick={() => setShowAllNodes((v) => !v)} title={showAllNodes ? 'Show important only' : 'Show all nodes'}>
+            {showAllNodes ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 5c-7.633 0-11 7-11 7s3.367 7 11 7 11-7 11-7-3.367-7-11-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"/>
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2 2l20 20-1.414 1.414L15.586 18C14.5 18.64 13.3 19 12 19 4.367 19 1 12 1 12s1.4-2.916 4.5-4.97L.586 3.414 2 2zM12 5c7.633 0 11 7 11 7s-.791 1.708-2.344 3.422L19.2 13.966C20.19 12.958 21 12 21 12s-3.367-7-11-7c-1.3 0-2.5.36-3.586 1l-1.43-1.43C6.86 5.18 9.3 5 12 5z"/>
+              </svg>
+            )}
           </ControlButton>
         </Controls>
       </ReactFlow>

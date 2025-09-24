@@ -2,9 +2,11 @@
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+import json
 
 
 @dataclass
@@ -29,6 +31,53 @@ class ResearchSessionManager:
         self._sessions: Dict[str, SessionRecord] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._index_path = (Path(__file__).resolve().parents[2] / "data" / "session_index.json")
+        try:
+            self._index_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        # Load existing sessions to enable resume after restart
+        self._load_index()
+
+    def _load_index(self) -> None:
+        try:
+            if self._index_path.exists():
+                raw = self._index_path.read_text(encoding="utf-8")
+                data = json.loads(raw) if raw.strip() else {}
+                if isinstance(data, dict):
+                    self._sessions = {
+                        k: SessionRecord(
+                            session_id=v.get("session_id", k),
+                            request=v.get("request", ""),
+                            classification=v.get("classification", {}),
+                            status=v.get("status", "pending"),
+                            created_at=datetime.fromisoformat(v.get("created_at")) if v.get("created_at") else datetime.utcnow(),
+                            updated_at=datetime.fromisoformat(v.get("updated_at")) if v.get("updated_at") else datetime.utcnow(),
+                            result=v.get("result"),
+                            error=v.get("error"),
+                            task_name=v.get("task_name"),
+                            completed_at=datetime.fromisoformat(v.get("completed_at")) if v.get("completed_at") else None,
+                        )
+                        for k, v in data.items()
+                        if isinstance(v, dict)
+                    }
+        except Exception:
+            # Ignore corrupt index; start fresh
+            self._sessions = self._sessions or {}
+
+    def _save_index(self) -> None:
+        try:
+            serializable: Dict[str, Any] = {}
+            for sid, rec in self._sessions.items():
+                d = asdict(rec)
+                d["created_at"] = rec.created_at.isoformat()
+                d["updated_at"] = rec.updated_at.isoformat()
+                d["completed_at"] = rec.completed_at.isoformat() if rec.completed_at else None
+                serializable[sid] = d
+            self._index_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
+        except Exception:
+            # Best effort persistence
+            pass
 
     async def create_session(self, session_id: str, request: str, classification: Dict[str, Any]) -> SessionRecord:
         """Create a new session entry"""
@@ -40,6 +89,7 @@ class ResearchSessionManager:
                 status="pending"
             )
             self._sessions[session_id] = record
+            self._save_index()
             return record
 
     async def attach_task(self, session_id: str, task: asyncio.Task) -> None:
@@ -51,6 +101,7 @@ class ResearchSessionManager:
             record.task_name = task.get_name()
             record.updated_at = datetime.utcnow()
             self._tasks[session_id] = task
+            self._save_index()
 
     async def set_status(self, session_id: str, status: str) -> None:
         """Update session status"""
@@ -62,6 +113,7 @@ class ResearchSessionManager:
             record.updated_at = datetime.utcnow()
             if status in {"completed", "error"}:
                 record.completed_at = record.completed_at or record.updated_at
+            self._save_index()
 
     async def set_result(self, session_id: str, result: Dict[str, Any]) -> None:
         """Store final result for a session"""
@@ -74,6 +126,7 @@ class ResearchSessionManager:
             record.updated_at = datetime.utcnow()
             record.error = None
             record.completed_at = record.updated_at
+            self._save_index()
 
     async def set_error(self, session_id: str, error: str) -> None:
         """Mark session as errored"""
@@ -85,6 +138,7 @@ class ResearchSessionManager:
             record.status = "error"
             record.updated_at = datetime.utcnow()
             record.completed_at = record.updated_at
+            self._save_index()
 
     async def list_sessions(self) -> List[Dict[str, Any]]:
         """List all sessions with metadata"""

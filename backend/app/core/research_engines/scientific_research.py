@@ -1063,17 +1063,50 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         )
                         execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
                         final_data = _extract_final_result(result)
-                        if final_data:
-                            await _log_collection_event(
-                                suffix="finish",
-                                message="CodeAct completed successfully",
-                                offset=0.85,
-                                metadata_overrides={"node_type": "result", "status": "completed"},
-                                node_type="result",
-                            )
-                            payload: Dict[str, Any] = {"success": True}
-                            payload.update(final_data)
-                            return payload
+                    if final_data:
+                        await _log_collection_event(
+                            suffix="finish",
+                            message="CodeAct completed successfully",
+                            offset=0.85,
+                            metadata_overrides={"node_type": "result", "status": "completed"},
+                            node_type="result",
+                        )
+                        payload: Dict[str, Any] = {"success": True}
+                        payload.update(final_data)
+
+                        # Acceptance gate: require non-empty artifacts under experiments/{design.id}/results
+                        try:
+                            from ...core.guards import artifact_min_size
+                            workspace_path = self.openhands_client.workspace_manager.get_workspace_path(session_context.workspace_id)
+                            if workspace_path:
+                                results_dir = (workspace_path / f"experiments/{design.id}/results").resolve()
+                                count_files = 0
+                                count_nonempty = 0
+                                if results_dir.exists() and results_dir.is_dir():
+                                    for p in results_dir.rglob('*'):
+                                        if p.is_file():
+                                            count_files += 1
+                                            try:
+                                                if artifact_min_size(str(p), 1):
+                                                    count_nonempty += 1
+                                            except Exception:
+                                                pass
+                                if count_files == 0 or count_nonempty == 0:
+                                    # Flip to failure with diagnostic
+                                    diag = f"Insufficient artifacts in results directory (files={count_files}, nonempty={count_nonempty})"
+                                    payload = {"success": False, "error": diag, "files_total": count_files, "files_nonempty": count_nonempty}
+                                    await _log_collection_event(
+                                        suffix="assertions_failed",
+                                        message=diag,
+                                        offset=0.9,
+                                        metadata_overrides={"status": "error", "node_type": "result"},
+                                        node_type="result",
+                                    )
+                        except Exception:
+                            # Guards are best-effort; ignore exceptions
+                            pass
+
+                        return payload
 
                         try:
                             obs_list = [s.get("observation", "") for s in result.get("steps", [])]

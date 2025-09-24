@@ -473,7 +473,6 @@ class OpenHandsActionServerRunner:
         action_name = (
             metadata.get("action")
             or observation.get("action")
-            or metadata.get("command")
             or metadata.get("tool_name")
             or observation.get("tool_name")
             or ""
@@ -490,6 +489,7 @@ class OpenHandsActionServerRunner:
         stderr_text = _collect_output_text(observation, ("stderr",)) if isinstance(observation, dict) else ""
         output = stdout_text
         command_text = metadata.get("command") or metadata.get("action", "")
+        cmd_l = command_text.strip().lower() if isinstance(command_text, str) else ""
         working_dir = metadata.get("cwd", ".")
         env_snapshot = metadata.get("env", {}) if isinstance(metadata.get("env"), dict) else {}
 
@@ -497,8 +497,14 @@ class OpenHandsActionServerRunner:
         if exit_code != 0:
             if success_flag is True:
                 exit_code = 0
-            elif isinstance(output, str) and output.strip() and action_name in {"list", "read"}:
-                exit_code = 0
+            elif isinstance(output, str) and output.strip():
+                if action_name in {"list", "read"}:
+                    exit_code = 0
+                elif any(
+                    cmd_l.startswith(prefix)
+                    for prefix in ("cat ", "cat -n ", "ls ", "ls -pa ")
+                ):
+                    exit_code = 0
 
         return ExecutionResult(
             success=exit_code == 0,

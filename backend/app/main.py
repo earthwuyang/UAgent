@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .core.llm_client import create_llm_client
+from .core.config import validate_env, ConfigError
 from .core.cache import create_cache
 from .core.smart_router import SmartRouter
 from .core.research_engines import (
@@ -44,6 +45,12 @@ async def lifespan(app: FastAPI):
     """Application lifespan events"""
     # Startup
     logger.info("Starting UAgent system...")
+    # Fail fast on critical configuration issues
+    try:
+        validate_env()
+    except ConfigError as ce:
+        logger.error(str(ce))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(ce))
 
     # Initialize LLM client
     provider_env = os.getenv("DEFAULT_API_PROVIDER") or os.getenv("LLM_PROVIDER")
@@ -183,6 +190,7 @@ async def lifespan(app: FastAPI):
         "smart_router": smart_router,
         "session_manager": session_manager,
         "openhands_app": openhands_app_client,
+        "openhands_client": openhands_client,
         "science_tools": {
             "connectors": connectors,
             "retriever_factory": EvidenceRetriever,
@@ -282,6 +290,8 @@ from .routers import (
     science,
     smart_router as router_endpoints,
     websocket,
+    sessions as sessions_router,
+    artifacts as artifacts_router,
 )
 
 app.include_router(research.router, prefix="/api/research", tags=["research"])
@@ -289,6 +299,8 @@ app.include_router(science.router, prefix="/api/science", tags=["science"])
 app.include_router(router_endpoints.router, prefix="/api/router", tags=["smart_router"])
 app.include_router(openhands_router.router, prefix="/api/openhands", tags=["openhands"])
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
+app.include_router(sessions_router.router, prefix="/api", tags=["sessions"])
+app.include_router(artifacts_router.router, prefix="/api", tags=["artifacts"])
 
 
 if __name__ == "__main__":

@@ -115,6 +115,18 @@ export class UAgentAPI {
     const response = await api.get(`/research/sessions/${researchId}/history`);
     return response.data;
   }
+
+  // Resume existing session metadata (does not start new work)
+  static async resumeSession(sessionId: string): Promise<any | null> {
+    try {
+      const response = await api.get(`/sessions/${sessionId}/resume`);
+      return response.data;
+    } catch (err: any) {
+      if (err?.response?.status === 404) return null;
+      console.error('Resume session error:', err);
+      return null;
+    }
+  }
 }
 
 export default UAgentAPI;

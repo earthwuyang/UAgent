@@ -61,6 +61,15 @@ Tools:
   <function=finish><parameter=message>Task complete</parameter></function>
 """.strip()
 
+TOOL_SELECTION_RUBRIC = (
+    "Tool selection rules (soft):\n"
+    "1) If the workspace snapshot shows no code files under `code/`, your FIRST non-trivial action should be one of:\n"
+    "   - str_replace_editor.create (create a new file under code/)\n"
+    "   - str_replace_editor.write  (write initial content into a path under code/)\n"
+    "2) Avoid repeating directory listings if no new files appear.\n"
+    "3) Translate unsupported verbs: list/lsdir-> run 'ls -pa'; cat-> file_read; edit/write/create -> str_replace_editor.\n"
+)
+
 
 FINISH_NAME = "finish"
 
@@ -93,6 +102,26 @@ class CodeActRunner:
     def __init__(self, llm_client: LLMClient, action_runner: OpenHandsActionServerRunner):
         self.llm = llm_client
         self.action_runner = action_runner
+
+    @staticmethod
+    def _normalize_tool_call(func: str, params: Dict[str, str]) -> tuple[str, Dict[str, str]]:
+        f = (func or "").strip().lower()
+        p = dict(params or {})
+        # aliases to supported tools
+        if f in {"list", "lsdir", "dir"}:
+            f = "execute_bash"
+            p.setdefault("command", "ls -pa")
+        elif f in {"cat", "show", "view_file"}:
+            f = "file_read"
+            # ensure path exists in params
+            if not p.get("path") and p.get("command"):
+                p["path"] = p.pop("command")
+        elif f in {"create", "write", "edit"}:
+            # unify under str_replace_editor with explicit sub-command
+            sub_cmd = f
+            f = "str_replace_editor"
+            p.setdefault("command", sub_cmd)
+        return f, p
 
     @staticmethod
     def _is_placeholder_text(text: Optional[str]) -> bool:
@@ -204,12 +233,13 @@ class CodeActRunner:
                         await progress_cb("planning", {"step": step_idx, "goal": goal})
                     except Exception:
                         pass
-                raw = await self.llm.generate(prompt, max_tokens=800, temperature=0.2)
+                prompt_with_rubric = f"{prompt}\n\n{TOOL_SELECTION_RUBRIC}"
+                raw = await self.llm.generate(prompt_with_rubric, max_tokens=800, temperature=0.2)
                 try:
                     func, params = _parse_tool_call(str(raw))
                 except Exception:
                     # Ask again with stricter instruction
-                    strict_prompt = prompt + "\nRespond with exactly one tool call as specified."
+                    strict_prompt = prompt_with_rubric + "\nRespond with exactly one tool call as specified."
                     raw = await self.llm.generate(strict_prompt, max_tokens=600, temperature=0.1)
                     try:
                         func, params = _parse_tool_call(str(raw))
@@ -255,6 +285,9 @@ class CodeActRunner:
                             "fallback_used": True,
                         }
 
+                # normalize aliases before executing
+                func, params = self._normalize_tool_call(func, params)
+
                 if func == FINISH_NAME:
                     message = params.get("message", "")
                     steps.append(CodeActStep(thought="finish", tool=func, params=params, observation=message, success=True))
@@ -271,7 +304,7 @@ class CodeActRunner:
                         await progress_cb("tool_call", {"tool": func, "params": params})
                     except Exception:
                         pass
-                observation_text, ok = await self._execute_tool(session, func, params, timeout_per_action)
+                observation_text, ok = await self._execute_tool(session, func, params, timeout_per_action, progress_cb)
                 step_record = CodeActStep(thought="", tool=func, params=params, observation=observation_text, success=ok)
                 steps.append(step_record)
                 transcript.append(f"TOOL {func}: {params}\nOBS:\n{observation_text}")
@@ -430,20 +463,60 @@ class CodeActRunner:
         func: str,
         params: Dict[str, str],
         timeout: int,
+        progress_cb: Optional[Any] = None,
     ) -> Tuple[str, bool]:
         # No OpenHands imports in parent; use Session helpers that build raw action dicts
         try:
+            # Heartbeat task to keep UI responsive on long operations
+            heartbeat_task: Optional[asyncio.Task] = None
+            heartbeat_running = True
+            start = asyncio.get_event_loop().time()
+
+            async def _heartbeat():
+                # Send periodic tool_result_update events while waiting
+                while heartbeat_running:
+                    await asyncio.sleep(15)
+                    if not heartbeat_running:
+                        break
+                    if progress_cb:
+                        try:
+                            elapsed = int(asyncio.get_event_loop().time() - start)
+                            await progress_cb(
+                                "tool_result_update",
+                                {
+                                    "tool": func,
+                                    "success": None,
+                                    "observation_preview": f"[heartbeat] running {elapsed}s...",
+                                },
+                            )
+                        except Exception:
+                            # Heartbeats are best-effort
+                            pass
+
+            # Start heartbeat for potentially long tools
+            if func in {"execute_bash"}:
+                heartbeat_task = asyncio.create_task(_heartbeat())
+
             if func == "execute_bash":
                 cmd = params.get("command", "")
+                # Extend timeout for long-running operations
+                low = (cmd or "").lower()
+                long_ops = ("pip install" in low) or ("git clone" in low) or ("poetry install" in low) or ("npm install" in low)
+                eff_timeout = max(timeout, 900) if long_ops else timeout
                 # Guard against cloning OpenHands repo – it's already integrated
                 low = cmd.lower()
                 if "git clone" in low and ("openhands" in low or "all-hands-ai/openhands" in low):
+                    heartbeat_running = False
+                    if heartbeat_task:
+                        heartbeat_task.cancel()
+                        with contextlib.suppress(Exception):
+                            await heartbeat_task
                     return (
                         "Cloning the OpenHands repository is not required (runtime already integrated). "
                         "Operate within the current workspace and implement the task logic instead.",
                         False,
                     )
-                res = await session.run_cmd(cmd, timeout=timeout, blocking=True)
+                res = await session.run_cmd(cmd, timeout=eff_timeout, blocking=True)
                 content = self._render_action_output(res)
                 return content, res.execution_result.success
 
@@ -503,6 +576,16 @@ class CodeActRunner:
             return f"Unknown function: {func}", False
         except Exception as exc:
             return f"Exception during tool execution: {exc}", False
+        finally:
+            # stop heartbeat
+            try:
+                heartbeat_running = False
+                if heartbeat_task:
+                    heartbeat_task.cancel()
+                    with contextlib.suppress(Exception):
+                        await heartbeat_task
+            except Exception:
+                pass
 
 
 __all__ = ["CodeActRunner"]
