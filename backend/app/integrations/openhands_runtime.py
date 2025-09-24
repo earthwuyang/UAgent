@@ -364,12 +364,17 @@ class OpenHandsActionServerRunner:
         env["SESSION_API_KEY"] = session_api_key
         env.setdefault("PYTHONUNBUFFERED", "1")
 
-        proxy_url = _detect_local_proxy()
-        if proxy_url:
-            for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
-                env.setdefault(key, proxy_url)
-            env.setdefault("GIT_HTTP_PROXY", proxy_url)
-            env.setdefault("GIT_HTTPS_PROXY", proxy_url)
+        # Optional: apply a local proxy to the action server env only when explicitly enabled
+        # to avoid forcing proxy usage for all commands. Users can set UAGENT_AUTO_PROXY=true
+        # if they want automatic proxy environment injection.
+        use_auto_proxy = os.getenv("UAGENT_AUTO_PROXY", "false").lower() in {"1","true","yes","on"}
+        if use_auto_proxy:
+            proxy_url = _detect_local_proxy()
+            if proxy_url:
+                for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+                    env.setdefault(key, proxy_url)
+                env.setdefault("GIT_HTTP_PROXY", proxy_url)
+                env.setdefault("GIT_HTTPS_PROXY", proxy_url)
 
         workspace_mount = f"{workspace_path}:/workspace:rw"
         sandbox_volumes = env.get("SANDBOX_VOLUMES")

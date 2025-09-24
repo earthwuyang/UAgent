@@ -2296,6 +2296,10 @@ class ScientificResearchEngine:
                             "variables": hypothesis.variables,
                             "analysis_plan": design.analysis_plan,
                             "resource_requirements": design.resource_requirements,
+                            # Provide identifiers so the goal-plan bridge reuses the same
+                            # OpenHands session/workspace instead of creating a separate one.
+                            "parent_session_id": session_id,
+                            "idea_id": idea.id,
                         }
                         goal_plan = await self.goal_bridge.generate_goal_plan(design.description or design.name, plan_context)
                         goal_plan_nodes = await self._log_goal_plan(

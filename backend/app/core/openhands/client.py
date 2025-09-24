@@ -450,8 +450,8 @@ class OpenHandsClient:
         try:
             session_state = self.session_states.get(session_id)
             if session_state:
-                # Optionally retain workspace for debugging/long-lived experiments
-                retain = os.getenv("UAGENT_RETAIN_WORKSPACES", "false").lower() == "true"
+                # Retain workspaces by default to allow post-run inspection.
+                retain = os.getenv("UAGENT_RETAIN_WORKSPACES", "true").lower() == "true"
                 if not retain:
                     await self.workspace_manager.cleanup_workspace(session_state.workspace_id)
 

@@ -79,16 +79,16 @@ class WorkspaceManager:
         workspace_id = research_id or f"ws_{uuid.uuid4().hex[:8]}"
         workspace_path = self.base_dir / workspace_id
 
-        # Create workspace directory
-        if workspace_path.exists():
-            shutil.rmtree(workspace_path)
-        workspace_path.mkdir(parents=True)
+        # Create (or reuse) workspace directory. Do NOT delete existing content.
+        # Users may want to inspect artifacts after runs; we keep prior files.
+        workspace_path.mkdir(parents=True, exist_ok=True)
 
         # Create standard subdirectories
-        (workspace_path / "code").mkdir()
-        (workspace_path / "data").mkdir()
-        (workspace_path / "output").mkdir()
-        (workspace_path / "logs").mkdir()
+        (workspace_path / "code").mkdir(exist_ok=True)
+        (workspace_path / "data").mkdir(exist_ok=True)
+        (workspace_path / "output").mkdir(exist_ok=True)
+        (workspace_path / "logs").mkdir(exist_ok=True)
+        (workspace_path / "scripts").mkdir(exist_ok=True)
 
         # Create workspace configuration
         sanitized_config = self._sanitize_config(config)
@@ -112,7 +112,7 @@ class WorkspaceManager:
         """Initialize workspace with basic setup files"""
         workspace_path = Path(config.base_path)
 
-        # Create requirements.txt
+        # Create requirements.txt (only if missing)
         requirements_content = """
 # Basic scientific computing packages
 numpy>=1.21.0
@@ -171,7 +171,13 @@ output/
 logs/
 *.log
 """
-        (workspace_path / ".gitignore").write_text(gitignore_content.strip())
+        req_path = workspace_path / "requirements.txt"
+        if not req_path.exists():
+            req_path.write_text(requirements_content.strip())
+
+        gitignore_path = workspace_path / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text(gitignore_content.strip())
 
         # Create workspace info file
         info_content = f"""# UAgent Workspace: {config.workspace_id}
@@ -193,7 +199,31 @@ This workspace is isolated and can be used for:
 
 Created: {asyncio.get_event_loop().time()}
 """
-        (workspace_path / "README.md").write_text(info_content.strip())
+        readme_path = workspace_path / "README.md"
+        if not readme_path.exists():
+            readme_path.write_text(info_content.strip())
+
+        # Add a proxy helper script that agents can source explicitly when needed.
+        proxy_script = workspace_path / "scripts" / "net_proxy.sh"
+        if not proxy_script.exists():
+            proxy_script.write_text(
+                (
+                    "#!/usr/bin/env bash\n"
+                    "# Opt-in proxy helper; source this only when network downloads require a proxy.\n"
+                    "export http_proxy=${http_proxy:-http://127.0.0.1:7890}\n"
+                    "export https_proxy=${https_proxy:-http://127.0.0.1:7890}\n"
+                    "export HTTP_PROXY=$http_proxy\n"
+                    "export HTTPS_PROXY=$https_proxy\n"
+                    "export ALL_PROXY=${ALL_PROXY:-socks5h://127.0.0.1:7890}\n"
+                    "git config --global http.proxy \"$http_proxy\" >/dev/null 2>&1 || true\n"
+                    "git config --global https.proxy \"$https_proxy\" >/dev/null 2>&1 || true\n"
+                    "echo \"[proxy] http=$http_proxy https=$https_proxy all=$ALL_PROXY\"\n"
+                ).strip()
+            )
+            try:
+                os.chmod(proxy_script, 0o755)
+            except Exception:
+                pass
 
     async def get_workspace_status(self, workspace_id: str) -> Optional[WorkspaceStatus]:
         """Get current status of a workspace
@@ -398,11 +428,17 @@ Created: {asyncio.get_event_loop().time()}
                             proc.kill()
                 del self.active_processes[workspace_id]
 
-            # Remove workspace directory
+            # Remove workspace directory unless retention is requested
             config = self.workspaces[workspace_id]
             workspace_path = Path(config.base_path)
+            retain_env = os.getenv("UAGENT_RETAIN_WORKSPACES", "true").lower() == "true"
+            preserve_openhands = os.getenv("UAGENT_PRESERVE_OPENHANDS_DIRS", "true").lower() == "true"
+            is_openhands_like = workspace_id.startswith("openhands_") or "openhands" in workspace_id
             if workspace_path.exists():
-                shutil.rmtree(workspace_path)
+                if retain_env or (preserve_openhands and is_openhands_like):
+                    logger.info("Retention enabled; keeping workspace %s at %s", workspace_id, workspace_path)
+                else:
+                    shutil.rmtree(workspace_path)
 
             # Remove from tracking
             del self.workspaces[workspace_id]
