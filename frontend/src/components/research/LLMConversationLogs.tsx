@@ -61,6 +61,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const currentResponseRef = useRef('');
+  const msgCounterRef = useRef(0);
 
   const transformEventToMessage = useCallback(
     (event: any): LLMMessage | null => {
@@ -68,7 +69,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
       switch (event.type) {
         case 'llm_prompt_start':
           return {
-            id: event.id ?? `prompt-${baseTimestamp}`,
+            id: event.id ?? `prompt-${baseTimestamp}-${Math.random().toString(36).slice(2,7)}`,
             session_id: event.session_id,
             type: 'prompt',
             timestamp: baseTimestamp,
@@ -79,7 +80,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
           return null; // tokens are aggregated into the final response
         case 'llm_prompt_complete':
           return {
-            id: event.id ?? `response-${baseTimestamp}`,
+            id: event.id ?? `response-${baseTimestamp}-${Math.random().toString(36).slice(2,7)}`,
             session_id: event.session_id,
             type: 'response',
             timestamp: baseTimestamp,
@@ -88,7 +89,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
           };
         case 'llm_error':
           return {
-            id: event.id ?? `error-${baseTimestamp}`,
+            id: event.id ?? `error-${baseTimestamp}-${Math.random().toString(36).slice(2,7)}`,
             session_id: event.session_id,
             type: 'error',
             timestamp: baseTimestamp,
@@ -145,7 +146,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
               setIsStreaming(true);
 
               const promptMessage: LLMMessage = {
-                id: `prompt-${Date.now()}`,
+                id: `prompt-${Date.now()}-${msgCounterRef.current++}`,
                 session_id: data.session_id,
                 type: 'prompt',
                 timestamp: data.timestamp,
@@ -169,7 +170,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
               const finalResponse = currentResponseRef.current || data.response || '';
               if (finalResponse) {
                 const responseMessage: LLMMessage = {
-                  id: `response-${Date.now()}`,
+                  id: `response-${Date.now()}-${msgCounterRef.current++}`,
                   session_id: data.session_id,
                   type: 'response',
                   timestamp: data.timestamp,
@@ -186,7 +187,7 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
 
             case 'llm_error': {
               const errorMessage: LLMMessage = {
-                id: `error-${Date.now()}`,
+                id: `error-${Date.now()}-${msgCounterRef.current++}`,
                 session_id: data.session_id,
                 type: 'error',
                 timestamp: data.timestamp,
@@ -206,7 +207,17 @@ const LLMConversationLogs: React.FC<LLMConversationLogsProps> = ({
                 const transformed = historyPayload
                   .map(event => transformEventToMessage(event))
                   .filter((msg): msg is LLMMessage => Boolean(msg && msg.content));
-                setMessages(transformed);
+                // Ensure unique keys: fix duplicate ids by appending an index suffix
+                const seen = new Set<string>();
+                const fixed = transformed.map((m, i) => {
+                  let id = m.id;
+                  if (seen.has(id)) {
+                    id = `${id}-${i}`;
+                  }
+                  seen.add(id);
+                  return { ...m, id };
+                });
+                setMessages(fixed);
               }
               break;
             }

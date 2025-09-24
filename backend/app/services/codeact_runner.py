@@ -282,13 +282,34 @@ class CodeActRunner:
                     except Exception:
                         pass
                 prompt_with_rubric = f"{prompt}\n\n{TOOL_SELECTION_RUBRIC}\n\n{SUPERVISOR_PROMPT}"
-                raw = await self.llm.generate(prompt_with_rubric, max_tokens=800, temperature=0.2)
+                # Guard LLM latency with a timeout so we don't stall after action server is ready
+                llm_timeout = int(os.getenv("CODEACT_LLM_TIMEOUT", "60"))
+                try:
+                    raw = await asyncio.wait_for(
+                        self.llm.generate(prompt_with_rubric, max_tokens=800, temperature=0.2),
+                        timeout=llm_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    timeout_msg = f"LLM planning timed out after {llm_timeout}s; retrying with stricter instruction"
+                    if progress_cb:
+                        try:
+                            await progress_cb("tool_result_update", {"tool": "planning", "success": None, "observation_preview": timeout_msg})
+                        except Exception:
+                            pass
+                    # Continue with stricter instruction path below
+                    raw = ""
                 try:
                     func, params = _parse_tool_call(str(raw))
                 except Exception:
                     # Ask again with stricter instruction
                     strict_prompt = prompt_with_rubric + "\nRespond with exactly one tool call as specified."
-                    raw = await self.llm.generate(strict_prompt, max_tokens=600, temperature=0.1)
+                    try:
+                        raw = await asyncio.wait_for(
+                            self.llm.generate(strict_prompt, max_tokens=600, temperature=0.1),
+                            timeout=llm_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        raw = ""
                     try:
                         func, params = _parse_tool_call(str(raw))
                     except Exception:
