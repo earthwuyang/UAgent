@@ -2792,6 +2792,9 @@ Return JSON only.
         Returns:
             Comprehensive scientific research result
         """
+        include_code_analysis = False
+        include_literature_review = False
+        
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
 
