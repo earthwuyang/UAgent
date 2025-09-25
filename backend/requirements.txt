@@ -38,3 +38,7 @@ agentvectordb
 python-json-logger
 termcolor
 toml
+google-cloud-storage 
+google-api-core 
+google-auth 
+google-resumable-media
