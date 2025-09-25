@@ -218,11 +218,12 @@ class OpenHandsActionServerRunner:
                                    "conda install", "conda update", "npm install", "yarn add", "brew install"]
                     for pkg_cmd in package_cmds:
                         if pkg_cmd in cmd:
-                            # Use shorter timeout (30 seconds) to detect hanging quickly
-                            # unless it already has non-interactive flags
-                            if not any(flag in cmd for flag in ["-y", "--yes", "--no-input", "--noconfirm", "--non-interactive"]):
-                                actual_timeout = min(30, timeout)
-                                logger.info(f"[CodeAct] Using short timeout ({actual_timeout}s) for potentially interactive command")
+                            # Allow ample time for package managers; interactive prompts are handled via retries.
+                            min_timeout = int(os.getenv('OPENHANDS_PACKAGE_CMD_MIN_TIMEOUT', '600'))
+                            if not any(flag in cmd for flag in ['-y', '--yes', '--no-input', '--noconfirm', '--non-interactive']):
+                                logger.info('[CodeAct] Command may prompt for input; will retry with a non-interactive flag if needed')
+                            actual_timeout = max(timeout, min_timeout)
+                            logger.info(f'[CodeAct] Using extended timeout ({actual_timeout}s) for package manager command')
                             break
 
             # Try the action with timeout handling
