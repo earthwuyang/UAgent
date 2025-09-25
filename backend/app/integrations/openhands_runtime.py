@@ -196,21 +196,31 @@ class OpenHandsActionServerRunner:
                 preview,
             )
 
-            # Use shorter timeout for package managers to detect hanging faster
+            # Use appropriate timeout based on command type
             actual_timeout = timeout
             if action_name == "run" and "command" in args:
                 cmd = args["command"]
-                # Check if it's a package manager command
-                package_cmds = ["apt-get", "apt ", "yum ", "dnf ", "zypper", "pacman", "emerge",
-                               "conda install", "conda update", "npm install", "yarn add", "brew install"]
-                for pkg_cmd in package_cmds:
-                    if pkg_cmd in cmd:
-                        # Use shorter timeout (30 seconds) to detect hanging quickly
-                        # unless it already has non-interactive flags
-                        if not any(flag in cmd for flag in ["-y", "--yes", "--no-input", "--noconfirm", "--non-interactive"]):
-                            actual_timeout = min(30, timeout)
-                            logger.info(f"[CodeAct] Using short timeout ({actual_timeout}s) for potentially interactive command")
+
+                # Docker commands need longer timeout (especially docker stop which waits 10s by default)
+                docker_cmds = ["docker stop", "docker-compose down", "docker-compose stop", "docker kill", "docker rm"]
+                for docker_cmd in docker_cmds:
+                    if docker_cmd in cmd:
+                        # Docker stop waits 10 seconds by default, so we need at least 15 seconds
+                        actual_timeout = max(20, timeout // 3)  # At least 20 seconds for docker commands
+                        logger.info(f"[CodeAct] Using docker timeout ({actual_timeout}s) for docker command")
                         break
+                else:
+                    # Check if it's a package manager command
+                    package_cmds = ["apt-get", "apt ", "yum ", "dnf ", "zypper", "pacman", "emerge",
+                                   "conda install", "conda update", "npm install", "yarn add", "brew install"]
+                    for pkg_cmd in package_cmds:
+                        if pkg_cmd in cmd:
+                            # Use shorter timeout (30 seconds) to detect hanging quickly
+                            # unless it already has non-interactive flags
+                            if not any(flag in cmd for flag in ["-y", "--yes", "--no-input", "--noconfirm", "--non-interactive"]):
+                                actual_timeout = min(30, timeout)
+                                logger.info(f"[CodeAct] Using short timeout ({actual_timeout}s) for potentially interactive command")
+                            break
 
             # Try the action with timeout handling
             try:
@@ -283,12 +293,21 @@ class OpenHandsActionServerRunner:
                                     flag
                                 )
                                 # Return timeout error instead of raising
+                                timeout_retry_msg = (
+                                    f"ERROR: Command still timed out after {timeout} seconds even with {flag} flag.\n"
+                                    f"The command still appears to be hanging.\n"
+                                    f"This might be a long-running process that needs more time.\n"
+                                    f"Consider:\n"
+                                    f"1. Running in background: nohup {cmd[:100]} &\n"
+                                    f"2. Breaking into smaller steps\n"
+                                    f"3. Checking if the command is correct"
+                                )
                                 from ..core.openhands.code_executor import ExecutionResult
                                 return OpenHandsActionResult(
                                     execution_result=ExecutionResult(
                                         success=False,
-                                        exit_code=-1,
-                                        stdout="",
+                                        exit_code=124,
+                                        stdout=timeout_retry_msg,
                                         stderr=f"Command timed out even with {flag} flag after {timeout} seconds",
                                         execution_time=float(timeout),
                                         files_created=[],
@@ -297,8 +316,13 @@ class OpenHandsActionServerRunner:
                                         working_directory=str(self._workspace_path),
                                         env={},
                                     ),
-                                    raw_observation={"error": "timeout", "timeout_seconds": timeout, "retry_attempted": True},
-                                    stdout="",
+                                    raw_observation={
+                                        "error": "timeout",
+                                        "timeout_seconds": timeout,
+                                        "retry_attempted": True,
+                                        "content": timeout_retry_msg
+                                    },
+                                    stdout=timeout_retry_msg,
                                     stderr=f"Command timed out even with {flag} flag after {timeout} seconds",
                                     server_logs=f"Timeout error: Command did not complete within {timeout} seconds even after adding {flag}",
                                 )
@@ -309,13 +333,45 @@ class OpenHandsActionServerRunner:
                             "[CodeAct] Command timeout: %s",
                             cmd[:200] if cmd else "unknown"
                         )
-                        # Return timeout error result
+                        # Return timeout error result with clear error message
+                        cmd_display = cmd[:100] if len(cmd) > 100 else cmd
+
+                        # Special message for docker commands
+                        if "docker stop" in cmd:
+                            timeout_msg = (
+                                f"ERROR: Docker stop command timed out after {actual_timeout} seconds.\n"
+                                f"Docker stop waits 10 seconds by default for graceful shutdown.\n"
+                                f"To stop immediately, use: docker stop -t 0 <container_name>\n"
+                                f"Or use: docker kill <container_name> for immediate termination.\n"
+                                f"The original command was: {cmd_display}"
+                            )
+                        elif "docker" in cmd:
+                            timeout_msg = (
+                                f"ERROR: Docker command timed out after {actual_timeout} seconds.\n"
+                                f"The command '{cmd_display}' is taking too long.\n"
+                                f"Possible issues:\n"
+                                f"1. Container is not responding\n"
+                                f"2. Docker daemon is busy\n"
+                                f"3. Network issues pulling images\n"
+                                f"Try checking docker status: docker ps -a"
+                            )
+                        else:
+                            timeout_msg = (
+                                f"ERROR: Command timed out after {actual_timeout} seconds.\n"
+                                f"The command '{cmd_display}' appears to be hanging.\n"
+                                f"Possible issues:\n"
+                                f"1. The script is waiting for input\n"
+                                f"2. The script has an infinite loop\n"
+                                f"3. The script is taking too long to process data\n"
+                                f"Try running with timeout command: timeout 20 {cmd_display}\n"
+                                f"Or check if the script exists and has proper permissions."
+                            )
                         from ..core.openhands.code_executor import ExecutionResult
                         return OpenHandsActionResult(
                             execution_result=ExecutionResult(
                                 success=False,
-                                exit_code=-1,
-                                stdout="",
+                                exit_code=124,  # Standard timeout exit code
+                                stdout=timeout_msg,  # Put message in stdout so it's visible
                                 stderr=f"Command timed out after {actual_timeout} seconds",
                                 execution_time=float(actual_timeout),
                                 files_created=[],
@@ -324,8 +380,12 @@ class OpenHandsActionServerRunner:
                                 working_directory=str(self._workspace_path),
                                 env={},
                             ),
-                            raw_observation={"error": "timeout", "timeout_seconds": actual_timeout},
-                            stdout="",
+                            raw_observation={
+                                "error": "timeout",
+                                "timeout_seconds": actual_timeout,
+                                "content": timeout_msg  # Also in content for visibility
+                            },
+                            stdout=timeout_msg,
                             stderr=f"Command timed out after {actual_timeout} seconds",
                             server_logs=f"Timeout error: Command did not complete within {actual_timeout} seconds",
                         )
