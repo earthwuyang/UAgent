@@ -10,12 +10,16 @@ from __future__ import annotations
 import asyncio
 import re
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.llm_client import LLMClient
 from ..integrations.openhands_runtime import OpenHandsActionServerRunner
+
+# Read default timeout from environment variable (default: 120 seconds = 2 minutes)
+DEFAULT_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_TIMEOUT", "120"))
 
 
 TOOL_SPEC = """
@@ -177,7 +181,7 @@ class CodeActRunner:
         workspace_path,
         goal: str,
         max_steps: int = 8,
-        timeout_per_action: int = 180,
+        timeout_per_action: int = DEFAULT_ACTION_TIMEOUT,
         progress_cb: Optional[Any] = None,
     ) -> Dict[str, Any]:
         if not self.action_runner.is_available:
@@ -220,8 +224,9 @@ class CodeActRunner:
                         await progress_cb("planning", {"step": step_idx, "goal": goal})
                     except Exception:
                         pass
-                # Increase max_tokens to ensure complete tool call generation
-                raw = await self.llm.generate(prompt, max_tokens=1500, temperature=0.2)
+                # Increase max_tokens significantly to avoid truncation
+                # Many tool calls with file content can be quite long
+                raw = await self.llm.generate(prompt, max_tokens=4000, temperature=0.2)
                 try:
                     func, params = _parse_tool_call(str(raw))
                 except Exception as e1:
@@ -229,9 +234,9 @@ class CodeActRunner:
                     import logging
                     logging.warning(f"First parse attempt failed: {e1}. Raw response length: {len(str(raw))}")
 
-                    # Ask again with stricter instruction and more tokens
-                    strict_prompt = prompt + "\nRespond with exactly one tool call as specified."
-                    raw = await self.llm.generate(strict_prompt, max_tokens=1200, temperature=0.1)
+                    # Ask again with stricter instruction and even more tokens
+                    strict_prompt = prompt + "\nRespond with ONLY a tool call, no explanations. Start with <function= and end with </function>."
+                    raw = await self.llm.generate(strict_prompt, max_tokens=3000, temperature=0.1)
                     try:
                         func, params = _parse_tool_call(str(raw))
                     except Exception as e2:
@@ -407,7 +412,7 @@ class CodeActRunner:
         try:
             generated = await self.llm.generate(
                 fallback_prompt,
-                max_tokens=600,
+                max_tokens=2000,
                 temperature=0.3,
             )
             message = str(generated or "").strip() or message

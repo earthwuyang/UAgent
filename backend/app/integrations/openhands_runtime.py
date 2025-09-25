@@ -17,6 +17,9 @@ from typing import Optional
 
 import httpx
 
+# Read default timeout from environment variable (default: 120 seconds = 2 minutes)
+DEFAULT_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_TIMEOUT", "120"))
+
 
 def _ensure_openhands_on_path() -> Optional[Path]:
     integrations_dir = Path(__file__).resolve().parent
@@ -116,7 +119,7 @@ class OpenHandsActionServerRunner:
         def is_running(self) -> bool:
             return self._process.returncode is None
 
-        async def send_action(self, action_dict: dict, timeout: int = 300, retry_with_yes: bool = True) -> 'OpenHandsActionResult':
+        async def send_action(self, action_dict: dict, timeout: int = DEFAULT_ACTION_TIMEOUT, retry_with_yes: bool = True) -> 'OpenHandsActionResult':
             if not self.is_running:
                 raise RuntimeError("OpenHands action server session is not running")
             # Work on a shallow copy of the action payload so we can safely rewrite paths
@@ -479,7 +482,7 @@ class OpenHandsActionServerRunner:
                     headers={"X-Session-API-Key": self._api_key},
                 )
 
-        async def run_cmd(self, command: str, timeout: int = 300, blocking: bool = True, cwd: str | None = None) -> 'OpenHandsActionResult':
+        async def run_cmd(self, command: str, timeout: int = DEFAULT_ACTION_TIMEOUT, blocking: bool = True, cwd: str | None = None) -> 'OpenHandsActionResult':
             action = {
                 "action": "run",
                 "args": {
@@ -495,7 +498,7 @@ class OpenHandsActionServerRunner:
             }
             return await self.send_action(action, timeout=timeout)
 
-        async def ipython_run(self, code: str, timeout: int = 300) -> 'OpenHandsActionResult':
+        async def ipython_run(self, code: str, timeout: int = DEFAULT_ACTION_TIMEOUT) -> 'OpenHandsActionResult':
             action = {
                 "action": "run_ipython",
                 "args": {
@@ -507,7 +510,7 @@ class OpenHandsActionServerRunner:
             }
             return await self.send_action(action, timeout=timeout)
 
-        async def file_read(self, path: str, start: int = 0, end: int = -1, timeout: int = 60) -> 'OpenHandsActionResult':
+        async def file_read(self, path: str, start: int = 0, end: int = -1, timeout: int = DEFAULT_ACTION_TIMEOUT) -> 'OpenHandsActionResult':
             action = {
                 "action": "read",
                 "args": {
@@ -521,7 +524,7 @@ class OpenHandsActionServerRunner:
             }
             return await self.send_action(action, timeout=timeout)
 
-        async def file_write(self, path: str, content: str, timeout: int = 120) -> 'OpenHandsActionResult':
+        async def file_write(self, path: str, content: str, timeout: int = DEFAULT_ACTION_TIMEOUT) -> 'OpenHandsActionResult':
             action = {
                 "action": "write",
                 "args": {
@@ -535,7 +538,7 @@ class OpenHandsActionServerRunner:
             }
             return await self.send_action(action, timeout=timeout)
 
-        async def file_edit(self, path: str, command: str, *, file_text: str | None = None, old_str: str | None = None, new_str: str | None = None, insert_line: int | None = None, timeout: int = 120) -> 'OpenHandsActionResult':
+        async def file_edit(self, path: str, command: str, *, file_text: str | None = None, old_str: str | None = None, new_str: str | None = None, insert_line: int | None = None, timeout: int = DEFAULT_ACTION_TIMEOUT) -> 'OpenHandsActionResult':
             args: dict = {
                 "path": path,
                 "command": command,
