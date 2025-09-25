@@ -21,7 +21,7 @@ from zipfile import ZipFile
 
 import puremagic
 from binaryornot.check import is_binary
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
@@ -33,6 +33,10 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn import run
+import signal
+import sqlite3
+import uuid
+from enum import Enum
 
 from openhands.core.config.mcp_config import MCPStdioServerConfig
 from openhands.core.exceptions import BrowserUnavailableException
@@ -810,6 +814,229 @@ if __name__ == '__main__':
         }
         logger.info('Server info endpoint response: %s', response)
         return response
+
+
+    # =====================
+    # Job Service (Queued)
+    # =====================
+
+    class JobState(str, Enum):
+        QUEUED = 'QUEUED'
+        RUNNING = 'RUNNING'
+        SUCCEEDED = 'SUCCEEDED'
+        FAILED = 'FAILED'
+        CANCELED = 'CANCELED'
+
+    class JobService:
+        def __init__(self, root_dir: str, concurrency: int = 2) -> None:
+            self.root = Path(root_dir)
+            self.jobs_dir = self.root / '.jobs'
+            self.jobs_dir.mkdir(parents=True, exist_ok=True)
+            self.db_path = self.jobs_dir / 'jobs.sqlite'
+            self._sema = asyncio.Semaphore(concurrency)
+            self._init_db()
+
+        def _conn(self):
+            con = sqlite3.connect(str(self.db_path))
+            con.row_factory = sqlite3.Row
+            return con
+
+        def _init_db(self) -> None:
+            with self._conn() as con:
+                con.execute(
+                    'CREATE TABLE IF NOT EXISTS jobs ('
+                    'id TEXT PRIMARY KEY,'
+                    'cmd TEXT,'
+                    'argv TEXT,'
+                    'env TEXT,'
+                    'cwd TEXT,'
+                    'state TEXT,'
+                    'pid INTEGER,'
+                    'pgid INTEGER,'
+                    'created_at REAL,'
+                    'started_at REAL,'
+                    'ended_at REAL,'
+                    'exit_code INTEGER,'
+                    'out_path TEXT,'
+                    'err_path TEXT)'
+                )
+
+        async def submit(self, command: str, cwd: str | None, env: dict | None) -> dict:
+            job_id = str(uuid.uuid4())
+            out_path = str(self.jobs_dir / f'{job_id}.out')
+            err_path = str(self.jobs_dir / f'{job_id}.err')
+            argv = ["bash", "-lc", command]
+            record = {
+                'id': job_id,
+                'cmd': command,
+                'argv': json.dumps(argv),
+                'env': json.dumps(env or {}),
+                'cwd': cwd or str(self.root),
+                'state': JobState.QUEUED.value,
+                'pid': None,
+                'pgid': None,
+                'created_at': time.time(),
+                'started_at': None,
+                'ended_at': None,
+                'exit_code': None,
+                'out_path': out_path,
+                'err_path': err_path,
+            }
+            with self._conn() as con:
+                con.execute(
+                    'INSERT INTO jobs (id, cmd, argv, env, cwd, state, pid, pgid, created_at, started_at, ended_at, exit_code, out_path, err_path) '
+                    'VALUES (:id,:cmd,:argv,:env,:cwd,:state,:pid,:pgid,:created_at,:started_at,:ended_at,:exit_code,:out_path,:err_path)',
+                    record,
+                )
+            asyncio.create_task(self._run_job(job_id))
+            return {'id': job_id}
+
+        async def _run_job(self, job_id: str) -> None:
+            async with self._sema:
+                with self._conn() as con:
+                    row = con.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+                if not row:
+                    return
+                cwd = row['cwd'] or str(self.root)
+                out_path = row['out_path']
+                err_path = row['err_path']
+
+                def preexec():
+                    os.setsid()  # new process group
+
+                proc = await asyncio.create_subprocess_exec(
+                    'bash', '-lc', row['cmd'],
+                    cwd=cwd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    preexec_fn=preexec,
+                )
+
+                with self._conn() as con:
+                    con.execute(
+                        'UPDATE jobs SET state=?, pid=?, pgid=?, started_at=? WHERE id=?',
+                        (JobState.RUNNING.value, proc.pid, os.getpgid(proc.pid), time.time(), job_id),
+                    )
+
+                async def pipe(src: asyncio.StreamReader, dest_path: str):
+                    Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(dest_path, 'ab', buffering=0) as f:
+                        while True:
+                            chunk = await src.read(4096)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+
+                await asyncio.gather(
+                    pipe(proc.stdout, out_path),
+                    pipe(proc.stderr, err_path),
+                )
+                exit_code = await proc.wait()
+                with self._conn() as con:
+                    con.execute(
+                        'UPDATE jobs SET state=?, exit_code=?, ended_at=? WHERE id=?',
+                        ((JobState.SUCCEEDED.value if exit_code == 0 else JobState.FAILED.value), exit_code, time.time(), job_id),
+                    )
+
+        def get(self, job_id: str) -> dict:
+            with self._conn() as con:
+                row = con.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='job not found')
+            return dict(row)
+
+        def cancel(self, job_id: str) -> dict:
+            with self._conn() as con:
+                row = con.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='job not found')
+            if row['state'] in (JobState.SUCCEEDED.value, JobState.FAILED.value, JobState.CANCELED.value):
+                return {'status': row['state']}
+            pgid = row['pgid']
+            if pgid:
+                try:
+                    os.killpg(int(pgid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            with self._conn() as con:
+                con.execute('UPDATE jobs SET state=? WHERE id=?', (JobState.CANCELED.value, job_id))
+            return {'status': JobState.CANCELED.value}
+
+        def tail(self, job_id: str, stderr: bool = False, max_bytes: int = 4000) -> str:
+            row = self.get(job_id)
+            path = row['err_path'] if stderr else row['out_path']
+            if not path or not os.path.exists(path):
+                return ''
+            with open(path, 'rb') as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+                return f.read().decode(errors='ignore')
+
+        async def stream_ws(self, websocket: WebSocket, job_id: str, stderr: bool = False):
+            await websocket.accept()
+            row = self.get(job_id)
+            path = row['err_path'] if stderr else row['out_path']
+            cursor = 0
+            try:
+                while True:
+                    try:
+                        with open(path, 'rb') as f:
+                            f.seek(cursor)
+                            chunk = f.read()
+                            cursor += len(chunk)
+                    except FileNotFoundError:
+                        chunk = b''
+                    if chunk:
+                        await websocket.send_text(chunk.decode(errors='ignore'))
+                    state = self.get(job_id)['state']
+                    if state in (JobState.SUCCEEDED.value, JobState.FAILED.value, JobState.CANCELED.value) and not chunk:
+                        await websocket.close(code=1000)
+                        break
+                    await asyncio.sleep(0.3)
+            except WebSocketDisconnect:
+                return
+
+    job_service = JobService(root_dir=args.working_dir, concurrency=int(os.environ.get('JOBS_MAX_PARALLEL', '2')))
+
+    class JobSubmit(BaseModel):
+        command: str
+        cwd: str | None = None
+        env: dict | None = None
+        mode: str | None = 'auto'
+        short_timeout_s: float | None = 5.0
+
+    @app.post('/jobs')
+    async def submit_job(req: JobSubmit):
+        job = await job_service.submit(req.command, req.cwd, req.env)
+        if (req.mode or 'auto') in ('auto', 'sync') and (req.short_timeout_s or 0) > 0:
+            start = time.time()
+            while time.time() - start < float(req.short_timeout_s or 0):
+                status = job_service.get(job['id'])
+                if status['state'] in (JobState.SUCCEEDED.value, JobState.FAILED.value, JobState.CANCELED.value):
+                    status['tail'] = job_service.tail(job['id'])
+                    return status
+                await asyncio.sleep(0.25)
+        return {'status': JobState.RUNNING.value, 'id': job['id']}
+
+    @app.get('/jobs/{job_id}')
+    async def job_status(job_id: str, include_tail: bool = False):
+        status = job_service.get(job_id)
+        if include_tail:
+            status['tail'] = job_service.tail(job_id)
+        return status
+
+    @app.post('/jobs/{job_id}/cancel')
+    async def job_cancel(job_id: str):
+        return job_service.cancel(job_id)
+
+    @app.get('/jobs/{job_id}/logs')
+    async def job_logs(job_id: str, stderr: bool = False):
+        return job_service.tail(job_id, stderr=stderr, max_bytes=4000)
+
+    @app.websocket('/jobs/{job_id}/logs/ws')
+    async def job_logs_ws(websocket: WebSocket, job_id: str):
+        await job_service.stream_ws(websocket, job_id, stderr=False)
 
     @app.post('/execute_action')
     async def execute_action(action_request: ActionRequest):

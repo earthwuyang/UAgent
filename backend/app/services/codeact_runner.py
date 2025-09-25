@@ -12,6 +12,7 @@ import re
 import json
 import os
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -79,9 +80,9 @@ def _parse_tool_call(content: str) -> Tuple[str, Dict[str, str]]:
         if "<function=" in content and "</function>" not in content:
             raise ValueError(f"Function call appears truncated (missing </function> tag). Response length: {len(content)}")
         elif "<function=" in content:
-            raise ValueError(f"Malformed function call syntax in response")
+            raise ValueError("Malformed function call syntax in response")
         else:
-            raise ValueError(f"No function call found in response (expected <function=...> format)")
+            raise ValueError("No function call found in response (expected <function=...> format)")
 
     func_name = func_match.group(1).strip()
     inner = func_match.group(2)
@@ -111,6 +112,8 @@ class CodeActStep:
 
 class CodeActRunner:
     def __init__(self, llm_client: LLMClient, action_runner: OpenHandsActionServerRunner):
+        self.logger = logging.getLogger(__name__)
+        
         self.llm = llm_client
         self.action_runner = action_runner
 
@@ -469,7 +472,6 @@ class CodeActRunner:
         try:
             if func == "execute_bash":
                 cmd = params.get("command", "")
-                # Guard against cloning OpenHands repo – it's already integrated
                 low = cmd.lower()
                 if "git clone" in low and ("openhands" in low or "all-hands-ai/openhands" in low):
                     return (
@@ -478,13 +480,81 @@ class CodeActRunner:
                         False,
                     )
 
-                # Let the LLM control how commands are run, including pip install
-                # No automatic modifications
-                actual_timeout = timeout
+                # Prefer the Job Service for robust execution (queued, durable logs, cancelable)
+                self.logger.info("[CodeAct] execute_bash submit: %s", cmd[:200])
+                submit = await session.jobs_submit(cmd, mode="auto", short_timeout_s=min(8.0, max(1.0, timeout/10)))
+                job_id = submit.get("id") or submit.get("job_id")
+                state = submit.get("state") or submit.get("status")
+                # Prepare a per-job log file under workspace/logs
+                try:
+                    wp = getattr(session, 'workspace_path', None)
+                    logs_dir = (wp / "logs") if isinstance(wp, Path) else Path("logs")
+                    logs_dir.mkdir(parents=True, exist_ok=True)
+                    job_log_path = logs_dir / f"job_{job_id}.log"
+                    with job_log_path.open("w", encoding="utf-8") as fp:
+                        fp.write("Command: " + cmd + "\n")
+                        fp.write("JobID: " + str(job_id) + "\n\n")
+                    self.logger.info("[CodeAct] job log: %s", job_log_path)
+                except Exception:
+                    job_log_path = None
 
-                res = await session.run_cmd(cmd, timeout=actual_timeout, blocking=True)
-                content = self._render_action_output(res)
-                return content, res.execution_result.success
+                # If job already completed in the short window, format as final
+                if state and state in ("SUCCEEDED", "FAILED", "CANCELED"):
+                    tail = submit.get("tail", "")
+                    exit_code = submit.get("exit_code")
+                    success = bool(exit_code == 0 or state == "SUCCEEDED")
+                    content = (
+                        f"[job completed] id={job_id} state={state} exit_code={exit_code}\n"
+                        f"{tail[-4000:] if isinstance(tail, str) else tail}"
+                    )
+                    try:
+                        if job_log_path:
+                            with job_log_path.open("a", encoding="utf-8") as fp:
+                                fp.write(tail if isinstance(tail, str) else str(tail))
+                                fp.write("\n")
+                    except Exception:
+                        pass
+                    return content, success
+
+                # Otherwise poll until done or timeout
+                loop = asyncio.get_event_loop()
+                end_time = loop.time() + max(5, timeout)
+                last_tail = ""
+                while loop.time() < end_time:
+                    status = await session.jobs_status(job_id, include_tail=True)
+                    state = status.get("state")
+                    tail = status.get("tail", "") or ""
+                    if state in ("SUCCEEDED", "FAILED", "CANCELED"):
+                        exit_code = status.get("exit_code")
+                        success = bool(exit_code == 0 or state == "SUCCEEDED")
+                        content = (
+                            f"[job {job_id}] state={state} exit_code={exit_code}\n"
+                            f"{tail[-4000:]}"
+                        )
+                        try:
+                            if job_log_path:
+                                with job_log_path.open("a", encoding="utf-8") as fp:
+                                    fp.write(tail)
+                                    fp.write("\n")
+                        except Exception:
+                            pass
+                        return content, success
+                    try:
+                        if job_log_path and isinstance(tail, str):
+                            delta = tail[len(last_tail):] if tail.startswith(last_tail) else tail
+                            if delta:
+                                with job_log_path.open("a", encoding="utf-8") as fp:
+                                    fp.write(delta)
+                                self.logger.info("[CodeAct] job %s tail += %d chars", job_id, len(delta))
+                        last_tail = tail[-800:]
+                    except Exception:
+                        last_tail = tail[-800:] if isinstance(tail, str) else ""
+                    await asyncio.sleep(2.0)
+
+                # Timed out waiting; provide latest snapshot
+                snapshot = last_tail or "(no recent output)"
+                content = f"[job {job_id}] still RUNNING after {timeout}s. Latest output:\n{snapshot}"
+                return content, False
 
             if func == "str_replace_editor":
                 command = params.get("command", "").strip()

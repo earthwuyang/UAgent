@@ -128,6 +128,10 @@ class OpenHandsActionServerRunner:
         def is_running(self) -> bool:
             return self._process.returncode is None
 
+        @property
+        def workspace_path(self) -> Path:
+            return self._workspace_path
+
         async def send_action(self, action_dict: dict, timeout: int = DEFAULT_ACTION_TIMEOUT, retry_with_yes: bool = True) -> 'OpenHandsActionResult':
             if not self.is_running:
                 raise RuntimeError("OpenHands action server session is not running")
@@ -355,103 +359,15 @@ class OpenHandsActionServerRunner:
                                     except Exception:
                                         pass
 
-                                # Return timeout error instead of raising
-                                timeout_retry_msg = (
-                                    f"ERROR: Command still timed out after {timeout} seconds even with {flag} flag.\n"
-                                    f"The command still appears to be hanging.\n"
-                                    f"This might be a long-running process that needs more time.\n"
-                                    f"Consider:\n"
-                                    f"1. Running in background using nohup command & syntax\n"
-                                    f"2. Breaking into smaller steps\n"
-                                    f"3. Checking if the command is correct"
-                                )
-                                from ..core.openhands.code_executor import ExecutionResult
-                                return OpenHandsActionResult(
-                                    execution_result=ExecutionResult(
-                                        success=False,
-                                        exit_code=124,
-                                        stdout=timeout_retry_msg,
-                                        stderr=f"Command timed out even with {flag} flag after {timeout} seconds",
-                                        execution_time=float(timeout),
-                                        files_created=[],
-                                        files_modified=[],
-                                        command=cmd[:200],
-                                        working_directory=str(self._workspace_path),
-                                        env={},
-                                    ),
-                                    raw_observation={
-                                        "error": "timeout",
-                                        "timeout_seconds": timeout,
-                                        "retry_attempted": True,
-                                        "content": timeout_retry_msg
-                                    },
-                                    stdout=timeout_retry_msg,
-                                    stderr=f"Command timed out even with {flag} flag after {timeout} seconds",
-                                    server_logs=f"Timeout error: Command did not complete within {timeout} seconds even after adding {flag}",
-                                )
+                                return await self._execute_with_backend_fallback(cmd, timeout, attempts=2)
                             break
                     else:
-                        # Not a package manager command or already has flags
+                        # Not a package manager command or already has flags — fall back to backend execution
                         logger.error(
-                            "[CodeAct] Command timeout: %s",
-                            cmd[:200] if cmd else "unknown"
+                            "[CodeAct] Command timeout for %s; falling back to backend execution",
+                            (cmd[:200] if cmd else "unknown"),
                         )
-                        # Return timeout error result with clear error message
-                        cmd_display = cmd[:100] if len(cmd) > 100 else cmd
-
-                        # Special message for docker commands
-                        if "docker stop" in cmd:
-                            timeout_msg = (
-                                f"ERROR: Docker stop command timed out after {actual_timeout} seconds.\n"
-                                f"Docker stop waits 10 seconds by default for graceful shutdown.\n"
-                                f"To stop immediately, use: docker stop -t 0 <container_name>\n"
-                                f"Or use: docker kill <container_name> for immediate termination.\n"
-                                f"The original command was: {cmd_display}"
-                            )
-                        elif "docker" in cmd:
-                            timeout_msg = (
-                                f"ERROR: Docker command timed out after {actual_timeout} seconds.\n"
-                                f"The command '{cmd_display}' is taking too long.\n"
-                                f"Possible issues:\n"
-                                f"1. Container is not responding\n"
-                                f"2. Docker daemon is busy\n"
-                                f"3. Network issues pulling images\n"
-                                f"Try checking docker status: docker ps -a"
-                            )
-                        else:
-                            timeout_msg = (
-                                f"ERROR: Command timed out after {actual_timeout} seconds.\n"
-                                f"The command '{cmd_display}' appears to be hanging.\n"
-                                f"Possible issues:\n"
-                                f"1. The script is waiting for input\n"
-                                f"2. The script has an infinite loop\n"
-                                f"3. The script is taking too long to process data\n"
-                                f"Try running with timeout command: timeout 20 {cmd_display}\n"
-                                f"Or check if the script exists and has proper permissions."
-                            )
-                        from ..core.openhands.code_executor import ExecutionResult
-                        return OpenHandsActionResult(
-                            execution_result=ExecutionResult(
-                                success=False,
-                                exit_code=124,  # Standard timeout exit code
-                                stdout=timeout_msg,  # Put message in stdout so it's visible
-                                stderr=f"Command timed out after {actual_timeout} seconds",
-                                execution_time=float(actual_timeout),
-                                files_created=[],
-                                files_modified=[],
-                                command=cmd[:200] if cmd else "unknown",
-                                working_directory=str(self._workspace_path),
-                                env={},
-                            ),
-                            raw_observation={
-                                "error": "timeout",
-                                "timeout_seconds": actual_timeout,
-                                "content": timeout_msg  # Also in content for visibility
-                            },
-                            stdout=timeout_msg,
-                            stderr=f"Command timed out after {actual_timeout} seconds",
-                            server_logs=f"Timeout error: Command did not complete within {actual_timeout} seconds",
-                        )
+                        return await self._execute_with_backend_fallback(cmd or "", actual_timeout, attempts=1)
                 else:
                     # Return timeout error for non-command actions
                     from ..core.openhands.code_executor import ExecutionResult
@@ -856,6 +772,50 @@ class OpenHandsActionServerRunner:
                 "timeout": timeout,
             }
             return await self.send_action(action, timeout=timeout)
+
+        # Job service client (Action Server managed queued jobs)
+        async def jobs_submit(self, command: str, *, mode: str = "auto", short_timeout_s: float = 6.0, cwd: str | None = None, env: dict | None = None) -> dict:
+            payload = {
+                "command": command,
+                "mode": mode,
+                "short_timeout_s": float(short_timeout_s),
+                "cwd": cwd,
+                "env": env or {},
+            }
+            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{self._port}/jobs",
+                    json=payload,
+                    headers={"X-Session-API-Key": self._api_key},
+                )
+                r.raise_for_status()
+                return r.json()
+
+        async def jobs_status(self, job_id: str, *, include_tail: bool = True) -> dict:
+            params = {"include_tail": "true"} if include_tail else {}
+            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                r = await client.get(
+                    f"http://127.0.0.1:{self._port}/jobs/{job_id}",
+                    params=params,
+                    headers={"X-Session-API-Key": self._api_key},
+                )
+                r.raise_for_status()
+                return r.json()
+
+        async def jobs_logs_tail(self, job_id: str, *, stderr: bool = False, max_bytes: int = 4000) -> str:
+            params = {"stderr": "true"} if stderr else {}
+            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                r = await client.get(
+                    f"http://127.0.0.1:{self._port}/jobs/{job_id}/logs",
+                    params=params,
+                    headers={"X-Session-API-Key": self._api_key},
+                )
+                r.raise_for_status()
+                try:
+                    return r.text
+                except Exception:
+                    return ""
+
 
         async def ipython_run(self, code: str, timeout: int = DEFAULT_ACTION_TIMEOUT) -> 'OpenHandsActionResult':
             action = {
