@@ -79,8 +79,16 @@ class WorkspaceManager:
         workspace_id = research_id or f"ws_{uuid.uuid4().hex[:8]}"
         workspace_path = self.base_dir / workspace_id
 
+        # Check if workspace already exists and is registered
+        if workspace_id in self.workspaces and workspace_path.exists():
+            # Workspace already exists, return existing config
+            logger.info(f"Reusing existing workspace: {workspace_id} at {workspace_path}")
+            return self.workspaces[workspace_id]
+
         # Create workspace directory
         if workspace_path.exists():
+            # Workspace directory exists but not registered, clean it up
+            logger.warning(f"Found orphaned workspace directory: {workspace_id}, cleaning up")
             shutil.rmtree(workspace_path)
         workspace_path.mkdir(parents=True)
 

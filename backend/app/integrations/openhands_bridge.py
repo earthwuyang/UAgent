@@ -174,9 +174,16 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
     ) -> GoalPlan:
         """Execute goal plan steps using OpenHands CodeAct code generation."""
 
-        session_config = await self._client.create_session(
+        # Use the session ID from execution context if available, otherwise create unified ID
+        session_id = execution_context.get("session_id")
+        if not session_id:
+            # Create a unified session ID that will be reused for all OpenHands operations
+            session_id = f"experiment_{plan.plan_id}"
+
+        # Use ensure_session to reuse existing workspace if available
+        session_config = await self._client.ensure_session(
             research_type="scientific_research",
-            session_id=f"plan_{plan.plan_id}",
+            session_id=session_id,
             config=self._sanitize_workspace_config(execution_context.get("resource_requirements")),
         )
 

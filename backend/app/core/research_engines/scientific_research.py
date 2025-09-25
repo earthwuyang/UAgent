@@ -1533,7 +1533,13 @@ class ScientificResearchEngine:
 
         await self._openhands_session_semaphore.acquire()
         try:
-            session_identifier = f"openhands_{research_session_id or 'global'}_{idea_id}"
+            # Use a unified session identifier that matches both OpenHands and Goal Bridge usage
+            # Format: "experiment_{research_session_id}_{idea_id}"
+            if research_session_id:
+                session_identifier = f"experiment_{research_session_id}_{idea_id}"
+            else:
+                session_identifier = f"experiment_{idea_id}"
+
             session_config = await self.openhands_client.ensure_session(
                 research_type="scientific_research",
                 session_id=session_identifier,
@@ -2258,12 +2264,19 @@ class ScientificResearchEngine:
                     goal_plan: Optional[GoalPlan] = None
 
                     if self.goal_bridge:
+                        # Pass the unified session ID from the OpenHands context
+                        # This ensures goal_bridge uses the same workspace as the scientific research
                         plan_context = {
                             "hypothesis": hypothesis.statement,
                             "variables": hypothesis.variables,
                             "analysis_plan": design.analysis_plan,
                             "resource_requirements": design.resource_requirements,
                         }
+
+                        # Add the session_id from openhands_context if available
+                        if openhands_context:
+                            plan_context["session_id"] = openhands_context.session_id
+
                         goal_plan = await self.goal_bridge.generate_goal_plan(design.description or design.name, plan_context)
                         goal_plan_nodes = await self._log_goal_plan(
                             session_id,
