@@ -226,7 +226,8 @@ class CodeActRunner:
                         pass
                 # Increase max_tokens significantly to avoid truncation
                 # Many tool calls with file content can be quite long
-                raw = await self.llm.generate(prompt, max_tokens=4000, temperature=0.2)
+                # Some responses can be 15000-20000+ characters with detailed analysis and file contents
+                raw = await self.llm.generate(prompt, max_tokens=20000, temperature=0.2)
                 try:
                     func, params = _parse_tool_call(str(raw))
                 except Exception as e1:
@@ -236,7 +237,7 @@ class CodeActRunner:
 
                     # Ask again with stricter instruction and even more tokens
                     strict_prompt = prompt + "\nRespond with ONLY a tool call, no explanations. Start with <function= and end with </function>."
-                    raw = await self.llm.generate(strict_prompt, max_tokens=3000, temperature=0.1)
+                    raw = await self.llm.generate(strict_prompt, max_tokens=15000, temperature=0.1)
                     try:
                         func, params = _parse_tool_call(str(raw))
                     except Exception as e2:

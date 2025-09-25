@@ -11,14 +11,22 @@ import secrets
 import socket
 import subprocess
 import sys
+import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import httpx
 
+from .stream_monitor import CommandStreamMonitor
+
 # Read default timeout from environment variable (default: 120 seconds = 2 minutes)
 DEFAULT_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_TIMEOUT", "120"))
+OPENHANDS_MAX_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_MAX_TIMEOUT", "900"))
+OPENHANDS_RUN_ADAPTIVE_MULTIPLIER = float(os.getenv("OPENHANDS_RUN_TIMEOUT_MULTIPLIER", "1.75"))
+OPENHANDS_RUN_MAX_ATTEMPTS = int(os.getenv("OPENHANDS_RUN_MAX_ATTEMPTS", "3"))
+OPENHANDS_PACKAGE_CMD_MIN_TIMEOUT = int(os.getenv("OPENHANDS_PACKAGE_CMD_MIN_TIMEOUT", "600"))
 
 
 def _ensure_openhands_on_path() -> Optional[Path]:
@@ -114,6 +122,7 @@ class OpenHandsActionServerRunner:
             self._port = port
             self._api_key = api_key
             self._workspace_path = workspace_path
+            self._stream_monitor = CommandStreamMonitor(workspace_path)
 
         @property
         def is_running(self) -> bool:
@@ -178,6 +187,46 @@ class OpenHandsActionServerRunner:
                     command_text = "bash -lc " + json.dumps(stripped)
                 args["command"] = command_text
 
+                # Set long-running commands to non-blocking to prevent timeouts on other operations
+                long_running_patterns = [
+                    "pip install", "pip3 install", "npm install", "yarn install",
+                    "apt-get", "apt install", "yum install", "brew install",
+                    "docker build", "docker pull", "make", "cmake",
+                    "wget", "curl -O", "git clone", "sleep"
+                ]
+
+                # Check if this is a long-running command
+                is_long_running = any(pattern in command_text for pattern in long_running_patterns)
+
+                # Override blocking setting for long-running commands
+                if is_long_running and args.get("blocking", True):
+                    logger.info(f"[CodeAct] Setting long-running command to non-blocking: {command_text[:50]}...")
+                    args["blocking"] = False
+                    # Add a follow-up check command
+                    args["thought"] = "Running in background to prevent blocking other operations"
+
+                    # Wrap command for background execution with output streaming
+                    # Create a realtime log path based on the workspace
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_cmd = command_text[:30].replace("/", "_").replace(" ", "_")
+                    log_realtime = f"/workspace/logs/commands/{timestamp}_{safe_cmd}.realtime"
+
+                    # Ensure the logs directory exists
+                    wrapped_command = f"mkdir -p /workspace/logs/commands && nohup {command_text} > {log_realtime} 2>&1 & echo $! > {log_realtime}.pid && echo 'Started background process PID: '$(cat {log_realtime}.pid)"
+                    args["command"] = wrapped_command
+                    logger.info(f"[CodeAct] Wrapped for background execution. Monitor with: tail -f {log_realtime}")
+                # For blocking long-running commands, wrap with script for real-time output capture
+                elif is_long_running and args.get("blocking", True) == True:
+                    # Create a realtime log path
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_cmd = command_text[:30].replace("/", "_").replace(" ", "_")
+                    log_realtime = f"/workspace/logs/commands/{timestamp}_{safe_cmd}.realtime"
+
+                    # Use script command to capture all output including progress bars
+                    wrapped_command = f"mkdir -p /workspace/logs/commands && script -q -c '{command_text}' {log_realtime}"
+                    args["command"] = wrapped_command
+                    logger.info(f"[CodeAct] Wrapped for real-time streaming. Monitor with: tail -f {log_realtime}")
+
             # Persist any rewrites made above back onto the outgoing payload
             rewritten_action = dict(action_dict)
             rewritten_action["args"] = args
@@ -198,6 +247,22 @@ class OpenHandsActionServerRunner:
                 self._workspace_path,
                 preview,
             )
+
+            # Create log file using stream monitor for ALL commands
+            command_str = args.get("command") if action_name == "run" else None
+            log_path = self._stream_monitor.create_log_file(action_name, command_str)
+
+            # Write additional context
+            self._stream_monitor.write_to_log(log_path, f"Arguments: {json.dumps(args, indent=2, default=str)}", "CONTEXT")
+
+            # Print monitoring instructions for important commands
+            if command_str and any(cmd in command_str for cmd in ["pip install", "npm install", "apt", "docker"]):
+                self._stream_monitor.print_monitoring_instructions(log_path)
+
+            logger.info(f"[CodeAct] Streaming output to: {log_path}")
+
+            # Store log path for later use
+            self._current_log_path = log_path
 
             # Use appropriate timeout based on command type
             actual_timeout = timeout
@@ -296,6 +361,19 @@ class OpenHandsActionServerRunner:
                                     "[CodeAct] Command still timed out after adding %s flag",
                                     flag
                                 )
+                                # Log timeout to file
+                                if hasattr(self, '_current_log_path') and self._current_log_path:
+                                    try:
+                                        with self._current_log_path.open("a", encoding="utf-8") as f:
+                                            f.write(f"\n=== TIMEOUT (Retry with {flag}) ===\n")
+                                            f.write(f"Time: {datetime.now().isoformat()}\n")
+                                            f.write(f"Timeout after: {timeout} seconds\n")
+                                            f.write(f"Command: {cmd}\n")
+                                            f.write(f"{'=' * 50}\n")
+                                            f.flush()
+                                    except Exception:
+                                        pass
+
                                 # Return timeout error instead of raising
                                 timeout_retry_msg = (
                                     f"ERROR: Command still timed out after {timeout} seconds even with {flag} flag.\n"
@@ -455,6 +533,50 @@ class OpenHandsActionServerRunner:
 
             observation = response.json()
 
+            # Stream output to log file using stream monitor
+            if hasattr(self, '_current_log_path') and self._current_log_path:
+                try:
+                    # Extract key information
+                    if isinstance(observation, dict):
+                        content = observation.get("content", "")
+                        stdout = observation.get("stdout", "")
+                        stderr = observation.get("stderr", "")
+                        metadata = observation.get("metadata", {})
+                        exit_code = metadata.get("exit_code", observation.get("exit_code"))
+
+                        # Write output sections
+                        if content:
+                            self._stream_monitor.write_to_log(self._current_log_path, content, "OUTPUT")
+                        if stdout and stdout != content:
+                            self._stream_monitor.write_to_log(self._current_log_path, stdout, "STDOUT")
+                        if stderr:
+                            self._stream_monitor.write_to_log(self._current_log_path, stderr, "STDERR")
+                        if exit_code is not None:
+                            self._stream_monitor.write_to_log(self._current_log_path, f"Exit Code: {exit_code}", "STATUS")
+
+                        # Write full response for debugging
+                        self._stream_monitor.write_json_to_log(self._current_log_path, observation, "FULL_RESPONSE")
+
+                        # Special handling for pip/npm install progress
+                        if action_name == "run" and "command" in args:
+                            cmd = args["command"]
+                            if "pip install" in cmd or "npm install" in cmd:
+                                if exit_code == 0:
+                                    self._stream_monitor.write_to_log(self._current_log_path, "✓ Installation completed successfully", "SUCCESS")
+                                elif exit_code is not None and exit_code != 0:
+                                    self._stream_monitor.write_to_log(self._current_log_path, f"✗ Installation failed with exit code {exit_code}", "ERROR")
+                    else:
+                        self._stream_monitor.write_to_log(self._current_log_path, str(observation), "RESPONSE")
+
+                    # Print monitoring reminder for long commands
+                    if action_name == "run" and "command" in args:
+                        cmd = args["command"]
+                        if any(keyword in cmd for keyword in ["pip", "npm", "apt", "docker", "make", "build"]):
+                            logger.info(f"[CodeAct] Monitor progress: tail -f {self._current_log_path}")
+
+                except Exception as e:
+                    logger.warning(f"[CodeAct] Failed to write to log: {e}")
+
             # Check if the response indicates the command wasn't actually executed
             # This can happen when the action server accepts the request but fails to execute it
             if isinstance(observation, dict):
@@ -523,6 +645,140 @@ class OpenHandsActionServerRunner:
                 server_logs="",
             )
 
+        async def _execute_with_backend_fallback(self, command: str, last_timeout: int, attempts: int) -> 'OpenHandsActionResult':
+            """Execute command directly via backend subprocess when action server times out."""
+            from ..core.openhands.code_executor import ExecutionResult
+
+            log_dir = self._workspace_path / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = log_dir / f"backend_fallback_{timestamp}.log"
+            logger.warning(
+                "[CodeAct] Executing command via backend fallback. Log file: %s",
+                log_path,
+            )
+
+            # Wrap command for better execution
+            shell_command = f"cd {shlex.quote(str(self._workspace_path))} && {command}"
+            env = os.environ.copy()
+            start_time = time.perf_counter()
+
+            process = await asyncio.create_subprocess_shell(
+                shell_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+
+            stdout_chunks = []
+            stderr_chunks = []
+
+            async def _stream(pipe, prefix, collector):
+                if pipe is None:
+                    return
+                while True:
+                    chunk = await pipe.readline()
+                    if not chunk:
+                        break
+                    text = chunk.decode(errors="replace")
+                    collector.append(text)
+                    log_handle.write(f"[{prefix}] {text}")
+                    log_handle.flush()
+
+            log_handle = log_path.open("a", encoding="utf-8", errors="ignore")
+            reporter = asyncio.create_task(self._periodic_log_report(log_path, process))
+            try:
+                await asyncio.gather(
+                    _stream(process.stdout, "STDOUT", stdout_chunks),
+                    _stream(process.stderr, "STDERR", stderr_chunks),
+                )
+                await process.wait()
+            finally:
+                reporter.cancel()
+                try:
+                    await reporter
+                except asyncio.CancelledError:
+                    pass
+                log_handle.close()
+
+            duration = time.perf_counter() - start_time
+            exit_code = process.returncode if process.returncode is not None else -1
+            stdout_text = ''.join(stdout_chunks).strip()
+            stderr_text = ''.join(stderr_chunks).strip()
+
+            summary = (
+                "Command executed via backend fallback. "
+                f"Review detailed logs at {log_path}."
+            )
+            if stdout_text:
+                stdout_payload = f"{summary}\n{stdout_text}"
+            else:
+                stdout_payload = summary
+
+            exec_result = ExecutionResult(
+                success=exit_code == 0,
+                exit_code=exit_code,
+                stdout=stdout_payload,
+                stderr=stderr_text,
+                execution_time=duration,
+                files_created=[],
+                files_modified=[],
+                command=command[:200],
+                working_directory=str(self._workspace_path),
+                env={},
+            )
+
+            raw_observation = {
+                "content": summary,
+                "metadata": {
+                    "action": "backend_fallback",
+                    "exit_code": exit_code,
+                    "log_path": str(log_path),
+                    "attempts": attempts,
+                    "last_timeout_seconds": last_timeout,
+                },
+            }
+
+            return OpenHandsActionResult(
+                execution_result=exec_result,
+                raw_observation=raw_observation,
+                stdout=stdout_payload,
+                stderr=stderr_text,
+                server_logs=f"Backend fallback executed. Logs stored at {log_path}",
+            )
+
+        async def _periodic_log_report(self, log_path: Path, process: asyncio.subprocess.Process) -> None:
+            """Periodically report progress from log file."""
+            last_size = 0
+            try:
+                while True:
+                    await asyncio.sleep(5)
+                    if process.returncode is not None:
+                        break
+                    try:
+                        stat_info = log_path.stat()
+                    except FileNotFoundError:
+                        continue
+                    if stat_info.st_size == last_size:
+                        continue
+                    last_size = stat_info.st_size
+                    try:
+                        with log_path.open("r", encoding="utf-8", errors="ignore") as log_file:
+                            if stat_info.st_size > 4096:
+                                log_file.seek(stat_info.st_size - 4096)
+                            tail = log_file.read().strip().splitlines()
+                            tail_snippet = " | ".join(tail[-5:]) if tail else ""
+                    except FileNotFoundError:
+                        continue
+                    if tail_snippet:
+                        logger.info(
+                            "[CodeAct] Backend fallback progress (%s): %s",
+                            log_path.name,
+                            tail_snippet,
+                        )
+            except asyncio.CancelledError:
+                pass
+
         async def _post_action(self, payload: dict, timeout: int) -> httpx.Response:
             # Determine HTTP timeout based on action type
             action = payload.get("action", {})
@@ -531,18 +787,61 @@ class OpenHandsActionServerRunner:
             command = args.get("command", "")
             blocking = bool(args.get("blocking", True))
 
-            # Edit operations (file creation/modification) need more time as they're synchronous
-            # and the action server needs to complete the operation before responding
-            if action_name in ["edit", "write", "str_replace_editor"]:
-                http_timeout_seconds = min(timeout + 10, 180)
+            # Auto-wrap commands to stream output to log file in real-time
+            if action_name == "run" and command and hasattr(self, '_current_log_path'):
+                log_realtime = str(self._current_log_path) + ".realtime"
+
+                # Check if this is a non-blocking long-running command
+                is_non_blocking = not args.get("blocking", True)
+
+                # For important long-running commands, add logging wrapper
+                if any(keyword in command for keyword in ["pip install", "npm install", "apt", "docker", "make", "wget", "curl", "git clone"]):
+                    if is_non_blocking:
+                        # For non-blocking, run in background with output to file
+                        wrapped_command = f"nohup {command} > {log_realtime} 2>&1 & echo $! > {log_realtime}.pid && echo 'Started background process PID: '$(cat {log_realtime}.pid)"
+                        args["command"] = wrapped_command
+                        action["args"] = args
+                        payload = {"action": action}
+                        logger.info(f"[CodeAct] Non-blocking execution with output to: {log_realtime}")
+                        logger.info(f"[CodeAct] Monitor with: tail -f {log_realtime}")
+                    else:
+                        # Use script command to capture all output in real-time
+                        wrapped_command = f"script -q -c '{command}' {log_realtime}"
+                        args["command"] = wrapped_command
+                        action["args"] = args
+                        payload = {"action": action}
+                        logger.info(f"[CodeAct] Real-time output capture to: {log_realtime}")
+                        logger.info(f"[CodeAct] Monitor with: tail -f {log_realtime}")
+                elif ">" not in command and "|" not in command and not is_non_blocking:
+                    # For simple blocking commands without redirection, use tee
+                    wrapped_command = f"({command}) 2>&1 | tee -a {log_realtime}"
+                    args["command"] = wrapped_command
+                    action["args"] = args
+                    payload = {"action": action}
+                    logger.info(f"[CodeAct] Output streaming to: {log_realtime}")
+
+            # Adjust HTTP timeout based on action type
+            # IMPORTANT: If server is busy with another command, we need quick timeouts for file operations
+            if action_name == "read":
+                # Read operations should be instant, use very short timeout
+                http_timeout_seconds = 10
+                logger.debug(f"[CodeAct] Read operation, using quick timeout: {http_timeout_seconds}s")
+            elif action_name in ["edit", "write", "str_replace_editor"]:
+                # File operations should be fast, but may need some processing
+                http_timeout_seconds = min(30, timeout)
+                logger.debug(f"[CodeAct] File operation {action_name}, using timeout: {http_timeout_seconds}s")
             elif action_name == "run":
-                if blocking:
-                    # Blocking commands should be allowed to run for the full timeout budget
-                    http_timeout_seconds = min(timeout + 10, 600)
+                if not blocking:
+                    # Non-blocking commands return immediately after starting
+                    http_timeout_seconds = 15
+                    logger.debug(f"[CodeAct] Non-blocking run, using quick timeout: {http_timeout_seconds}s")
                 else:
-                    http_timeout_seconds = min(timeout + 10, 45)
+                    # Blocking commands need full timeout
+                    http_timeout_seconds = min(timeout + 10, 300)
+                    logger.debug(f"[CodeAct] Blocking run, using timeout: {http_timeout_seconds}s")
             else:
                 http_timeout_seconds = min(timeout + 10, 60)
+                logger.debug(f"[CodeAct] Action {action_name}, using default timeout: {http_timeout_seconds}s")
 
             # Construct a per-phase timeout so connect/write don't inherit the full read budget
             http_timeout_seconds = max(5.0, http_timeout_seconds)

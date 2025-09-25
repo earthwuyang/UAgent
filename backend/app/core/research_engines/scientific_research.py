@@ -1454,8 +1454,18 @@ class ScientificResearchEngine:
         # Configuration
         self.max_iterations = self.config.get("max_iterations", 3)
         self.confidence_threshold = self.config.get("confidence_threshold", 0.8)
-        self.experiments_per_hypothesis = max(1, int(self.config.get("experiments_per_hypothesis", 2)))
+        # Load from environment variables with fallback to config
+        self.experiments_per_hypothesis = max(1, int(os.getenv("EXPERIMENTS_PER_HYPOTHESIS", self.config.get("experiments_per_hypothesis", 2))))
         self.max_attempts_per_experiment = max(1, int(self.config.get("max_attempts_per_experiment", 5)))
+
+        # Log the parallelism settings for debugging
+        self.logger.info(
+            "Research parallelism settings: experiments_per_hypothesis=%d, "
+            "MAX_PARALLEL_IDEAS=%s, MAX_RESEARCH_IDEAS=%s",
+            self.experiments_per_hypothesis,
+            os.getenv("MAX_PARALLEL_IDEAS", "not set"),
+            os.getenv("MAX_RESEARCH_IDEAS", "not set")
+        )
         default_resources = self.config.get("default_openhands_resources") or {}
         if not isinstance(default_resources, dict):
             default_resources = {}
@@ -1859,7 +1869,7 @@ class ScientificResearchEngine:
         prompt_used = self._format_idea_prompt(question, max_ideas)
         response = await self.llm_client.generate(
             prompt_used,
-            max_tokens=1200,
+            max_tokens=6000,  # Increased to prevent truncation of complex hypotheses
             temperature=self.config.get("idea_generation_temperature", 0.6),
         )
         return response, prompt_used, False
@@ -1936,15 +1946,20 @@ class ScientificResearchEngine:
         )
 
     def _max_parallel_ideas(self, total: int) -> int:
-        configured = int(self.config.get("max_parallel_ideas", 2))
-        return max(1, min(configured, max(1, total)))
+        # Load from environment variables with fallback to config
+        configured = int(os.getenv("MAX_PARALLEL_IDEAS", self.config.get("max_parallel_ideas", 2)))
+        result = max(1, min(configured, max(1, total)))
+        self.logger.info("Processing %d ideas with parallelism=%d (MAX_PARALLEL_IDEAS=%d)", total, result, configured)
+        return result
 
     async def _generate_research_ideas(
         self,
         research_question: str,
         session_id: Optional[str],
     ) -> List[ResearchIdea]:
-        max_ideas = int(self.config.get("max_ideas", 3))
+        # Load from environment variables with fallback to config
+        max_ideas = int(os.getenv("MAX_RESEARCH_IDEAS", self.config.get("max_ideas", 3)))
+        self.logger.info("Generating up to %d research ideas (MAX_RESEARCH_IDEAS)", max_ideas)
         await self._maybe_run_gepa(
             stage="idea_generation",
             last_reward=self._gepa_last_reward.get("idea_generation", 0.0),
@@ -2240,6 +2255,7 @@ class ScientificResearchEngine:
             iteration_results: List[ExperimentResult] = []
 
             for hypothesis in pending_hypotheses:
+                self.logger.info("Running %d experiments per hypothesis (EXPERIMENTS_PER_HYPOTHESIS)", self.experiments_per_hypothesis)
                 for exp_round in range(1, self.experiments_per_hypothesis + 1):
                     design = await self.experiment_designer.design_experiment(hypothesis)
                     idea.experiments.append(design)
@@ -2576,7 +2592,7 @@ Return JSON only.
 
         response = await self.llm_client.generate(
             evaluation_prompt,
-            max_tokens=700,
+            max_tokens=4000,  # Increased to prevent truncation of evaluation
             temperature=self.config.get("idea_evaluation_temperature", 0.3),
         )
 
@@ -3638,7 +3654,7 @@ if GEPAOptimizer is not None:
             response = asyncio.run(
                 self.llm_client.generate(
                     prompt_text,
-                    max_tokens=1200,
+                    max_tokens=6000,  # Increased to prevent truncation of complex hypotheses
                     temperature=self.temperature,
                 )
             )

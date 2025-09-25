@@ -138,10 +138,23 @@ Respond **only** with JSON using the following schema:
 Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do not include actions that clone OpenHands or unrelated repositories.
 """
 
-        response = await self._llm_client.generate(plan_prompt, max_tokens=700, temperature=0.3)
+        # Increase max_tokens to prevent truncation of plan JSON
+        response = await self._llm_client.generate(plan_prompt, max_tokens=4000, temperature=0.3)
         parsed = _safe_json_loads(response)
         if not isinstance(parsed, dict):
-            raise RuntimeError("OpenHands plan generation returned non-dict payload; refusing fallback")
+            # Try to extract JSON from potentially truncated response
+            json_match = re.search(r'\{[\s\S]*', response)
+            if json_match:
+                try:
+                    # json is already imported at the top of the file
+                    parsed = json.loads(json_match.group(0) + ']}')  # Try to close truncated JSON
+                except (json.JSONDecodeError, ValueError) as e:
+                    # Log the attempt but continue with the error
+                    import logging
+                    logging.debug(f"Failed to repair truncated JSON: {e}")
+
+            if not isinstance(parsed, dict):
+                raise RuntimeError(f"OpenHands plan generation returned non-dict payload (response length: {len(response)}); refusing fallback")
 
         steps: List[GoalPlanStep] = []
         for raw in parsed.get("steps", []) or []:
