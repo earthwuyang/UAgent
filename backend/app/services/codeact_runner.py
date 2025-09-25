@@ -477,9 +477,10 @@ class CodeActRunner:
                 # Fix pip install commands to be non-interactive and show progress
                 actual_timeout = timeout
                 if "pip install" in cmd or "pip3 install" in cmd:
-                    actual_timeout = max(timeout, 600)  # At least 10 minutes for pip installs
+                    # Use a reasonable timeout for pip installs (3 minutes max)
+                    actual_timeout = min(max(timeout, 180), 180)  # Max 3 minutes for pip installs
                     import logging
-                    logging.info(f"Using extended timeout of {actual_timeout}s for pip install command")
+                    logging.info(f"Using pip timeout of {actual_timeout}s for pip install command")
 
                     # Make pip non-interactive and show progress
                     if "--no-input" not in cmd and "-q" not in cmd:

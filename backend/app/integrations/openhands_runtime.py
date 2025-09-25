@@ -453,6 +453,54 @@ class OpenHandsActionServerRunner:
                 )
 
             observation = response.json()
+
+            # Check if the response indicates the command wasn't actually executed
+            # This can happen when the action server accepts the request but fails to execute it
+            if isinstance(observation, dict):
+                # Check for signs that the command wasn't executed
+                metadata = observation.get("metadata", {})
+                extras = observation.get("extras", {}) if isinstance(observation, dict) else {}
+                if isinstance(extras, dict) and not metadata:
+                    metadata = extras.get("metadata", {}) or {}
+                exit_code = metadata.get("exit_code")
+                if exit_code is None:
+                    exit_code = observation.get("exit_code")
+                content = observation.get("content", "")
+
+                # If we have a run command with no exit code and no content, it likely didn't execute
+                if action_name == "run" and exit_code is None and not content:
+                    logger.warning(
+                        "[CodeAct] Command appears to have not executed - no exit code or output received"
+                    )
+                    # Create an error response indicating the command didn't execute
+                    from ..core.openhands.code_executor import ExecutionResult
+                    error_msg = (
+                        "ERROR: Command was accepted by the action server but appears not to have executed.\n"
+                        "This can happen when:\n"
+                        "1. The action server is overloaded or not responding properly\n"
+                        "2. The workspace or container has issues\n"
+                        "3. The command path or environment is not set up correctly\n"
+                        "Please try the command again or check the action server status."
+                    )
+                    return OpenHandsActionResult(
+                        execution_result=ExecutionResult(
+                            success=False,
+                            exit_code=-1,
+                            stdout=error_msg,
+                            stderr="Command did not execute",
+                            execution_time=0.0,
+                            files_created=[],
+                            files_modified=[],
+                            command=payload.get("action", {}).get("args", {}).get("command", "unknown"),
+                            working_directory=str(self._workspace_path),
+                            env={},
+                        ),
+                        raw_observation=observation,
+                        stdout=error_msg,
+                        stderr="Command did not execute",
+                        server_logs="Action server accepted request but command did not execute",
+                    )
+
             stdout_text = _collect_output_text(observation, ("content", "stdout"))
             stderr_text = _collect_output_text(observation, ("stderr",)) if isinstance(observation, dict) else ""
             execution_result = self._runner._observation_to_execution_result(observation)
@@ -475,12 +523,68 @@ class OpenHandsActionServerRunner:
             )
 
         async def _post_action(self, payload: dict, timeout: int) -> httpx.Response:
-            async with httpx.AsyncClient(timeout=timeout + 10, trust_env=False) as client:
-                return await client.post(
-                    f"http://127.0.0.1:{self._port}/execute_action",
-                    json=payload,
-                    headers={"X-Session-API-Key": self._api_key},
+            # Determine HTTP timeout based on action type
+            action = payload.get("action", {})
+            action_name = action.get("action", "unknown")
+            args = action.get("args", {}) if isinstance(action.get("args"), dict) else {}
+            command = args.get("command", "")
+            blocking = bool(args.get("blocking", True))
+
+            # Edit operations (file creation/modification) need more time as they're synchronous
+            # and the action server needs to complete the operation before responding
+            if action_name in ["edit", "write", "str_replace_editor"]:
+                http_timeout_seconds = min(timeout + 10, 180)
+            elif action_name == "run":
+                if blocking:
+                    # Blocking commands should be allowed to run for the full timeout budget
+                    http_timeout_seconds = min(timeout + 10, 600)
+                else:
+                    http_timeout_seconds = min(timeout + 10, 45)
+            else:
+                http_timeout_seconds = min(timeout + 10, 60)
+
+            # Construct a per-phase timeout so connect/write don't inherit the full read budget
+            http_timeout_seconds = max(5.0, http_timeout_seconds)
+            http_timeout = httpx.Timeout(
+                connect=min(10.0, http_timeout_seconds),
+                read=http_timeout_seconds,
+                write=http_timeout_seconds,
+                pool=None,
+            )
+
+            # Special logging for problematic commands and edit actions
+            if action_name in ["edit", "write", "str_replace_editor"]:
+                logger.info(
+                    f"[CodeAct] Executing {action_name} action with action_timeout={timeout}s, http_timeout={http_timeout_seconds}s"
                 )
+            elif "pip install" in command or "npm install" in command or "apt" in command:
+                logger.info(
+                    f"[CodeAct] Executing potentially slow command: {command[:100]}... with action_timeout={timeout}s, http_timeout={http_timeout_seconds}s"
+                )
+            else:
+                logger.debug(
+                    f"[CodeAct] Sending HTTP request for action={action_name} with http_timeout={http_timeout_seconds}s"
+                )
+
+            async with httpx.AsyncClient(timeout=http_timeout, trust_env=False) as client:
+                try:
+                    response = await client.post(
+                        f"http://127.0.0.1:{self._port}/execute_action",
+                        json=payload,
+                        headers={"X-Session-API-Key": self._api_key},
+                    )
+                    # Log successful receipt of response for slow operations
+                    if action_name in ["edit", "write", "str_replace_editor"]:
+                        logger.info(f"[CodeAct] Received response for {action_name} action")
+                    elif "pip install" in command or "npm install" in command or "apt" in command:
+                        logger.info(f"[CodeAct] Received response for command: {command[:50]}...")
+                    return response
+                except httpx.TimeoutException as e:
+                    logger.error(
+                        f"[CodeAct] HTTP timeout after {http_timeout_seconds}s for action={action_name}, "
+                        f"command={command[:100] if command else 'N/A'}"
+                    )
+                    raise
 
         async def run_cmd(self, command: str, timeout: int = DEFAULT_ACTION_TIMEOUT, blocking: bool = True, cwd: str | None = None) -> 'OpenHandsActionResult':
             action = {
@@ -571,6 +675,11 @@ class OpenHandsActionServerRunner:
     ) -> 'OpenHandsActionServerRunner.Session':
         if not self._available:
             raise RuntimeError("OpenHands runtime is not available in the current environment")
+
+        # Resolve workspace path to an absolute path for the action server.
+        if not isinstance(workspace_path, Path):
+            workspace_path = Path(workspace_path)
+        workspace_path = workspace_path.resolve()
 
         # Ensure core third-party dependencies for the server are available in this Python
         port = _find_free_port()
