@@ -187,45 +187,26 @@ class OpenHandsActionServerRunner:
                     command_text = "bash -lc " + json.dumps(stripped)
                 args["command"] = command_text
 
-                # Set long-running commands to non-blocking to prevent timeouts on other operations
-                long_running_patterns = [
-                    "pip install", "pip3 install", "npm install", "yarn install",
-                    "apt-get", "apt install", "yum install", "brew install",
-                    "docker build", "docker pull", "make", "cmake",
-                    "wget", "curl -O", "git clone", "sleep"
-                ]
+                # Do NOT automatically wrap commands with nohup
+                # The LLM should generate commands with nohup if needed
+                # Just log the command for monitoring
+                if command_text:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    log_dir = "logs"
+                    log_file = f"{log_dir}/commands.log"
 
-                # Check if this is a long-running command
-                is_long_running = any(pattern in command_text for pattern in long_running_patterns)
+                    # Log the command (but don't wrap it)
+                    logger.info(f"[CodeAct] Executing command: {command_text[:100]}...")
 
-                # Override blocking setting for long-running commands
-                if is_long_running and args.get("blocking", True):
-                    logger.info(f"[CodeAct] Setting long-running command to non-blocking: {command_text[:50]}...")
-                    args["blocking"] = False
-                    # Add a follow-up check command
-                    args["thought"] = "Running in background to prevent blocking other operations"
-
-                    # Wrap command for background execution with output streaming
-                    # Create a realtime log path based on the workspace
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    safe_cmd = command_text[:30].replace("/", "_").replace(" ", "_")
-                    log_realtime = f"/workspace/logs/commands/{timestamp}_{safe_cmd}.realtime"
-
-                    # Ensure the logs directory exists
-                    wrapped_command = f"mkdir -p /workspace/logs/commands && nohup {command_text} > {log_realtime} 2>&1 & echo $! > {log_realtime}.pid && echo 'Started background process PID: '$(cat {log_realtime}.pid)"
-                    args["command"] = wrapped_command
-                    logger.info(f"[CodeAct] Wrapped for background execution. Monitor with: tail -f {log_realtime}")
-                # For blocking long-running commands, wrap with script for real-time output capture
-                elif is_long_running and args.get("blocking", True) == True:
-                    # Create a realtime log path
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    safe_cmd = command_text[:30].replace("/", "_").replace(" ", "_")
-                    log_realtime = f"/workspace/logs/commands/{timestamp}_{safe_cmd}.realtime"
-
-                    # Use script command to capture all output including progress bars
-                    wrapped_command = f"mkdir -p /workspace/logs/commands && script -q -c '{command_text}' {log_realtime}"
-                    args["command"] = wrapped_command
-                    logger.info(f"[CodeAct] Wrapped for real-time streaming. Monitor with: tail -f {log_realtime}")
+                    # Create log directory if needed and log the command
+                    try:
+                        os.makedirs(self._workspace_path / log_dir if hasattr(self, '_workspace_path') else log_dir, exist_ok=True)
+                        actual_log_path = self._workspace_path / log_file if hasattr(self, '_workspace_path') else log_file
+                        with open(actual_log_path, "a") as f:
+                            f.write(f"[{timestamp}] Command: {command_text}\n")
+                        logger.info(f"[CodeAct] Command logged to: {actual_log_path}")
+                    except Exception as e:
+                        logger.warning(f"[CodeAct] Could not log command: {e}")
 
             # Persist any rewrites made above back onto the outgoing payload
             rewritten_action = dict(action_dict)
@@ -380,7 +361,7 @@ class OpenHandsActionServerRunner:
                                     f"The command still appears to be hanging.\n"
                                     f"This might be a long-running process that needs more time.\n"
                                     f"Consider:\n"
-                                    f"1. Running in background: nohup {cmd[:100]} &\n"
+                                    f"1. Running in background using nohup command & syntax\n"
                                     f"2. Breaking into smaller steps\n"
                                     f"3. Checking if the command is correct"
                                 )
@@ -787,38 +768,12 @@ class OpenHandsActionServerRunner:
             command = args.get("command", "")
             blocking = bool(args.get("blocking", True))
 
-            # Auto-wrap commands to stream output to log file in real-time
+            # Do NOT auto-wrap commands - let the LLM decide how to run them
+            # Just log for monitoring purposes
             if action_name == "run" and command and hasattr(self, '_current_log_path'):
                 log_realtime = str(self._current_log_path) + ".realtime"
-
-                # Check if this is a non-blocking long-running command
-                is_non_blocking = not args.get("blocking", True)
-
-                # For important long-running commands, add logging wrapper
-                if any(keyword in command for keyword in ["pip install", "npm install", "apt", "docker", "make", "wget", "curl", "git clone"]):
-                    if is_non_blocking:
-                        # For non-blocking, run in background with output to file
-                        wrapped_command = f"nohup {command} > {log_realtime} 2>&1 & echo $! > {log_realtime}.pid && echo 'Started background process PID: '$(cat {log_realtime}.pid)"
-                        args["command"] = wrapped_command
-                        action["args"] = args
-                        payload = {"action": action}
-                        logger.info(f"[CodeAct] Non-blocking execution with output to: {log_realtime}")
-                        logger.info(f"[CodeAct] Monitor with: tail -f {log_realtime}")
-                    else:
-                        # Use script command to capture all output in real-time
-                        wrapped_command = f"script -q -c '{command}' {log_realtime}"
-                        args["command"] = wrapped_command
-                        action["args"] = args
-                        payload = {"action": action}
-                        logger.info(f"[CodeAct] Real-time output capture to: {log_realtime}")
-                        logger.info(f"[CodeAct] Monitor with: tail -f {log_realtime}")
-                elif ">" not in command and "|" not in command and not is_non_blocking:
-                    # For simple blocking commands without redirection, use tee
-                    wrapped_command = f"({command}) 2>&1 | tee -a {log_realtime}"
-                    args["command"] = wrapped_command
-                    action["args"] = args
-                    payload = {"action": action}
-                    logger.info(f"[CodeAct] Output streaming to: {log_realtime}")
+                logger.info(f"[CodeAct] Executing command without modification: {command[:100]}...")
+                logger.info(f"[CodeAct] Log path available at: {log_realtime}")
 
             # Adjust HTTP timeout based on action type
             # IMPORTANT: If server is busy with another command, we need quick timeouts for file operations

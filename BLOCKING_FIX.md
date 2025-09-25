@@ -45,9 +45,12 @@ For blocking long-running commands:
 ### 3. Background Execution with Logging
 Non-blocking commands are wrapped as:
 ```bash
-nohup {command} > {log}.realtime 2>&1 &
-echo $! > {log}.pid
+mkdir -p logs/commands
+nohup {command} > logs/commands/{timestamp}_{cmd}.realtime 2>&1 &
+echo $! > logs/commands/{timestamp}_{cmd}.realtime.pid
 ```
+
+**Important**: Uses relative paths (`logs/commands/`) that work inside the container, not absolute `/workspace/` paths.
 
 This ensures:
 - Command runs in background

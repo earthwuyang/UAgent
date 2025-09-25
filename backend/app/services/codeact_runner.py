@@ -429,6 +429,9 @@ class CodeActRunner:
             "You are a CodeAct agent working in a Linux workspace. "
             "Use tools to create/edit files and run bash. Ensure code is runnable and executed. "
             "When executing Python, prefer `python3 ...` from bash. "
+            "For long-running commands (pip install, npm install, docker build, etc.), use nohup and background execution: "
+            "'nohup command > output.log 2>&1 & echo $!' to run in background and get the PID. "
+            "Then check progress with 'tail -f output.log' or 'ps -p PID' to see if it's still running. "
             "If an error occurs, inspect files/logs and fix by editing. "
             "Do not fabricate or simulate results; collect real outputs by running actual commands and programs. "
             "Avoid inserting placeholder, template, or boilerplate content; write production-ready code with concrete logic and error handling. "
@@ -475,22 +478,9 @@ class CodeActRunner:
                         False,
                     )
 
-                # Fix pip install commands to be non-interactive and show progress
+                # Let the LLM control how commands are run, including pip install
+                # No automatic modifications
                 actual_timeout = timeout
-                if "pip install" in cmd or "pip3 install" in cmd:
-                    # Use a reasonable timeout for pip installs (3 minutes max)
-                    actual_timeout = min(max(timeout, 180), 180)  # Max 3 minutes for pip installs
-                    import logging
-                    logging.info(f"Using pip timeout of {actual_timeout}s for pip install command")
-
-                    # Make pip non-interactive and show progress
-                    if "--no-input" not in cmd and "-q" not in cmd:
-                        # Add flags to make pip non-interactive and verbose
-                        cmd = cmd.replace("pip install", "pip install --no-input --progress-bar on")
-                        cmd = cmd.replace("pip3 install", "pip3 install --no-input --progress-bar on")
-                        # Also set environment variable to ensure non-interactive
-                        cmd = f"export PIP_NO_INPUT=1 && {cmd}"
-                        logging.info(f"Modified pip command for non-interactive execution: {cmd[:200]}")
 
                 res = await session.run_cmd(cmd, timeout=actual_timeout, blocking=True)
                 content = self._render_action_output(res)
