@@ -64,7 +64,8 @@ class OpenHandsGoalPlanBridge:
         if getattr(client, 'action_runner', None) and client.action_runner.is_available:
             self._codeact_runner = CodeActRunner(llm_client, client.action_runner)
         self._codeact_max_steps = int(os.getenv("CODEACT_MAX_STEPS", "20"))
-        self._codeact_action_timeout = int(os.getenv("CODEACT_ACTION_TIMEOUT", "1800"))
+        # Reduce default timeout to catch hanging commands faster
+        self._codeact_action_timeout = int(os.getenv("CODEACT_ACTION_TIMEOUT", "300"))
         self._bootstrap_enabled = os.getenv("CODEACT_BOOTSTRAP_ENABLED", "true").lower() != "false"
         self._bootstrap_goal = os.getenv(
             "CODEACT_BOOTSTRAP_GOAL",

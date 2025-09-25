@@ -116,7 +116,7 @@ class OpenHandsActionServerRunner:
         def is_running(self) -> bool:
             return self._process.returncode is None
 
-        async def send_action(self, action_dict: dict, timeout: int = 300) -> 'OpenHandsActionResult':
+        async def send_action(self, action_dict: dict, timeout: int = 300, retry_with_yes: bool = True) -> 'OpenHandsActionResult':
             if not self.is_running:
                 raise RuntimeError("OpenHands action server session is not running")
             # Work on a shallow copy of the action payload so we can safely rewrite paths
@@ -195,7 +195,162 @@ class OpenHandsActionServerRunner:
                 self._workspace_path,
                 preview,
             )
-            response = await self._post_action(payload, timeout)
+
+            # Use shorter timeout for package managers to detect hanging faster
+            actual_timeout = timeout
+            if action_name == "run" and "command" in args:
+                cmd = args["command"]
+                # Check if it's a package manager command
+                package_cmds = ["apt-get", "apt ", "yum ", "dnf ", "zypper", "pacman", "emerge",
+                               "conda install", "conda update", "npm install", "yarn add", "brew install"]
+                for pkg_cmd in package_cmds:
+                    if pkg_cmd in cmd:
+                        # Use shorter timeout (30 seconds) to detect hanging quickly
+                        # unless it already has non-interactive flags
+                        if not any(flag in cmd for flag in ["-y", "--yes", "--no-input", "--noconfirm", "--non-interactive"]):
+                            actual_timeout = min(30, timeout)
+                            logger.info(f"[CodeAct] Using short timeout ({actual_timeout}s) for potentially interactive command")
+                        break
+
+            # Try the action with timeout handling
+            try:
+                response = await self._post_action(payload, actual_timeout)
+            except (httpx.TimeoutException, asyncio.TimeoutError) as timeout_exc:
+                # Check if this is a command that might be waiting for user input
+                if retry_with_yes and action_name == "run" and "command" in args:
+                    cmd = args["command"]
+                    # Check if it's a package manager command that might need -y
+                    package_managers = [
+                        ("apt-get", "-y"),
+                        ("apt", "-y"),
+                        ("yum", "-y"),
+                        ("dnf", "-y"),
+                        ("zypper", "--non-interactive"),
+                        ("pacman", "--noconfirm"),
+                        ("emerge", "--ask n"),
+                        ("conda install", "-y"),
+                        ("conda update", "-y"),
+                        ("conda upgrade", "-y"),
+                        ("pip install", "--no-input"),
+                        ("pip3 install", "--no-input"),
+                        ("npm install", "--yes"),
+                        ("yarn add", "--yes"),
+                        ("brew install", "--yes"),
+                    ]
+
+                    for pm, flag in package_managers:
+                        if pm in cmd and flag not in cmd:
+                            # Add the non-interactive flag
+                            logger.warning(
+                                f"[CodeAct] Command timeout detected for {pm}. Retrying with {flag} flag"
+                            )
+
+                            # Special handling for different package managers
+                            if "pip" in pm or "conda" in pm or "npm" in pm or "yarn" in pm or "brew" in pm:
+                                # These already have the full command pattern in pm
+                                cmd = cmd.replace(pm, f"{pm} {flag}")
+                            else:
+                                # Traditional package managers (apt, yum, etc.)
+                                # Modify the command to add the flag
+                                if f"{pm} install" in cmd:
+                                    cmd = cmd.replace(f"{pm} install", f"{pm} install {flag}")
+                                elif f"{pm} upgrade" in cmd:
+                                    cmd = cmd.replace(f"{pm} upgrade", f"{pm} upgrade {flag}")
+                                elif f"{pm} update" in cmd:
+                                    cmd = cmd.replace(f"{pm} update", f"{pm} update {flag}")
+                                elif f"{pm} remove" in cmd:
+                                    cmd = cmd.replace(f"{pm} remove", f"{pm} remove {flag}")
+                                else:
+                                    # Generic insertion after the package manager name
+                                    cmd = cmd.replace(pm, f"{pm} {flag}", 1)
+
+                            # Update the args and payload
+                            args["command"] = cmd
+                            rewritten_action["args"] = args
+                            payload = {"action": rewritten_action}
+
+                            logger.info(
+                                "[CodeAct] Retrying with non-interactive command: %s",
+                                cmd[:200]
+                            )
+
+                            # Retry with the modified command (use original timeout for retry)
+                            try:
+                                response = await self._post_action(payload, timeout)
+                            except (httpx.TimeoutException, asyncio.TimeoutError):
+                                logger.error(
+                                    "[CodeAct] Command still timed out after adding %s flag",
+                                    flag
+                                )
+                                # Return timeout error instead of raising
+                                from ..core.openhands.code_executor import ExecutionResult
+                                return OpenHandsActionResult(
+                                    execution_result=ExecutionResult(
+                                        success=False,
+                                        exit_code=-1,
+                                        stdout="",
+                                        stderr=f"Command timed out even with {flag} flag after {timeout} seconds",
+                                        execution_time=float(timeout),
+                                        files_created=[],
+                                        files_modified=[],
+                                        command=cmd[:200],
+                                        working_directory=str(self._workspace_path),
+                                        env={},
+                                    ),
+                                    raw_observation={"error": "timeout", "timeout_seconds": timeout, "retry_attempted": True},
+                                    stdout="",
+                                    stderr=f"Command timed out even with {flag} flag after {timeout} seconds",
+                                    server_logs=f"Timeout error: Command did not complete within {timeout} seconds even after adding {flag}",
+                                )
+                            break
+                    else:
+                        # Not a package manager command or already has flags
+                        logger.error(
+                            "[CodeAct] Command timeout: %s",
+                            cmd[:200] if cmd else "unknown"
+                        )
+                        # Return timeout error result
+                        from ..core.openhands.code_executor import ExecutionResult
+                        return OpenHandsActionResult(
+                            execution_result=ExecutionResult(
+                                success=False,
+                                exit_code=-1,
+                                stdout="",
+                                stderr=f"Command timed out after {actual_timeout} seconds",
+                                execution_time=float(actual_timeout),
+                                files_created=[],
+                                files_modified=[],
+                                command=cmd[:200] if cmd else "unknown",
+                                working_directory=str(self._workspace_path),
+                                env={},
+                            ),
+                            raw_observation={"error": "timeout", "timeout_seconds": actual_timeout},
+                            stdout="",
+                            stderr=f"Command timed out after {actual_timeout} seconds",
+                            server_logs=f"Timeout error: Command did not complete within {actual_timeout} seconds",
+                        )
+                else:
+                    # Return timeout error for non-command actions
+                    from ..core.openhands.code_executor import ExecutionResult
+                    return OpenHandsActionResult(
+                        execution_result=ExecutionResult(
+                            success=False,
+                            exit_code=-1,
+                            stdout="",
+                            stderr=f"Action {action_name} timed out after {actual_timeout} seconds",
+                            execution_time=float(actual_timeout),
+                            files_created=[],
+                            files_modified=[],
+                            command="",
+                            working_directory=str(self._workspace_path),
+                            env={},
+                        ),
+                        raw_observation={"error": "timeout", "timeout_seconds": actual_timeout},
+                        stdout="",
+                        stderr=f"Action {action_name} timed out after {actual_timeout} seconds",
+                        server_logs=f"Timeout error: Action did not complete within {actual_timeout} seconds",
+                    )
+
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:

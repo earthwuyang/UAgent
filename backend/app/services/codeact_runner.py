@@ -67,16 +67,32 @@ FINISH_NAME = "finish"
 
 def _parse_tool_call(content: str) -> Tuple[str, Dict[str, str]]:
     content = content.strip()
+
+    # Try to find function call pattern
     func_match = re.search(r"<function=([a-zA-Z0-9_\-]+)>(.*?)</function>", content, re.DOTALL)
     if not func_match:
-        raise ValueError("No function call found in response")
+        # Check if response was truncated (common cause of parse failure)
+        if "<function=" in content and "</function>" not in content:
+            raise ValueError(f"Function call appears truncated (missing </function> tag). Response length: {len(content)}")
+        elif "<function=" in content:
+            raise ValueError(f"Malformed function call syntax in response")
+        else:
+            raise ValueError(f"No function call found in response (expected <function=...> format)")
+
     func_name = func_match.group(1).strip()
     inner = func_match.group(2)
     params = {}
+
+    # Parse parameters with better error handling
     for m in re.finditer(r"<parameter=([a-zA-Z0-9_\-]+)>(.*?)</parameter>", inner, re.DOTALL):
         key = m.group(1).strip()
         val = m.group(2).strip()
         params[key] = val
+
+    # Log parsing success for debugging
+    import logging
+    logging.debug(f"Successfully parsed tool call: {func_name} with {len(params)} parameters")
+
     return func_name, params
 
 
@@ -204,16 +220,23 @@ class CodeActRunner:
                         await progress_cb("planning", {"step": step_idx, "goal": goal})
                     except Exception:
                         pass
-                raw = await self.llm.generate(prompt, max_tokens=800, temperature=0.2)
+                # Increase max_tokens to ensure complete tool call generation
+                raw = await self.llm.generate(prompt, max_tokens=1500, temperature=0.2)
                 try:
                     func, params = _parse_tool_call(str(raw))
-                except Exception:
-                    # Ask again with stricter instruction
+                except Exception as e1:
+                    # Log first parsing failure for debugging
+                    import logging
+                    logging.warning(f"First parse attempt failed: {e1}. Raw response length: {len(str(raw))}")
+
+                    # Ask again with stricter instruction and more tokens
                     strict_prompt = prompt + "\nRespond with exactly one tool call as specified."
-                    raw = await self.llm.generate(strict_prompt, max_tokens=600, temperature=0.1)
+                    raw = await self.llm.generate(strict_prompt, max_tokens=1200, temperature=0.1)
                     try:
                         func, params = _parse_tool_call(str(raw))
-                    except Exception:
+                    except Exception as e2:
+                        # Log second parsing failure
+                        logging.error(f"Second parse attempt also failed: {e2}. Falling back to plain response.")
                         message = await self._fallback_plain_response(goal, transcript, raw)
                         fallback_step = CodeActStep(
                             thought="fallback_final",
@@ -410,7 +433,9 @@ class CodeActRunner:
             f"{instructions}\n\nGoal:\n{goal}\n\n"
             f"Recent transcript:\n{history}\n\n"
             f"Tools:\n{TOOL_SPEC}\n\n"
-            "Respond with exactly one tool call."
+            "IMPORTANT: Respond with EXACTLY ONE tool call using the XML format shown above.\n"
+            "Your ENTIRE response must be a single tool call, starting with <function= and ending with </function>.\n"
+            "Do NOT include any explanatory text before or after the tool call."
         )
 
     def _build_fallback_prompt(self, goal: str, transcript: List[str]) -> str:
@@ -443,7 +468,24 @@ class CodeActRunner:
                         "Operate within the current workspace and implement the task logic instead.",
                         False,
                     )
-                res = await session.run_cmd(cmd, timeout=timeout, blocking=True)
+
+                # Fix pip install commands to be non-interactive and show progress
+                actual_timeout = timeout
+                if "pip install" in cmd or "pip3 install" in cmd:
+                    actual_timeout = max(timeout, 600)  # At least 10 minutes for pip installs
+                    import logging
+                    logging.info(f"Using extended timeout of {actual_timeout}s for pip install command")
+
+                    # Make pip non-interactive and show progress
+                    if "--no-input" not in cmd and "-q" not in cmd:
+                        # Add flags to make pip non-interactive and verbose
+                        cmd = cmd.replace("pip install", "pip install --no-input --progress-bar on")
+                        cmd = cmd.replace("pip3 install", "pip3 install --no-input --progress-bar on")
+                        # Also set environment variable to ensure non-interactive
+                        cmd = f"export PIP_NO_INPUT=1 && {cmd}"
+                        logging.info(f"Modified pip command for non-interactive execution: {cmd[:200]}")
+
+                res = await session.run_cmd(cmd, timeout=actual_timeout, blocking=True)
                 content = self._render_action_output(res)
                 return content, res.execution_result.success
 
