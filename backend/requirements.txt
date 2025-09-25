@@ -1,45 +1,124 @@
+# Core dependencies
 fastapi==0.115.2
 uvicorn[standard]==0.30.1
 pydantic>=2.11.3,<3.0.0
 sqlalchemy==2.0.23
 alembic==1.12.1
 asyncpg==0.29.0
-redis==5.2.1
+redis>=5.2,<7.0
 aiofiles==23.2.1
-httpx==0.27.2
+httpx>=0.27.0,<1.0.0
+httpx-aiohttp>=0.1.8
 jsonschema==4.23.0
-websockets==12.0
+websockets>=10.4
 python-socketio[asyncio_client]==5.11.4
-litellm==1.74.3
+sse-starlette==3.0.2
+
+# LLM and AI
+litellm>=1.74.3,!=1.64.4,!=1.67.*
+openai==1.99.9
+anthropic[vertex]
+google-genai
+dashscope==1.17.0
 openhands-aci==0.3.2
-python-multipart==0.0.6
+
+# Authentication and Security
 python-jose[cryptography]==3.3.0
 bcrypt==4.0.1
-openai>=1.68.2
-anthropic==0.30.0
+pyjwt>=2.9.0
+
+# HTTP and APIs
 requests>=2.32.3
+aiohttp>=3.9.0,!=3.11.13
+# starlette version is pinned by fastapi, don't override
+urllib3>=2.5.0
+
+# Web scraping and browsing
 beautifulsoup4>=4.12.3
 playwright==1.40.0
+browsergym-core==0.13.3
+html2text
+
+# Git and version control
 gitpython==3.1.40
-pytest==7.4.3
-pytest-asyncio==0.21.1
-pytest-cov==4.1.0
-mypy==1.7.0
-ruff==0.1.5
-black==23.10.1
-dashscope==1.17.0
-python-dotenv==1.0.1
+pygithub>=2.5.0
+
+# Data processing
 numpy>=1.26,<3
 pandas>=2.1
 dspy-ai>=2.6.0
 gepa>=0.0.12
 dspy
 agentvectordb
-python-json-logger
-termcolor
-toml
-google-cloud-storage 
-google-api-core 
-google-auth 
+
+# Google Cloud and AWS
+google-cloud-storage
+google-cloud-aiplatform
+google-api-core
+google-api-python-client>=2.164.0
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
 google-resumable-media
 boto3
+kubernetes>=33.1.0
+
+# Utilities
+python-json-logger>=3.2.1
+termcolor
+toml
+types-toml
+python-multipart>=0.0.9
+python-dotenv>=1.0.0
+json-repair
+deprecated
+pexpect
+jinja2>=3.1.3
+tenacity>=8.5,<10.0
+zope-interface==7.2
+pathspec>=0.12.1
+dirhash
+tornado
+rapidfuzz>=3.9.0
+whatthepatch>=1.0.6
+protobuf>=5.0.0,<6.0.0
+libtmux>=0.37,<0.40
+joblib
+psutil
+prompt-toolkit>=3.0.50
+poetry>=2.1.2
+anyio==4.9.0
+pythonnet
+fastmcp>=2.5.2
+python-frontmatter>=1.1.0
+shellingham>=1.5.4
+bashlex>=0.18
+
+# Jupyter and notebooks
+ipywidgets>=8.1.5
+qtconsole>=5.6.1
+jupyter_kernel_gateway
+
+# Document processing
+PyPDF2
+pypdf>=6.0.0
+python-pptx
+pylatexenc
+python-docx
+pillow>=11.3.0
+
+# Monitoring and observability
+opentelemetry-api>=1.33.1
+opentelemetry-exporter-otlp-proto-grpc>=1.33.1
+memory-profiler>=0.61.0
+
+# Development and testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+mypy==1.7.0
+ruff==0.1.5
+black==23.10.1
+
+# PyYAML
+pyyaml>=6.0.2
