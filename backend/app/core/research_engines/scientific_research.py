@@ -23,6 +23,9 @@ from ...integrations.openhands_bridge import (
     GoalPlan,
     GoalPlanStep,
 )
+from ...integrations.openhands_bridge import OpenHandsBridgeV2
+from ...integrations.openhands_runtime import OpenHandsClientV2
+from ...services.codeact_runner import CodeActRunnerV2
 from ...utils.json_utils import (
     JsonParseError,
     safe_json_loads,
@@ -2466,11 +2469,32 @@ class ScientificResearchEngine:
                                 progress_point,
                             )
 
-                        goal_plan = await self.goal_bridge.execute_goal_plan(
-                            goal_plan,
-                            plan_context,
-                            progress_callback=_plan_callback,
-                        )
+                        # Default to v2 bootstrap and plan execution when a workspace is available
+                        try:
+                            ws_path = self.openhands_client.workspace_manager.get_workspace_path(openhands_context.workspace_id)  # type: ignore[attr-defined]
+                            if ws_path:
+                                allowed_roots = [ws_path / "code", ws_path / "experiments", ws_path / "logs", ws_path / "output", ws_path / "workspace"]
+                                v2_client = OpenHandsClientV2(workspace_path=ws_path, allowed_write_roots=allowed_roots)
+                                try:
+                                    v2_runner = CodeActRunnerV2(v2_client, ws_path)
+                                    await v2_runner.ensure_bootstrap()
+                                    # Execute an empty v2 plan to establish deterministic environment; retain legacy plan for complex flows
+                                    v2_bridge = OpenHandsBridgeV2(v2_runner)
+                                    try:
+                                        await v2_bridge.execute_steps({"steps": []}, {"workspace_dir": str(ws_path)}, progress_cb=None)
+                                    except Exception:
+                                        pass
+                                finally:
+                                    # Ensure persistent session is torn down after bootstrap
+                                    try:
+                                        await v2_client.close()
+                                    except Exception:
+                                        pass
+                        except Exception as _exc:
+                            self.logger.debug("V2 bootstrap skipped: %s", _exc)
+
+                        # Use legacy execution for full CodeAct planning/execution compatibility
+                        goal_plan = await self.goal_bridge.execute_goal_plan(goal_plan, plan_context, progress_callback=_plan_callback)
 
                     final_execution, execution_history = await self._execute_experiment_with_retries(
                         idea,

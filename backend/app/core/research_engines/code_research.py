@@ -856,10 +856,27 @@ class CodeResearchEngine:
                             parent_phase="synthesizing_guidance",
                         )
                         from ...services.codeact_runner import CodeActRunner  # lazy import
+                        from ...integrations.openhands_runtime import OpenHandsClientV2
+                        from ...services.codeact_runner import CodeActRunnerV2
                         goal = (
                             "Create a Python file at code/integration_demo.py that prints 'Integration demo OK' and then run it "
                             "using bash. If it fails, inspect files and fix. Finish when the output is correct."
                         )
+                        # Ensure deterministic bootstrap via v2 (idempotent)
+                        try:
+                            allowed_roots = [workspace_path / "code", workspace_path / "experiments", workspace_path / "logs", workspace_path / "output", workspace_path / "workspace"]
+                            v2_client = OpenHandsClientV2(workspace_path=workspace_path, allowed_write_roots=allowed_roots)
+                            try:
+                                v2_runner = CodeActRunnerV2(v2_client, workspace_path)
+                                await v2_runner.ensure_bootstrap()
+                            finally:
+                                try:
+                                    await v2_client.close()
+                                except Exception:
+                                    pass
+                        except Exception as exc:
+                            self.logger.debug("V2 bootstrap skipped in code engine: %s", exc)
+
                         runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
                         async def _cb(event: str, data: Dict[str, Any]):
                             try:

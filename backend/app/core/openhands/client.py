@@ -235,6 +235,23 @@ class OpenHandsClient:
             workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
             if request.execute_immediately and workspace_path and self.action_runner.is_available and llm_client is not None:
                 try:
+                    # Ensure deterministic bootstrap via v2 before CodeAct planning
+                    try:
+                        from ...integrations.openhands_runtime import OpenHandsClientV2  # type: ignore
+                        from ...services.codeact_runner import CodeActRunnerV2  # type: ignore
+                        allowed_roots = [workspace_path / "code", workspace_path / "experiments", workspace_path / "logs", workspace_path / "output", workspace_path / "workspace"]
+                        v2_client = OpenHandsClientV2(workspace_path=workspace_path, allowed_write_roots=allowed_roots)
+                        try:
+                            v2_runner = CodeActRunnerV2(v2_client, workspace_path)
+                            await v2_runner.ensure_bootstrap()
+                        finally:
+                            try:
+                                await v2_client.close()
+                            except Exception:
+                                pass
+                    except Exception as exc:
+                        logger.debug("V2 bootstrap skipped in OpenHandsClient: %s", exc)
+
                     from ...services.codeact_runner import CodeActRunner  # type: ignore
                     runner = CodeActRunner(llm_client, self.action_runner)
                     goal = (

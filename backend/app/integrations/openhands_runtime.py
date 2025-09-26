@@ -15,11 +15,13 @@ import time
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import httpx
 
 from .stream_monitor import CommandStreamMonitor
+from .openhands.types import ActionResult, ActionError
+
 
 # Read default timeout from environment variable (default: 120 seconds = 2 minutes)
 DEFAULT_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_TIMEOUT", "120"))
@@ -1143,3 +1145,156 @@ class OpenHandsActionServerRunner:
             return await session.ipython_run(code, timeout=timeout)
         finally:
             await session.close()
+
+
+class OpenHandsClientV2:
+    """Typed, idempotent client built on top of OpenHandsActionServerRunner.
+
+    This wrapper enforces allowed-write roots, provides idempotent file ops, and
+    uses the runner's job service for long-running execute_bash commands.
+    """
+
+    def __init__(self, workspace_path: Path, allowed_write_roots: list[Path]):
+        self._runner = OpenHandsActionServerRunner()
+        self._workspace = workspace_path.resolve()
+        self._allowed_roots = [p.resolve() for p in allowed_write_roots] or [self._workspace]
+        # Widen allowed roots to all workspaces under uagent-workspace or uagent_workspace if present
+        for parent in (self._workspace.parent, self._workspace.parent.parent):
+            try:
+                if parent and parent.name in ("uagent-workspace", "uagent_workspace"):
+                    if parent.resolve() not in self._allowed_roots:
+                        self._allowed_roots.append(parent.resolve())
+            except Exception:
+                pass
+        (self._workspace / "logs").mkdir(parents=True, exist_ok=True)
+        self._trace_path = self._workspace / "logs" / "openhands_trace.jsonl"
+        # Persistent session per-workspace
+        self._session: Optional[OpenHandsActionServerRunner.Session] = None
+        self._session_lock = asyncio.Lock()
+
+    # -------------------- helpers --------------------
+    def _log(self, rec: dict) -> None:
+        try:
+            import json, time
+            rec = dict(rec)
+            rec.setdefault("ts", time.time())
+            with self._trace_path.open("a", encoding="utf-8") as fp:
+                fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _resolve(self, path: str) -> Path:
+        p = Path(path)
+        if not p.is_absolute():
+            p = (self._workspace / p).resolve()
+        return p
+
+    def _allowed(self, path: str) -> bool:
+        rp = self._resolve(path)
+        return any(str(rp).startswith(str(root)) for root in self._allowed_roots)
+
+    async def _ensure_session(self) -> 'OpenHandsActionServerRunner.Session':
+        """Ensure a single long-lived action server session for this workspace.
+
+        This prevents server thrashing (start/stop per action) and keeps job ids
+        stable across start_job/poll_job/wait_job.
+        """
+        async with self._session_lock:
+            if self._session is not None and getattr(self._session, "is_running", False):
+                return self._session
+            # Open a fresh session and keep it
+            self._session = await self._runner.open_session(self._workspace)
+            return self._session
+
+    async def close(self) -> None:
+        async with self._session_lock:
+            if self._session is not None:
+                try:
+                    await self._session.close()
+                finally:
+                    self._session = None
+
+    # -------------------- file API --------------------
+    async def create_if_absent(self, path: str, content: str, timeout_sec: int = 60) -> ActionResult:
+        if not self._allowed(path):
+            return ActionResult(id="create_if_absent", tool="write", success=False, exit_code=None, duration_ms=0,
+                                error=ActionError("PATH_DENIED", f"{path} outside allowed roots"))
+        p = self._resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists():
+            return ActionResult(id="create_if_absent", tool="write", success=True, exit_code=0, duration_ms=1, stdout="exists")
+
+        session = await self._ensure_session()
+        res = await session.file_edit(str(p), "create", file_text=content, timeout=max(1, timeout_sec))
+        ok = res.execution_result.success
+        out = res.stdout or ""
+        err = res.stderr or ""
+        return ActionResult(id="create_if_absent", tool="write", success=ok, exit_code=res.execution_result.exit_code,
+                            duration_ms=int(res.execution_result.execution_time * 1000) if hasattr(res.execution_result, 'execution_time') else 0,
+                            stdout=out, stderr=err,
+                            error=None if ok else ActionError("SERVER_ERROR", err or "create failed"))
+
+    async def write(self, path: str, content: str, overwrite: bool = True, timeout_sec: int = 60) -> ActionResult:
+        if not self._allowed(path):
+            return ActionResult(id="write", tool="write", success=False, exit_code=None, duration_ms=0,
+                                error=ActionError("PATH_DENIED", f"{path} outside allowed roots"))
+        p = self._resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and not overwrite:
+            return ActionResult(id="write", tool="write", success=False, exit_code=1, duration_ms=1,
+                                error=ActionError("CLIENT_ERROR", "file exists and overwrite=false"))
+        session = await self._ensure_session()
+        res = await session.file_write(str(p), content, timeout=max(1, timeout_sec))
+        ok = res.execution_result.success
+        out = res.stdout or ""
+        err = res.stderr or ""
+        return ActionResult(id="write", tool="write", success=ok, exit_code=res.execution_result.exit_code,
+                            duration_ms=int(res.execution_result.execution_time * 1000) if hasattr(res.execution_result, 'execution_time') else 0,
+                            stdout=out, stderr=err,
+                            error=None if ok else ActionError("SERVER_ERROR", err or "write failed"))
+
+    async def read(self, path: str, timeout_sec: int = 60) -> ActionResult:
+        # Allow reads anywhere under workspace
+        p = self._resolve(path)
+        session = await self._ensure_session()
+        res = await session.file_read(str(p), timeout=max(1, timeout_sec))
+        ok = res.execution_result.success
+        out = res.stdout or res.server_logs or ""
+        err = res.stderr or ""
+        return ActionResult(id="read", tool="read", success=ok, exit_code=res.execution_result.exit_code,
+                            duration_ms=int(res.execution_result.execution_time * 1000) if hasattr(res.execution_result, 'execution_time') else 0,
+                            stdout=out, stderr=err,
+                            error=None if ok else ActionError("SERVER_ERROR", err or "read failed"))
+
+    # -------------------- jobs for run --------------------
+    async def start_job(self, cmd: str, timeout_sec: int = 300, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> str:
+        session = await self._ensure_session()
+        payload_cmd = cmd if not cwd else f"cd {cwd} && {cmd}"
+        submit = await session.jobs_submit(payload_cmd, mode="auto", short_timeout_s=min(8.0, max(1.0, timeout_sec/10)), cwd=cwd, env=env)
+        job_id = submit.get("id") or submit.get("job_id")
+        return str(job_id)
+
+    async def poll_job(self, job_id: str) -> Dict[str, Any]:
+        session = await self._ensure_session()
+        status = await session.jobs_status(job_id, include_tail=True)
+        state = status.get("state") or status.get("status")
+        return {"status": state, "exit_code": status.get("exit_code"), "tail": status.get("tail", "")}
+
+    async def wait_job(self, job_id: str, max_wait_sec: int = 3600) -> ActionResult:
+        import time as _t
+        start = _t.time()
+        exit_code = None
+        tail = ""
+        while _t.time() - start < max_wait_sec:
+            st = await self.poll_job(job_id)
+            state = (st.get("status") or "").upper()
+            tail = st.get("tail", tail)
+            if state in ("SUCCEEDED", "FAILED", "CANCELED"):
+                exit_code = st.get("exit_code")
+                success = (state == "SUCCEEDED") or (exit_code == 0)
+                return ActionResult(id=job_id, tool="run", success=bool(success), exit_code=exit_code,
+                                    duration_ms=int((_t.time()-start)*1000), stdout=tail, stderr=None,
+                                    error=None if success else ActionError("SERVER_ERROR", f"job state {state}"))
+            await asyncio.sleep(2.0)
+        return ActionResult(id=job_id, tool="run", success=False, exit_code=None, duration_ms=int((_t.time()-start)*1000),
+                            stdout=tail, error=ActionError("TIMEOUT","job wait timeout"))

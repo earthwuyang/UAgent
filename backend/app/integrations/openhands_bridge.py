@@ -186,6 +186,179 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
         execution_context: Dict[str, Any],
         progress_callback: Optional[ProgressCallback] = None,
     ) -> GoalPlan:
+        """Execute a GoalPlan using the legacy CodeAct runner.
+
+        Mirrors the semantics used by the v2 bridge so scientific_research
+        can rely on a stable API. Requires OpenHands runtime to be available.
+        """
+        # Use a stable session id for the plan
+        session_id = execution_context.get("session_id") or f"experiment_{plan.plan_id}"
+
+        session_config = await self._client.ensure_session(
+            research_type="scientific_research",
+            session_id=session_id,
+            config=self._sanitize_workspace_config(execution_context.get("resource_requirements")),
+        )
+
+        # Optional bootstrap with CodeAct if runner is available
+        if (
+            self._bootstrap_enabled
+            and execution_context.get("bootstrap_environment", True)
+            and self._codeact_runner is not None
+        ):
+            workspace_path = self._client.workspace_manager.get_workspace_path(
+                session_config.workspace_config.get("workspace_id")
+            ) if session_config.workspace_config else None
+            if workspace_path:
+                async def _bootstrap_cb(event: str, data: Dict[str, Any]):
+                    if progress_callback:
+                        await progress_callback(
+                            "bootstrap_event",
+                            {"event": event, "data": data},
+                        )
+                if progress_callback:
+                    await progress_callback(
+                        "bootstrap_start",
+                        {"goal": plan.goal, "workspace": str(workspace_path)},
+                    )
+                bootstrap_result = await self._codeact_runner.run(
+                    workspace_path=workspace_path,
+                    goal=self._bootstrap_goal,
+                    max_steps=self._codeact_max_steps,
+                    timeout_per_action=self._codeact_action_timeout,
+                    progress_cb=_bootstrap_cb,
+                )
+                if progress_callback:
+                    await progress_callback(
+                        "bootstrap_complete",
+                        {"success": bool(bootstrap_result.get("success"))},
+                    )
+
+        # Execute each step with CodeAct
+        for step in plan.steps:
+            step.status = "running"
+            if progress_callback:
+                await progress_callback(
+                    "step_started",
+                    {"step_id": step.id, "description": step.description},
+                )
+
+            workspace_path = self._client.workspace_manager.get_workspace_path(
+                session_config.workspace_config.get("workspace_id")
+            ) if session_config.workspace_config else None
+
+            step_stdout = ""
+            step_stderr = ""
+            step_success = False
+
+            if self._codeact_runner and workspace_path:
+                async def _cb(event: str, data: Dict[str, Any]):
+                    if progress_callback:
+                        await progress_callback(
+                            "codeact_event",
+                            {"step_id": step.id, "event": event, "data": data},
+                        )
+
+                goal_text = (
+                    f"Complete the following plan step as part of the research goal:\n"
+                    f"Goal: {plan.goal}\n"
+                    f"Step description: {step.description}\n"
+                    f"Expected output: {step.expected_output}\n"
+                    "Do not run `apt-get`, `sudo`, or other system package managers. "
+                    "Work strictly within the existing Python environment and workspace. "
+                    "Prefer relative paths under the workspace. Combine multiple shell commands in a single bash -lc if needed."
+                )
+
+                result = await self._codeact_runner.run(
+                    workspace_path=workspace_path,
+                    goal=goal_text,
+                    max_steps=self._codeact_max_steps,
+                    timeout_per_action=self._codeact_action_timeout,
+                    progress_cb=_cb,
+                )
+
+                step_success = bool(result.get("success"))
+                step.status = "completed" if step_success else "failed"
+                step.notes.append(str(result))
+                if isinstance(result, dict):
+                    steps_log = result.get("steps") or []
+                    if steps_log:
+                        last_obs = steps_log[-1].get("observation") if isinstance(steps_log[-1], dict) else ""
+                        step_stdout = last_obs or ""
+                    if not step_success:
+                        step_stderr = result.get("error", "") or ""
+            else:
+                step.status = "failed"
+                step_stderr = "CodeAct runtime or workspace not available"
+                step.notes.append(step_stderr)
+
+            if progress_callback:
+                await progress_callback(
+                    "step_completed",
+                    {
+                        "step_id": step.id,
+                        "status": step.status,
+                        "stdout": step_stdout,
+                        "stderr": step_stderr,
+                    },
+                )
+            if not step_success:
+                break
+
+        return plan
+
+
+class OpenHandsBridgeV2:
+    """Minimal plan executor using CodeActRunnerV2.
+
+    Steps schema example:
+      {"steps": [
+         {"kind":"create_if_absent","path":"code/a.py","content":"print('hi')"},
+         {"kind":"run","cmd":"./.venv/bin/python code/a.py"}
+      ]}
+    """
+
+    def __init__(self, runner):
+        self.runner = runner
+
+    async def execute_steps(self, goal_plan: dict, plan_context: dict, progress_cb=None) -> dict:
+        await self.runner.ensure_bootstrap()
+        steps = list(goal_plan.get("steps", []))
+        results = []
+        for idx, step in enumerate(steps):
+            kind = step.get("kind")
+            if progress_cb:
+                try:
+                    await progress_cb({"phase":"begin_step","index":idx,"kind":kind})
+                except Exception:
+                    pass
+            if kind == "create_if_absent":
+                r = await self.runner.create_if_absent(step["path"], step.get("content", ""))
+            elif kind == "write":
+                r = await self.runner.write(step["path"], step.get("content", ""), overwrite=step.get("overwrite", True))
+            elif kind == "read":
+                r = await self.runner.read(step["path"]) 
+            elif kind == "run":
+                r = await self.runner.run(step["cmd"], timeout_sec=step.get("timeout_sec", 300))
+            else:
+                r = {"success": False, "error": {"type": "CLIENT_ERROR", "message": f"unknown step kind: {kind}"}}
+            ok = r.success if hasattr(r, "success") else r.get("success")
+            results.append({"index": idx, "ok": ok, "result": r.__dict__ if hasattr(r, "__dict__") else r})
+            if progress_cb:
+                try:
+                    await progress_cb({"phase":"end_step","index":idx,"ok":bool(ok)})
+                except Exception:
+                    pass
+            if not ok and step.get("required", True):
+                break
+        return {"results": results}
+
+    async def execute_goal_plan(
+        self,
+        plan: GoalPlan,
+        execution_context: Dict[str, Any],
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> GoalPlan:
         """Execute goal plan steps using OpenHands CodeAct code generation."""
 
         # Use the session ID from execution context if available, otherwise create unified ID
