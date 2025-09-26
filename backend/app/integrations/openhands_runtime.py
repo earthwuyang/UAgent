@@ -152,7 +152,7 @@ class OpenHandsActionServerRunner:
                 return str((self._workspace_path / normalized).resolve())
                 return path_value
 
-            if action_name in {"read", "write", "edit"}:
+            if action_name in {"read", "write", "edit", "str_replace_editor"}:
                 path_value = args.get("path")
                 remapped = _remap_path(path_value)
                 if remapped:
@@ -171,6 +171,14 @@ class OpenHandsActionServerRunner:
                             "hidden": False,
                         }
                         action_name = "run"
+                # Ensure parent directory exists for file operations
+                try:
+                    p = args.get("path")
+                    if isinstance(p, str):
+                        Path(p).parent.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+
                 if action_name == "write" and "start" not in args:
                     args.setdefault("start", 1)
                     args.setdefault("end", -1)
@@ -369,6 +377,29 @@ class OpenHandsActionServerRunner:
                         )
                         return await self._execute_with_backend_fallback(cmd or "", actual_timeout, attempts=1)
                 else:
+                    # For non-run actions (file ops), attempt backend fallback write first
+                    if action_name in ("edit", "write", "str_replace_editor"):
+                        try:
+                            target = args.get("path")
+                            content = args.get("file_text") or args.get("content") or ""
+                            if isinstance(target, str):
+                                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                                if content:
+                                    heredoc = (
+                                        f"mkdir -p $(dirname {shlex.quote(target)}) && "
+                                        f"cat > {shlex.quote(target)} <<'__UAGENT_EOF__'\n{content}\n__UAGENT_EOF__\n"
+                                    )
+                                    return await self.run_cmd(heredoc, timeout=60, blocking=True)
+                                old = args.get("old_str"); new = args.get("new_str")
+                                if isinstance(old, str) and isinstance(new, str) and os.path.exists(target):
+                                    try:
+                                        txt = Path(target).read_text(encoding="utf-8", errors="ignore")
+                                        Path(target).write_text(txt.replace(old, new), encoding="utf-8")
+                                        return await self.run_cmd(f"stat -c '%s %n' {shlex.quote(target)}", timeout=30, blocking=True)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                     # Return timeout error for non-command actions
                     from ..core.openhands.code_executor import ExecutionResult
                     return OpenHandsActionResult(
@@ -698,8 +729,8 @@ class OpenHandsActionServerRunner:
                 http_timeout_seconds = 10
                 logger.debug(f"[CodeAct] Read operation, using quick timeout: {http_timeout_seconds}s")
             elif action_name in ["edit", "write", "str_replace_editor"]:
-                # File operations should be fast, but may need some processing
-                http_timeout_seconds = min(30, timeout)
+                # File operations should be fast; allow up to 90s then fall back
+                http_timeout_seconds = min(90, timeout)
                 logger.debug(f"[CodeAct] File operation {action_name}, using timeout: {http_timeout_seconds}s")
             elif action_name == "run":
                 if not blocking:
@@ -920,6 +951,31 @@ class OpenHandsActionServerRunner:
                 env["SANDBOX_VOLUMES"] = f"{workspace_mount},{sandbox_volumes}"
         else:
             env["SANDBOX_VOLUMES"] = workspace_mount
+
+        # Widen allowed write roots inside the action server to common workspace paths
+        allowed_roots = [
+            "/workspace",
+            "/workspace/code",
+            "/workspace/experiments",
+            "/workspace/workspace",
+            "/workspace/logs",
+            "/workspace/output",
+        ]
+        existing_allowed = env.get("OPENHANDS_ALLOWED_WRITE_DIRS", "")
+        if existing_allowed:
+            # Merge, deduplicate
+            merged = existing_allowed.split(":") + allowed_roots
+            env["OPENHANDS_ALLOWED_WRITE_DIRS"] = ":".join(sorted(set(filter(None, merged))))
+        else:
+            env["OPENHANDS_ALLOWED_WRITE_DIRS"] = ":".join(allowed_roots)
+
+        # Also advertise host-side common prefixes (best-effort; respected only if server supports it)
+        host_prefixes = []
+        for parent in (workspace_path.parent, workspace_path.parent.parent):
+            if parent and parent.name in ("uagent-workspace", "uagent_workspace"):
+                host_prefixes.append(str(parent))
+        if host_prefixes:
+            env["OPENHANDS_ALLOWED_PATH_PREFIXES"] = ":".join(host_prefixes)
         try:
             env["SANDBOX_USER_ID"] = str(os.getuid())
         except AttributeError:
@@ -1041,6 +1097,16 @@ class OpenHandsActionServerRunner:
                 exit_code = 0
             elif isinstance(output, str) and output.strip() and action_name in {"list", "read"}:
                 exit_code = 0
+            # Heuristic: treat file edit/write messages as success even if exit_code missing
+            elif action_name in {"edit", "write"} and isinstance(output, str):
+                low = output.lower()
+                if (
+                    "file created successfully" in low
+                    or "has been edited" in low
+                    or "file edited successfully" in low
+                    or "created at:" in low
+                ):
+                    exit_code = 0
 
         return ExecutionResult(
             success=exit_code == 0,

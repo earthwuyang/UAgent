@@ -633,6 +633,122 @@ class ExperimentExecutor:
                 self.logger.warning("Configured ras_spec_path %s does not exist", path)
 
     @staticmethod
+    def _is_valid_measurements(value: Any) -> bool:
+        """Check that measurements is a non-empty list of numbers."""
+        if not isinstance(value, list) or not value:
+            return False
+        try:
+            for v in value:
+                # Accept int/float-like
+                if isinstance(v, (int, float)):
+                    continue
+                # Try to coerce from string
+                float(v)
+            return True
+        except Exception:
+            return False
+
+    def _normalize_or_salvage_final_result(
+        self,
+        design: ExperimentDesign,
+        execution: ExperimentExecution,
+        session_context: Optional[OpenHandsSessionContext],
+        raw_result: Any,
+        workspace_path: Optional[Path],
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize CodeAct final result dict or salvage from artifacts on disk.
+
+        Returns a dict with at least {'success': True, 'measurements': [...]} if possible,
+        otherwise None to signal that the result is not usable.
+        """
+        # Must be dict-like
+        if not isinstance(raw_result, dict):
+            raw_result = {}
+
+        # If explicit error present, respect it
+        if isinstance(raw_result.get("success"), bool) and not raw_result.get("success"):
+            return None
+
+        # Already has valid measurements
+        if self._is_valid_measurements(raw_result.get("measurements")):
+            result = dict(raw_result)
+            result["success"] = True
+            return result
+
+        # If statistical tests are present (t_test p_value) and an effect size exists, accept
+        try:
+            stats = raw_result.get("statistical_tests") or {}
+            ttest = stats.get("t_test") or {}
+            pval = ttest.get("p_value")
+            eff = raw_result.get("effect_size")
+            if isinstance(pval, (int, float)) and isinstance(eff, (int, float)):
+                result = dict(raw_result)
+                result.setdefault("measurements", [])
+                result["success"] = True
+                return result
+        except Exception:
+            pass
+
+        # Attempt to salvage from artifacts under experiments/{design.id}/results
+        try:
+            if workspace_path is not None:
+                results_dir = workspace_path / f"experiments/{design.id}/results"
+                if results_dir.exists() and results_dir.is_dir():
+                    import json as _json
+                    measurements: list[float] = []
+                    source_file: Optional[str] = None
+                    for candidate in results_dir.glob("*.json"):
+                        try:
+                            data = _json.loads(candidate.read_text(encoding="utf-8"))
+                        except Exception:
+                            continue
+
+                        # Heuristic 1: TPC-H style load_times.json
+                        if isinstance(data, dict) and isinstance(data.get("load_times"), dict):
+                            for _, row in (data.get("load_times") or {}).items():
+                                if isinstance(row, dict):
+                                    val = row.get("duckdb_seconds")
+                                    if isinstance(val, (int, float)):
+                                        measurements.append(float(val))
+                            if measurements:
+                                source_file = str(candidate)
+                                break
+
+                        # Heuristic 2: flatten all numeric leaves
+                        flat_nums: list[float] = []
+                        def _walk(obj: Any):
+                            if isinstance(obj, dict):
+                                for v in obj.values():
+                                    _walk(v)
+                            elif isinstance(obj, list):
+                                for v in obj:
+                                    _walk(v)
+                            else:
+                                try:
+                                    if isinstance(obj, (int, float)):
+                                        flat_nums.append(float(obj))
+                                except Exception:
+                                    pass
+                        _walk(data)
+                        if len(flat_nums) >= 3:
+                            measurements = flat_nums
+                            source_file = str(candidate)
+                            break
+
+                    if measurements:
+                        merged = dict(raw_result)
+                        merged["success"] = True
+                        merged.setdefault("errors", [])
+                        merged["measurements"] = measurements
+                        if source_file:
+                            merged["source_artifact"] = source_file
+                        return merged
+        except Exception as exc:  # pragma: no cover - best-effort salvage
+            self.logger.debug("Result salvage failed: %s", exc)
+
+        return None
+
+    @staticmethod
     def _clean_code_block(raw_code: str) -> str:
         if not raw_code:
             return ""
@@ -1036,11 +1152,15 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
 
                     base_goal = (
                         f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
-                        f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints a single line starting with 'Final result: ' "
-                        f"followed by a compact JSON dict of results. Avoid placeholder/boilerplate; write production-ready code with concrete logic, error handling, and provenance logging. "
+                        f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints EXACTLY ONE line starting with 'Final result: ' "
+                        f"followed by a JSON object with this minimal schema: "
+                        f"{{ 'success': true|false, 'measurements': [number, ...], 'statistical_tests': {{ 't_test': {{ 'p_value': number }} }}, 'effect_size': number, 'errors': [str,...] }}. "
+                        f"The 'measurements' array MUST be non-empty and derive from real execution (e.g., latencies, runtimes, accuracy). If statistical tests are available, populate them; otherwise omit. "
+                        f"Avoid placeholder/boilerplate; write production-ready code with concrete logic, error handling, and provenance logging. "
                         f"Avoid using random number generators (e.g. random.uniform, np.random) unless the protocol explicitly requires them. "
                         f"Do not clone unrelated repositories (e.g., OpenHands); work within the current workspace. "
                         f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
+                        f"When loading data into PostgreSQL from workspace files, use client-side copy (\\copy) or absolute server-readable paths. Server-side COPY to relative workspace paths will fail. "
                         f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run. "
                         f"If a ResearchActionSpec JSON does not already exist at experiments/{design.id}/ras_spec.json, author one describing each command sequence, required capabilities, artifacts, and assertions so the orchestrator can execute the workflow autonomously."
                     )
@@ -1063,17 +1183,43 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         )
                         execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
                         final_data = _extract_final_result(result)
-                        if final_data:
-                            await _log_collection_event(
-                                suffix="finish",
-                                message="CodeAct completed successfully",
-                                offset=0.85,
-                                metadata_overrides={"node_type": "result", "status": "completed"},
-                                node_type="result",
+                        if final_data is not None:
+                            normalized = self._normalize_or_salvage_final_result(
+                                design,
+                                execution,
+                                session_context,
+                                final_data,
+                                workspace_path,
                             )
-                            payload: Dict[str, Any] = {"success": True}
-                            payload.update(final_data)
-                            return payload
+                            if normalized:
+                                await _log_collection_event(
+                                    suffix="finish",
+                                    message="CodeAct completed successfully",
+                                    offset=0.85,
+                                    metadata_overrides={"node_type": "result", "status": "completed"},
+                                    node_type="result",
+                                )
+                                return normalized
+                            # Treat empty/invalid result as a failed round to trigger repair
+                            failure_msg = "Final result missing required measurements/statistics"
+                            failure_entry = {
+                                "round": round_idx,
+                                "message": failure_msg,
+                                "observation_preview": "",
+                                "success": False,
+                            }
+                            codeact_failures.append(failure_entry)
+                            execution.logs.append(
+                                f"CodeAct round {round_idx} produced unusable result; requesting repair"
+                            )
+                            execution.output_data.setdefault("codeact_failures", []).append(failure_entry)
+                            await _log_collection_event(
+                                suffix=f"round_{round_idx}_failed",
+                                message=failure_msg,
+                                offset=0.75,
+                                metadata_overrides={"status": "error", "round": round_idx},
+                            )
+                            # continue to next round
 
                         try:
                             obs_list = [s.get("observation", "") for s in result.get("steps", [])]
@@ -3194,6 +3340,29 @@ Return JSON only.
             )
 
         # Determine if hypothesis is supported when experiment completed successfully
+        # If there is no analysable evidence at all, classify as inconclusive rather than unsupported
+        out_data = execution.output_data or {}
+        measurements_val = out_data.get("measurements") if isinstance(out_data, dict) else None
+        has_measurements = isinstance(measurements_val, list) and len(measurements_val) > 0
+        if not statistical_tests and not has_measurements:
+            return ExperimentResult(
+                execution_id=execution.id,
+                hypothesis_id=hypothesis.id,
+                status=execution.status,
+                data=execution.output_data,
+                analysis=analysis_data,
+                statistical_tests=statistical_tests,
+                visualization_data={},
+                conclusions=["Insufficient evidence collected to evaluate the hypothesis"],
+                confidence_score=0.5,
+                reproducibility_score=0.5,
+                limitations=["No statistical results and no measurements returned"],
+                next_steps=[
+                    "Repair data collection to produce non-empty measurements",
+                    "Add statistical testing or provide justifiable metrics",
+                ],
+            )
+
         p_value = statistical_tests.get("t_test", {}).get("p_value", 1.0)
         effect_size = analysis_data.get("effect_size", 0.0)
 

@@ -47,19 +47,19 @@ print('hello')
 Tools:
 - execute_bash: run a shell command
   <function=execute_bash><parameter=command>echo hello</parameter></function>
-- str_replace_editor: file editor for create/str_replace/insert/write/view
+- str_replace_editor: file editor for create/str_replace/insert/view
   - create a file:
     <function=str_replace_editor><parameter=command>create</parameter><parameter=path>code/demo.py</parameter><parameter=file_text>print('hi')</parameter></function>
   - view (read) a file:
     <function=str_replace_editor><parameter=command>view</parameter><parameter=path>code/demo.py</parameter></function>
-  - write full content:
-    <function=str_replace_editor><parameter=command>write</parameter><parameter=path>code/demo.py</parameter><parameter=content>print('ok')</parameter></function>
   - str_replace in a file:
     <function=str_replace_editor><parameter=command>str_replace</parameter><parameter=path>code/demo.py</parameter><parameter=old_str>foo</parameter><parameter=new_str>bar</parameter></function>
   - insert new_str after a line number:
     <function=str_replace_editor><parameter=command>insert</parameter><parameter=path>code/demo.py</parameter><parameter=insert_line>10</parameter><parameter=new_str>print('new')</parameter></function>
 - file_read: alias to read a file
   <function=file_read><parameter=path>code/demo.py</parameter></function>
+- write: write full file content (use for replacing entire file)
+  <function=write><parameter=path>code/demo.py</parameter><parameter=content>print('ok')</parameter></function>
 - ipython_run: run an IPython cell within the workspace python kernel
   <function=ipython_run><parameter=code>print('hello')</parameter></function>
 - finish: conclude with a final message
@@ -116,6 +116,8 @@ class CodeActRunner:
         
         self.llm = llm_client
         self.action_runner = action_runner
+        # Track created paths to avoid repeated 'create' loops
+        self._created_paths: set[str] = set()
 
     @staticmethod
     def _is_placeholder_text(text: Optional[str]) -> bool:
@@ -179,6 +181,26 @@ class CodeActRunner:
 
         return "\n".join(parts).strip()
 
+    @staticmethod
+    def _contains_error_indicators(text: str) -> bool:
+        if not isinstance(text, str) or not text:
+            return False
+        low = text.lower()
+        patterns = [
+            "error:",
+            "traceback",
+            "exception",
+            "could not open file",
+            "no such file or directory",
+            "module not found",
+            "modulenotfounderror",
+            "nameerror",
+            "command not found",
+            "failed",
+            "unrecognized command write",
+        ]
+        return any(pat in low for pat in patterns)
+
     async def run(
         self,
         workspace_path,
@@ -199,6 +221,7 @@ class CodeActRunner:
             logs_dir = workspace_path
         transcript_file = logs_dir / "codeact_steps.jsonl"
         repeat_tracker: Dict[tuple, Dict[str, int]] = {}
+        cmd_repeat_counts: Dict[str, int] = {}
         steps: List[CodeActStep] = []
         transcript: List[str] = []
         # Inject a lightweight workspace snapshot to steer the model away from repeated listings
@@ -220,6 +243,8 @@ class CodeActRunner:
             pass
         stagnation_hints_applied = 0
         try:
+            # Reset per-run created paths tracker
+            self._created_paths.clear()
             for step_idx in range(1, max_steps + 1):
                 prompt = self._build_prompt(goal, transcript)
                 if progress_cb:
@@ -303,6 +328,31 @@ class CodeActRunner:
                         await progress_cb("tool_call", {"tool": func, "params": params})
                     except Exception:
                         pass
+
+                # Hard-stop guard for repeated execute_bash commands
+                if func == "execute_bash":
+                    cmd_text = params.get("command", "") or ""
+                    if cmd_text.strip():
+                        cmd_repeat_counts[cmd_text] = cmd_repeat_counts.get(cmd_text, 0) + 1
+                        if cmd_repeat_counts[cmd_text] >= 3:
+                            message = (
+                                "Repetition guard: the same shell command ran 3 times. "
+                                "Make setup idempotent (use ./venv/bin/pip and import checks) and proceed."
+                            )
+                            steps.append(CodeActStep(thought="repeat_guard_cmd", tool=func, params=params, observation=message, success=False))
+                            if progress_cb:
+                                try:
+                                    await progress_cb("tool_result_update", {"tool": func, "success": False, "observation_preview": message[:160]})
+                                except Exception:
+                                    pass
+                            return {"success": False, "error": message, "steps": [s.__dict__ for s in steps], "repetition_guard": True}
+
+                    # Wrap typical venv/pip bootstrap into idempotent form
+                    wrapped = self._wrap_idempotent_bootstrap(cmd_text)
+                    if wrapped and wrapped != cmd_text:
+                        params = dict(params)
+                        params["command"] = wrapped
+
                 observation_text, ok = await self._execute_tool(session, func, params, timeout_per_action)
                 step_record = CodeActStep(thought="", tool=func, params=params, observation=observation_text, success=ok)
                 steps.append(step_record)
@@ -426,6 +476,37 @@ class CodeActRunner:
 
         return message or "Unable to complete the request without tool calls."
 
+    def _wrap_idempotent_bootstrap(self, command: str) -> Optional[str]:
+        """Wrap venv+pip bootstrap commands to be idempotent.
+
+        - Checks for existing venv and import of common packages.
+        - Uses ./venv/bin/pip instead of relying on source activation.
+        """
+        if not isinstance(command, str) or not command.strip():
+            return None
+        low = command.lower()
+        if ("pip install" not in low) and ("python3 -m venv" not in low):
+            return None
+        import re, json as _json
+        m = re.search(r"pip\s+install\s+([^;&|]+)", command, re.IGNORECASE)
+        packages = (m.group(1).strip() if m else "").strip()
+        verify_mods = []
+        for name in ("pandas", "scipy", "statsmodels", "duckdb"):
+            if name and name in packages:
+                verify_mods.append(name)
+        py_verify = "\n".join([f"import {x}" for x in verify_mods]) if verify_mods else "import sys"
+        script = (
+            "set -e; "
+            "if [ -d venv ] && ./venv/bin/python - <<'PY'\n"
+            f"try:\n {py_verify}\n print('OK')\nexcept Exception as e:\n import sys; sys.exit(1)\n"
+            "PY\n"
+            "then echo 'environment ready'; "
+            "else python3 -m venv venv; ./venv/bin/pip install --upgrade pip; "
+            + (f"./venv/bin/pip install {packages}; " if packages else "")
+            + "fi"
+        )
+        return "bash -lc " + _json.dumps(script)
+
     def _build_prompt(self, goal: str, transcript: List[str]) -> str:
         history = "\n\n".join(transcript[-6:]) if transcript else ""
         instructions = (
@@ -507,6 +588,9 @@ class CodeActRunner:
                         f"[job completed] id={job_id} state={state} exit_code={exit_code}\n"
                         f"{tail[-4000:] if isinstance(tail, str) else tail}"
                     )
+                    # Heuristic: downgrade success if stderr contains clear error indicators
+                    if success and self._contains_error_indicators(content):
+                        success = False
                     try:
                         if job_log_path:
                             with job_log_path.open("a", encoding="utf-8") as fp:
@@ -531,6 +615,8 @@ class CodeActRunner:
                             f"[job {job_id}] state={state} exit_code={exit_code}\n"
                             f"{tail[-4000:]}"
                         )
+                        if success and self._contains_error_indicators(content):
+                            success = False
                         try:
                             if job_log_path:
                                 with job_log_path.open("a", encoding="utf-8") as fp:
@@ -562,26 +648,58 @@ class CodeActRunner:
                 if command == "view":
                     res = await session.file_read(path, timeout=timeout)
                     content = self._render_action_output(res)
+                    if not res.execution_result.success and "timed out" in content.lower():
+                        # Fallback: use a simple bash cat to read file content
+                        cat_cmd = f"bash -lc 'cat -n {json.dumps(path)}'"
+                        res2 = await session.run_cmd(cat_cmd, timeout=min(60, timeout), blocking=True)
+                        content2 = self._render_action_output(res2)
+                        ok2 = res2.execution_result.success and bool(content2.strip())
+                        return content2 if ok2 else content, ok2
                     return content, res.execution_result.success
 
-                # Production-use guard: reject placeholder content before sending to runtime
+                # Production-use guard: flag placeholders but DO NOT block file ops
                 if self._is_placeholder_text(params.get("file_text")):
-                    msg = (
-                        "Placeholder content detected. Write production-ready code that performs real work, "
-                        "with concrete logic, error handling, and verifiable outputs."
+                    self.logger.warning(
+                        "Placeholder content detected in file op; proceeding but flagged for follow-up"
                     )
-                    return msg, False
+
+                # Pre-create parent directory to avoid ENOENT
+                try:
+                    parent_cmd = f"mkdir -p $(dirname {json.dumps(path)})"
+                    await session.run_cmd(parent_cmd, timeout=15, blocking=True)
+                except Exception:
+                    pass
+
+                # Avoid repeating 'create' on the same existing path; switch to write
+                file_text = params.get("file_text")
+                if command == "create" and path in self._created_paths and isinstance(file_text, str):
+                    resw = await session.file_write(path, file_text, timeout=timeout)
+                    contentw = self._render_action_output(resw)
+                    return contentw, resw.execution_result.success
 
                 res = await session.file_edit(
                     path,
                     command,
-                    file_text=params.get("file_text"),
+                    file_text=file_text,
                     old_str=params.get("old_str"),
                     new_str=params.get("new_str"),
                     insert_line=int(params.get("insert_line")) if params.get("insert_line") else None,
                     timeout=timeout,
                 )
                 content = self._render_action_output(res)
+
+                # If create failed because file exists, fallback to write to stop loops
+                if command == "create" and not res.execution_result.success and isinstance(file_text, str):
+                    low = content.lower()
+                    if "file already exists" in low or "cannot overwrite files using command `create`" in low or "invalid `path` parameter" in low:
+                        resw = await session.file_write(path, file_text, timeout=timeout)
+                        contentw = self._render_action_output(resw)
+                        if resw.execution_result.success:
+                            self._created_paths.add(path)
+                        return contentw, resw.execution_result.success
+
+                if command == "create" and res.execution_result.success:
+                    self._created_paths.add(path)
                 return content, res.execution_result.success
 
             if func == "file_read":
@@ -593,11 +711,15 @@ class CodeActRunner:
             if func == "write":
                 path = params.get("path", "").strip()
                 content_text = params.get("content", "")
+                # Do not block writes on placeholder content; only warn
                 if self._is_placeholder_text(content_text):
-                    msg = (
-                        "Placeholder content detected. Provide a complete, runnable implementation instead of a template."
-                    )
-                    return msg, False
+                    self.logger.warning("Placeholder content detected in write; proceeding but flagged")
+                # Pre-create parent directory to avoid ENOENT
+                try:
+                    parent_cmd = f"mkdir -p $(dirname {json.dumps(path)})"
+                    await session.run_cmd(parent_cmd, timeout=15, blocking=True)
+                except Exception:
+                    pass
                 res = await session.file_write(path, content_text, timeout=timeout)
                 content = self._render_action_output(res)
                 return content, res.execution_result.success

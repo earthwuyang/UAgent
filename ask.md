@@ -1,203 +1,136 @@
-# OpenHands Integration Complex Problem Statement for GPT-5-Pro
+## Refactor Request: CodeAct + OpenHands Bridge (complete simplification)
 
-## Executive Summary
-We are integrating OpenHands (an autonomous coding agent) into UAgent's scientific research engine. While basic integration works, we face critical issues with command execution, process management, and state tracking that prevent reliable operation.
+Audience: GPT‑5‑Pro — please deliver a complete refactor plan and patch set that removes the brittle heuristics we added and replaces them with a clean, deterministic, idempotent, and testable design for CodeAct execution and the OpenHands bridge.
 
-## Current Architecture
-```
-UAgent Backend (FastAPI)
-    ↓
-OpenHands Runtime (Session Manager)
-    ↓
-CodeAct Agent (LLM-powered)
-    ↓
-Action Server (Docker Container)
-    ↓
-Workspace File System
-```
+### Context (what we have today)
+- UAgent integrates a CodeAct loop (LLM-driven) with an OpenHands action server via our bridge and runner.
+- Actions are sent as discrete calls (HTTP POST) per step. There is no persistent shell; each execute_bash runs in a fresh process.
+- File operations (create/view/replace/write) frequently emit “observation” text but not a structured terminal event or exit_code. We tuned the client to infer success.
+- Scientific research engine expects “Final result: {json}” and seeks measurements/statistics for hypothesis evaluation.
 
-## Core Problems
+Key modules to refactor:
+- backend/app/services/codeact_runner.py (tool loop, repetition guard, file ops, bash execution)
+- backend/app/integrations/openhands_runtime.py (action server client, path remap, timeouts, file/batch actions, job service)
+- backend/app/integrations/openhands_bridge.py (plan execution, coordination)
 
-### Problem 1: Command Re-execution Without Success Detection
-**Symptom**: pip install commands execute 12+ times despite packages being already installed
-**Root Cause**: Background execution returns immediately with "Started background process" message, but CodeAct doesn't know if the command actually succeeded
-**Impact**: Wastes tokens, time, and creates confusion in execution flow
+### Pain points we need to eliminate
+1) File‑op terminal signal mismatch
+   - Server often emits only observation text for edit/view with no exit_code/final_result.
+   - Result: false negatives, retries, 120s/1800s timeouts, repeated create/view loops.
 
-### Problem 2: Malformed Command Wrapping
-**Symptom**: Commands containing export statements or already using nohup get double-wrapped
-**Example**:
-```bash
-# Original command from CodeAct:
-export PIP_NO_INPUT=1 && pip install numpy
+2) Create vs write semantics cause loops
+   - LLM emits str_replace_editor.create for existing files; server refuses overwrite; loop repeats.
 
-# Gets wrapped as:
-nohup bash -c 'export PIP_NO_INPUT=1 && pip install numpy' > log 2>&1 &
+3) Repetition and non‑idempotent bootstrap
+   - execute_bash repeats “python3 -m venv … && pip install …” many times because shell state is not persisted; imports aren’t checked.
 
-# Sometimes double-wrapped:
-nohup bash -c 'nohup pip install numpy &' > log 2>&1 &
-```
-**Impact**: Commands fail or behave unexpectedly
+4) Weak repetition guard
+   - Guard compares observation text only; pip/read outputs vary so repeats slip through.
 
-### Problem 3: Blocking vs Non-blocking Execution Confusion
-**Symptom**: Long-running commands (pip install, docker operations) block other operations
-**Current Approach**: Detect "long-running" commands and wrap with nohup
-**Problems**:
-- Detection logic is fragile (string matching)
-- No reliable way to check if background process completed
-- CodeAct doesn't understand async execution model
-- Read/write operations timeout waiting for long commands
+5) Error/Success inference via heuristics
+   - We scan logs for “ERROR:”/“could not open file” etc. to downgrade success. This is brittle and increases complexity.
 
-### Problem 4: State Synchronization Between Components
-**Symptom**: CodeAct doesn't know the actual state of executed commands
-**Details**:
-- Background processes return immediately
-- No feedback loop to inform CodeAct of completion
-- Log files exist but CodeAct doesn't automatically check them
-- Process PIDs are captured but not utilized
+6) Allowed‑roots/paths friction
+   - Writes under code/ and experiments/ sometimes stalled due to server path policy; we widened roots in env as a workaround.
 
-## Current Implementation Details
+7) Proxy/backend failures amplify loops
+   - When external services (e.g., proxy at 7890) return 502, the agent often re‑edits/re‑checks files instead of handling the dependency failure cleanly.
 
-### Key Files:
-1. **openhands_runtime.py**:
-   - Handles command wrapping and execution
-   - Detects long-running commands
-   - Manages session and workspace
+### Current band‑aids (we would like to remove)
+- Mark edit/write success by scanning observation strings.
+- Auto‑convert repeated create → write; track created paths in a set for the run.
+- Fallback to heredoc writes on file‑op timeout; pre‑mkdir to avoid ENOENT.
+- View fallback via bash cat on timeout.
+- Execute_bash idempotent wrapper for venv/pip with import checks.
+- Repetition guard for same shell command ≥ 3 times.
 
-2. **codeact_runner.py**:
-   - Runs the CodeAct agent loop
-   - Processes LLM responses
-   - Executes actions via runtime
+These work, but are cumbersome, heuristic, and hard to reason about.
 
-3. **openhands_bridge.py**:
-   - Bridge between UAgent and OpenHands
-   - Session management
-   - WebSocket communication
+### Desired end‑state (what we want you to design and spec)
+- Deterministic, typed action protocol and client:
+  - Every action returns a structured ActionResult: {success: bool, exit_code: int, error: {type, message}, files_created/modified, stdout, stderr, duration, artifact_paths}.
+  - For file‑ops, the server must always emit a terminal result (no guessing). If server cannot, client must implement a reliable completion rule (not time‑based only).
 
-### Current Command Execution Flow:
-```python
-def execute_bash(self, command: str):
-    # Detect if long-running
-    if self._is_long_running_command(command):
-        # Wrap with nohup
-        wrapped = f"nohup bash -c '{command}' > log 2>&1 &"
-        # Execute and return immediately
-        return "Started background process"
-    else:
-        # Execute normally and wait
-        return subprocess.run(command, capture_output=True)
-```
+- Idempotent file API surface:
+  - create_if_absent(path, content), write(path, content, overwrite=true), read(path, range?), append(path, content), stat(path), exists(path) — single responsibility, atomic behavior, no semantic ambiguity.
 
-## Attempted Solutions That Failed
+- Job service with de‑dup and polling:
+  - execute_bash is submitted as a job with a job_id; status endpoint returns RUNNING|SUCCEEDED|FAILED + tail + exit_code.
+  - Optional de‑dup by content hash to avoid re‑running identical bootstrap commands.
+  - Background tasks are explicitly represented (no nohup magic in the client).
 
-1. **Timeout with Retry**: Added exponential backoff but doesn't solve root cause
-2. **Unified Logging**: Created single commands.log but CodeAct doesn't read it
-3. **Environment Variables**: Added OPENHANDS_ACTION_TIMEOUT but doesn't help with background processes
-4. **Token Limit Increase**: Raised to 20000 but doesn't fix execution issues
+- Idempotent environment bootstrap per workspace:
+  - Canonical interpreter path (./venv/bin/python, ./venv/bin/pip).  Import checks before installing.  One line to ensure venv exists/ready.
+  - No reliance on “source venv/bin/activate” across steps.
 
-## Requirements for Solution
+- Repetition control and backoff baked into the state machine:
+  - Count identical commands; short‑circuit on repeated no‑ops; suggest next step.
 
-### Must Have:
-1. **Reliable Command Execution**: Each command executes exactly once with clear success/failure status
-2. **Non-blocking for Long Operations**: pip install, docker, etc. shouldn't block other operations
-3. **State Awareness**: CodeAct must know when background operations complete
-4. **Clean Command Construction**: No double-wrapping or malformed commands
+- Precise allowed‑paths contract:
+  - Make writable roots explicit and return a clear error if outside. Do not hang if a path is disallowed.
 
-### Nice to Have:
-1. **Real-time Progress Monitoring**: Stream output to logs as commands execute
-2. **Automatic Retry on Failure**: With exponential backoff
-3. **Process Management**: Track and manage background processes
+- Streaming and terminal signalling:
+  - Prefer SSE or chunked responses with an explicit final event for all tools. If HTTP/POST only, the server must return a terminal JSON with success + exit_code.
 
-## Specific Questions for GPT-5-Pro
+- Observability:
+  - Single JSONL event log per run: request→event(s)→result with timestamps and durations.
+  - Minimal, privacy‑safe content capture.
 
-### Q1: Execution Model Design
-How should we design the execution model to handle both blocking and non-blocking commands while maintaining state consistency? Should we:
-- Use a job queue with status tracking?
-- Implement a callback mechanism?
-- Use subprocess.Popen with proper polling?
-- Something else?
+### Constraints
+- We can refactor our runner/bridge/client freely; we prefer not to fork the upstream action server.
+- Keep tool surface compatible with CodeAct prompts (finish, execute_bash, str_replace_editor view/create/replace, write, file_read).
+- Avoid heavy external deps; keep code self‑contained and testable.
 
-### Q2: CodeAct Agent Adaptation
-How can we make the CodeAct agent (which expects synchronous execution) work reliably with asynchronous operations? Options:
-- Modify CodeAct's prompts to understand async operations?
-- Create a synchronization layer that makes async look sync?
-- Implement a state machine for command execution?
+### Deliverables (what we want from you)
+1) Design doc (Markdown) with:
+   - Architecture, action protocol, state machine diagrams, error taxonomy.
+   - File API semantics (create_if_absent/write/read/append/stat/exists) and examples.
+   - Job service contract and client flow for execute_bash with de‑dup.
+   - Idempotent bootstrap recipe and how to surface interpreter paths to the LLM (prompt/tool spec).
 
-### Q3: Command Wrapping Strategy
-What's the best approach for command wrapping that handles:
-- Export statements
-- Compound commands (&&, ||, ;)
-- Already-wrapped commands (nohup, &)
-- Shell built-ins vs external commands
+2) Refactor plan + patches:
+   - backend/app/services/codeact_runner.py (loop, repetition control, file/batch ops, idempotent wrappers)
+   - backend/app/integrations/openhands_runtime.py (typed results, job client, explicit terminal signalling)
+   - backend/app/integrations/openhands_bridge.py (coordination points)
+   - Update tool spec exposed to the LLM to reflect the simplified “write” and “create_if_absent” semantics.
 
-### Q4: Success Detection for Background Processes
-How should we reliably detect when a background process completes successfully? Consider:
-- PID tracking and polling
-- Output file monitoring
-- Exit code capture for background processes
-- Integration with CodeAct's execution loop
+3) Tests:
+   - Unit tests for action result parsing, file API, job polling, repetition guard.
+   - Integration tests that cover: create/write/read, large write, repeated commands, long‑running installs, path denial, and proxy 502 handling without loops.
 
-### Q5: State Management Architecture
-What's the optimal architecture for managing state across:
-- OpenHands runtime (Python)
-- CodeAct agent (LLM)
-- Action server (Docker)
-- Workspace files
+4) Migration + compatibility:
+   - A minimal shim layer so existing prompts still work, while new semantics are used under the hood.
+   - Rollback plan and flags to toggle legacy vs new behavior.
 
-Should we use:
-- Event-driven architecture with webhooks?
-- Polling-based status checks?
-- Shared state store (Redis/SQLite)?
-- File-based state tracking?
+### Evidence of issues (from our logs)
+- Repetitive pip installs on every step; shell state isn’t persisted; no import checks before install.
+- create on existing files triggers “Cannot overwrite with create,” then loops create/view.
+- view timeouts repeat; no single reliable terminal signal; multiple 120s/1800s hangs.
+- Directory listings (ls -pa) repeat with no progress.
+- Proxy at 7890 returns 502; agent responds by re‑editing/reading files rather than handling the dependency failure.
 
-## Example Problematic Sequence
+### Non‑goals
+- We don’t want more heuristics (log string scanning) or longer timeouts. We want a clean protocol + state machine.
 
-Current behavior when CodeAct tries to install packages:
-```
-1. CodeAct: "pip install numpy pandas"
-2. Runtime: Detects as long-running, wraps with nohup
-3. Runtime: Returns "Started background process with PID 12345"
-4. CodeAct: Sees success message, continues
-5. CodeAct: "import numpy"
-6. Runtime: Fails - numpy not installed yet
-7. CodeAct: "pip install numpy" (tries again)
-8. Runtime: Wraps again, returns immediately
-9. [Repeats 12+ times]
-```
+### Success criteria
+- No repeated create/view loops; no “hangs” on disallowed paths; no silent “success=false” for successful file‑ops.
+- Bootstrap is one‑shot and idempotent; re‑runs are cheap and skip when ready.
+- Every action returns a typed, terminal result; background/long tasks are tracked as jobs with status.
+- Clear, small JSONL trace suitable for debugging.
 
-Desired behavior:
-```
-1. CodeAct: "pip install numpy pandas"
-2. Runtime: Starts background process, tracks it
-3. Runtime: Returns "Installing packages (job-123)..."
-4. CodeAct: "check_job job-123" (or automatic)
-5. Runtime: "Still running... (30s elapsed)"
-6. CodeAct: Waits or does other work
-7. CodeAct: "check_job job-123"
-8. Runtime: "Completed successfully"
-9. CodeAct: "import numpy" - works!
-```
+### Code pointers
+- CodeAct: backend/app/services/codeact_runner.py
+- OpenHands bridge/runtime client: backend/app/integrations/openhands_bridge.py, backend/app/integrations/openhands_runtime.py
+- Scientific research exec integration: backend/app/core/research_engines/scientific_research.py (experiment execution)
 
-## Constraints
+### Final ask
+Please produce:
+1) A concise design doc aligning to the above end‑state.
+2) A patch set that implements the new protocol, job client, and file API semantics, with tests.
+3) An updated tool spec (what the LLM sees) that removes ambiguity for file ops and execute_bash.
+4) Clear migration notes and toggles so we can roll this out without breaking current runs.
 
-1. **Cannot modify OpenHands core**: We can only modify our integration layer
-2. **Must maintain CodeAct compatibility**: The agent expects certain action formats
-3. **Docker environment**: Commands run inside Docker container
-4. **Token limits**: LLM has context limits, can't send huge logs
-5. **Real-time requirement**: User expects to see progress in real-time
-
-## Success Criteria
-
-A successful solution will:
-1. Execute each command exactly once
-2. Provide accurate status for all operations
-3. Allow long operations without blocking
-4. Give CodeAct visibility into background operations
-5. Handle all command types correctly (simple, compound, wrapped)
-6. Maintain clear logs for debugging
-7. Work reliably across 100+ command sequences
-
-## Additional Context
-
+We are happy to iterate quickly — prioritize correctness, determinism, and simplicity over heuristics.
 - Using DashScope Qwen for LLM
 - Docker container for execution isolation
 - WebSocket for real-time communication
