@@ -198,7 +198,6 @@ class CodeActRunner:
         except Exception:
             logs_dir = workspace_path
         transcript_file = logs_dir / "codeact_steps.jsonl"
-        repeat_tracker: Dict[tuple, Dict[str, int]] = {}
         steps: List[CodeActStep] = []
         transcript: List[str] = []
         # Inject a lightweight workspace snapshot to steer the model away from repeated listings
@@ -218,7 +217,6 @@ class CodeActRunner:
             transcript.append("SYSTEM_CONTEXT: " + json.dumps(snapshot))
         except Exception:
             pass
-        stagnation_hints_applied = 0
         try:
             for step_idx in range(1, max_steps + 1):
                 prompt = self._build_prompt(goal, transcript)
@@ -332,70 +330,6 @@ class CodeActRunner:
                     except Exception:
                         pass
 
-                repeat_key = None
-                if func == "execute_bash":
-                    repeat_key = ("execute_bash", params.get("command", "").strip())
-                elif func == "str_replace_editor" and params.get("command") == "view":
-                    repeat_key = ("view", params.get("path", "").strip())
-
-                if repeat_key and repeat_key[1]:
-                    tracker = repeat_tracker.setdefault(repeat_key, {})
-                    count = tracker.get(observation_text, 0) + 1
-                    tracker[observation_text] = count
-                    if count >= 3:
-                        repeat_message = (
-                            f"Command '{repeat_key[1]}' produced identical output {count} times."
-                        )
-                        # Instead of aborting immediately, inject corrective guidance and continue
-                        steps.append(CodeActStep(
-                            thought="repeat_guard",
-                            tool=func,
-                            params=params,
-                            observation=repeat_message,
-                            success=False,
-                        ))
-                        hint = (
-                            "HINT: Stop repeatedly listing/viewing. If the target file does not exist or the directory is empty, "
-                            "use str_replace_editor with command=create to create a new Python file under code/ and implement the required logic."
-                        )
-                        transcript.append(repeat_message)
-                        transcript.append(hint)
-                        stagnation_hints_applied += 1
-                        try:
-                            with transcript_file.open("a", encoding="utf-8") as fp:
-                                fp.write(
-                                    json.dumps(
-                                        {
-                                            "step_index": step_idx,
-                                            "tool": func,
-                                            "params": params,
-                                            "success": False,
-                                            "observation": repeat_message,
-                                            "reason": "repeat_guard",
-                                        }
-                                    )
-                                    + "\n"
-                                )
-                        except Exception:
-                            pass
-                        if progress_cb:
-                            try:
-                                await progress_cb(
-                                    "tool_result_update",
-                                    {"tool": func, "success": False, "observation_preview": repeat_message[:160]},
-                                )
-                            except Exception:
-                                pass
-                        # If we've hinted multiple times, bail out to avoid infinite loops
-                        if stagnation_hints_applied >= 2:
-                            return {
-                                "success": False,
-                                "error": repeat_message,
-                                "steps": [s.__dict__ for s in steps],
-                                "repetition_guard": True,
-                            }
-                        # Otherwise continue to next planning step
-                        continue
 
             return {"success": False, "error": "Max steps reached", "steps": [s.__dict__ for s in steps]}
         finally:

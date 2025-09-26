@@ -511,19 +511,90 @@ class ExperimentDesigner:
     def _safe_loads(payload: str) -> Dict[str, Any]:
         """Parse experiment design JSON or raise a descriptive error."""
 
+        # First attempt: Try with basic sanitization
         sanitized = sanitize_json_strings(payload)
         try:
             data = safe_json_loads(sanitized)
         except JsonParseError as exc:
-            preview = (payload or "").strip().replace("\n", " ")
-            if len(preview) > 500:
-                preview = preview[:497] + "..."
-            logging.getLogger(__name__).error(
-                "Experiment design JSON parse failed: %s | raw=%s",
-                exc,
-                preview or "<empty>",
-            )
-            raise RuntimeError(f"Experiment design returned invalid JSON: {exc}") from exc
+            # Second attempt: Handle Unicode and special characters more aggressively
+            import re
+            import json
+
+            # Remove or replace problematic Unicode characters
+            cleaned = payload
+            # Replace common Unicode symbols with ASCII equivalents
+            unicode_replacements = {
+                '≤': '<=',
+                '≥': '>=',
+                'µ': 'u',
+                '±': '+/-',
+                '×': 'x',
+                '÷': '/',
+                '≈': '~',
+                '≠': '!=',
+                '∞': 'infinity',
+                '√': 'sqrt',
+                '∑': 'sum',
+                '∏': 'product',
+                '∫': 'integral',
+                '∂': 'partial',
+                '∇': 'gradient',
+                '∈': 'in',
+                '∉': 'not in',
+                '⊂': 'subset',
+                '⊃': 'superset',
+                '∩': 'intersection',
+                '∪': 'union',
+                '∅': 'empty',
+                '∀': 'for all',
+                '∃': 'exists',
+                '∄': 'not exists',
+                '⇒': '=>',
+                '⇔': '<=>',
+                '→': '->',
+                '←': '<-',
+                '↑': 'up',
+                '↓': 'down',
+                '↔': '<->',
+            }
+
+            for unicode_char, ascii_equiv in unicode_replacements.items():
+                cleaned = cleaned.replace(unicode_char, ascii_equiv)
+
+            # Remove any remaining non-ASCII characters that might cause issues
+            cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', cleaned)
+
+            # Fix common JSON issues
+            # Remove trailing commas before closing brackets/braces
+            cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned)
+            # Fix unescaped quotes inside strings
+            cleaned = re.sub(r'(["\'])(.*?)(?<!\\)\1',
+                lambda m: m.group(1) + m.group(2).replace('"', r'\"').replace("'", r"\'") + m.group(1),
+                cleaned)
+            # Remove ellipsis that might be truncating the JSON
+            cleaned = re.sub(r'\.\.\.\s*([\]}]|$)', r'\1', cleaned)
+
+            # Try to parse the cleaned JSON
+            try:
+                cleaned = sanitize_json_strings(cleaned)
+                data = json.loads(cleaned)
+            except (json.JSONDecodeError, JsonParseError) as exc2:
+                # Third attempt: Try to extract valid JSON from partial/truncated content
+                try:
+                    # Find the first complete JSON object
+                    import json.decoder
+                    decoder = json.JSONDecoder()
+                    data, idx = decoder.raw_decode(cleaned)
+                except Exception as exc3:
+                    preview = (payload or "").strip().replace("\n", " ")
+                    if len(preview) > 500:
+                        preview = preview[:497] + "..."
+                    logging.getLogger(__name__).error(
+                        "Experiment design JSON parse failed after all attempts: %s | raw=%s",
+                        exc3,
+                        preview or "<empty>",
+                    )
+                    raise RuntimeError(f"Experiment design returned invalid JSON: {exc}") from exc
 
         if not isinstance(data, dict):
             raise RuntimeError(
@@ -548,24 +619,27 @@ class ExperimentDesigner:
         Available Resources: {resources or "Standard computational resources"}
 
         Provide experimental design in JSON format with:
-        1. "name": Descriptive experiment name
-        2. "description": Detailed experiment description
-        3. "methodology": Step-by-step methodology
-        4. "variables": Detailed variable definitions and measurement plans
-        5. "controls": Control conditions and variables
-        6. "data_collection_plan": Data collection strategy
-        7. "analysis_plan": Statistical analysis plan
-        8. "expected_duration": Estimated experiment duration
-        9. "resource_requirements": Computational and data requirements
-        10. "code_requirements": Programming/implementation requirements
-        11. "dependencies": External dependencies needed
+        1. "name": Short descriptive experiment name (max 100 chars)
+        2. "description": Brief experiment description (max 500 chars)
+        3. "methodology": List of 3-5 key methodology steps (each max 200 chars)
+        4. "variables": Key variable names only (no descriptions)
+        5. "controls": List of control variable names only
+        6. "data_collection_plan": One-line data collection strategy (max 200 chars)
+        7. "analysis_plan": One-line statistical analysis plan (max 200 chars)
+        8. "expected_duration": Duration estimate (e.g., "1-2 hours")
+        9. "resource_requirements": Brief requirements (max 200 chars)
+        10. "code_requirements": List of 2-3 key libraries needed
+        11. "dependencies": List of 2-3 main dependencies
 
+        IMPORTANT: Keep the JSON compact and complete. Avoid long descriptions.
+        Use ASCII characters only, no Unicode symbols.
         Respond with a raw JSON object only (no markdown fences, no commentary, no code blocks).
+        Ensure the JSON is complete and valid - do not truncate.
         """
 
         response = await self.llm_client.generate(
             design_prompt,
-            max_tokens=self.max_generation_tokens,
+            max_tokens=min(self.max_generation_tokens * 2, 8000),  # Increase token limit for JSON
         )
         design_data = self._safe_loads(response)
 
@@ -970,12 +1044,24 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         metadata_overrides={"status": "error", "error": str(ras_exc)},
                     )
 
-            codeact_enabled = (
-                self.config.get("use_codeact", True)
-                and self.openhands_client
-                and getattr(self.openhands_client, "action_runner", None)
-                and self.openhands_client.action_runner.is_available
-            )
+            # Check environment variable to decide which OpenHands integration to use
+            import os
+            openhands_mode = os.getenv("OPENHANDS_MODE", "complete")
+
+            # Only check action_runner if we're using the old mode
+            if openhands_mode != "complete":
+                codeact_enabled = (
+                    self.config.get("use_codeact", True)
+                    and self.openhands_client
+                    and getattr(self.openhands_client, "action_runner", None)
+                    and self.openhands_client.action_runner.is_available
+                )
+            else:
+                # Use complete delegation mode - don't start action_runner
+                codeact_enabled = (
+                    self.config.get("use_codeact", True)
+                    and self.openhands_client
+                )
 
             if codeact_enabled:
                 try:
@@ -985,9 +1071,59 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                     if not workspace_path:
                         raise RuntimeError("OpenHands workspace path unavailable for CodeAct execution")
 
-                    from ...services.codeact_runner import CodeActRunner  # lazy import
+                    # Use the new complete delegation approach to avoid repetitive file creation
+                    # Import at module level to avoid circular import issues
+                    try:
+                        from ...services.openhands_complete_runner import delegate_to_openhands_complete
+                    except ImportError as e:
+                        self.logger.warning(f"Failed to import OpenHandsCompleteRunner: {e}")
+                        self.logger.info("Falling back to step-by-step execution")
+                        # Fall back to step-by-step execution
+                        raise RuntimeError("OpenHands complete runner not available") from e
 
-                    runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
+                    # Run complete delegation with the data collection prompt
+                    result = await delegate_to_openhands_complete(
+                        goal=data_collection_prompt,
+                        workspace_path=workspace_path,
+                        model="gpt-4o-mini",
+                        max_iterations=50,
+                        progress_cb=None,  # TODO: Add progress callback if needed
+                    )
+
+                    if result["success"]:
+                        # Extract experimental results from generated files
+                        generated_files = result.get("generated_files", [])
+                        data_files = [f for f in generated_files if "data" in f or "results" in f]
+
+                        collected_data = {
+                            "status": "completed",
+                            "message": result.get("message", "Data collection completed"),
+                            "workspace": str(workspace_path),
+                            "generated_files": generated_files,
+                            "data_files": data_files,
+                        }
+
+                        # Try to read result files
+                        for file_path in data_files:
+                            full_path = workspace_path / file_path
+                            if full_path.exists() and full_path.suffix == ".json":
+                                try:
+                                    with open(full_path) as f:
+                                        file_data = json.load(f)
+                                        collected_data[f"data_{full_path.stem}"] = file_data
+                                except Exception as e:
+                                    self.logger.debug(f"Could not read {file_path}: {e}")
+
+                        execution.data = collected_data
+                        await _log_collection_event(
+                            "complete",
+                            f"Data collection completed for {design.name}",
+                            progress_increment,
+                            metadata_overrides={"status": "completed", "files": len(generated_files)},
+                        )
+                        return execution.data
+                    else:
+                        raise RuntimeError(f"OpenHands execution failed: {result.get('message', 'Unknown error')}")
 
                     def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                         obs_text = "\n".join(
@@ -1054,13 +1190,19 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                                 "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
                                 + "\nAddress these issues explicitly before running again."
                             )
-                        result = await runner.run(
+                        # Use complete goal delegation to avoid repetitive file creation
+                        result_obj = await runner.run_complete_goal(
                             workspace_path=workspace_path,
                             goal=goal_text,
-                            max_steps=int(self.config.get("codeact_max_steps", 10)),
-                            timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
                             progress_cb=_cb,
                         )
+                        # Convert to expected format
+                        result = {
+                            "success": result_obj.success,
+                            "message": result_obj.message,
+                            "steps": [],  # New approach doesn't expose individual steps
+                            "generated_files": result_obj.generated_files,
+                        }
                         execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
                         final_data = _extract_final_result(result)
                         if final_data:

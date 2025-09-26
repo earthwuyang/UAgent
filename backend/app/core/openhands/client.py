@@ -76,8 +76,16 @@ class OpenHandsClient:
         self.code_executor = CodeExecutor(self.workspace_manager)
         self.sessions: Dict[str, SessionConfig] = {}
         self.session_states: Dict[str, SessionState] = {}
-        self.action_runner = OpenHandsActionServerRunner()
-        logger.info("OpenHandsClient initialized")
+
+        # Only create action_runner if not in complete delegation mode
+        import os
+        openhands_mode = os.getenv("OPENHANDS_MODE", "complete")
+        if openhands_mode != "complete":
+            self.action_runner = OpenHandsActionServerRunner()
+            logger.info("OpenHandsClient initialized with CodeAct action runner")
+        else:
+            self.action_runner = None
+            logger.info("OpenHandsClient initialized in complete delegation mode (no action runner)")
 
     @staticmethod
     def _clean_generated_code(raw_code: str) -> str:
@@ -233,7 +241,7 @@ class OpenHandsClient:
         try:
             # Prefer CodeAct runtime when available; fully hand over codegen/exec/debug
             workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
-            if request.execute_immediately and workspace_path and self.action_runner.is_available and llm_client is not None:
+            if request.execute_immediately and workspace_path and self.action_runner and self.action_runner.is_available and llm_client is not None:
                 try:
                     from ...services.codeact_runner import CodeActRunner  # type: ignore
                     runner = CodeActRunner(llm_client, self.action_runner)
@@ -289,7 +297,7 @@ class OpenHandsClient:
             code_filename = f"generated_{request.session_id}_{session_state.current_step}.py"
 
             execution_result: Optional[ExecutionResult] = None
-            if request.execute_immediately and workspace_path and self.action_runner.is_available:
+            if request.execute_immediately and workspace_path and self.action_runner and self.action_runner.is_available:
                 # Hand over file write + execution to OpenHands action runtime
                 session = await self.action_runner.open_session(workspace_path)
                 try:
