@@ -248,13 +248,21 @@ async def conduct_scientific_research(request: ScientificResearchRequest, backgr
             enable_iteration=request.enable_iteration
         )
 
+        # Determine completion status from confidence threshold
+        try:
+            import os
+            threshold = float(os.getenv("UAGENT_SCIENCE_COMPLETE_THRESHOLD", os.getenv("CONFIDENCE_THRESHOLD", "0.8")))
+        except Exception:
+            threshold = 0.8
+        is_complete = (result.confidence_score or 0.0) >= threshold
+
         # Store result
         timestamp = datetime.utcnow().isoformat()
         research_sessions[research_id] = {
             "type": "scientific_research",
             "request": request.dict(),
             "result": result,
-            "status": "completed",
+            "status": "completed" if is_complete else "running",
             "created_at": timestamp,
             "updated_at": timestamp,
         }
@@ -262,7 +270,7 @@ async def conduct_scientific_research(request: ScientificResearchRequest, backgr
         # Create response
         response = ScientificResearchResponse(
             research_id=research_id,
-            status="completed",
+            status="completed" if is_complete else "running",
             query=request.query,
             hypotheses_count=len(result.hypotheses),
             experiments_count=len(result.experiments),

@@ -855,7 +855,7 @@ class CodeResearchEngine:
                             metadata={"workspace": str(workspace_path)},
                             parent_phase="synthesizing_guidance",
                         )
-                        from ...services.codeact_runner import CodeActRunner  # lazy import
+                        # Migrate to V2 runtime
                         from ...integrations.openhands_runtime import OpenHandsClientV2
                         from ...services.codeact_runner import CodeActRunnerV2
                         goal = (
@@ -877,7 +877,7 @@ class CodeResearchEngine:
                         except Exception as exc:
                             self.logger.debug("V2 bootstrap skipped in code engine: %s", exc)
 
-                        runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
+                        runner = CodeActRunnerV2(v2_client, workspace_path)
                         async def _cb(event: str, data: Dict[str, Any]):
                             try:
                                 await self._log_progress(

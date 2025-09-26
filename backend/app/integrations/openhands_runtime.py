@@ -1093,22 +1093,26 @@ class OpenHandsActionServerRunner:
         working_dir = metadata.get("cwd", ".")
         env_snapshot = metadata.get("env", {}) if isinstance(metadata.get("env"), dict) else {}
 
-        # Directory listings (and some file reads) return exit_code=-1 even when successful.
+        # Directory listings and many file reads/"view" ops return exit_code=-1 even when successful.
         if exit_code != 0:
             if success_flag is True:
                 exit_code = 0
-            elif isinstance(output, str) and output.strip() and action_name in {"list", "read"}:
-                exit_code = 0
-            # Heuristic: treat file edit/write messages as success even if exit_code missing
-            elif action_name in {"edit", "write"} and isinstance(output, str):
-                low = output.lower()
-                if (
-                    "file created successfully" in low
-                    or "has been edited" in low
-                    or "file edited successfully" in low
-                    or "created at:" in low
-                ):
+            elif isinstance(output, str) and output.strip():
+                # Treat str_replace_editor.view and generic read/list as success if output is non-empty
+                cmd_name = (metadata.get("command") or observation.get("command") or "").lower()
+                act = (action_name or "").lower()
+                if act in {"list", "read", "view"} or cmd_name in {"list", "read", "view"}:
                     exit_code = 0
+                # Heuristic: treat file edit/write messages as success even if exit_code missing
+                elif act in {"edit", "write"}:
+                    low = output.lower()
+                    if (
+                        "file created successfully" in low
+                        or "has been edited" in low
+                        or "file edited successfully" in low
+                        or "created at:" in low
+                    ):
+                        exit_code = 0
 
         return ExecutionResult(
             success=exit_code == 0,

@@ -18,12 +18,9 @@ from ..openhands import OpenHandsClient, CodeGenerationRequest
 from ..websocket_manager import progress_tracker
 from .deep_research import DeepResearchEngine, ResearchResult as DeepResearchResult
 from .code_research import CodeResearchEngine, CodeResearchResult
-from ...integrations.openhands_bridge import (
-    OpenHandsGoalPlanBridge,
-    GoalPlan,
-    GoalPlanStep,
-)
 from ...integrations.openhands_bridge import OpenHandsBridgeV2
+from ...integrations.openhands_bridge import GoalPlan  # typing only
+from ...integrations.openhands_bridge import GoalPlanStep  # typing only
 from ...integrations.openhands_runtime import OpenHandsClientV2
 from ...services.codeact_runner import CodeActRunnerV2
 from ...utils.json_utils import (
@@ -756,9 +753,21 @@ class ExperimentExecutor:
         if not raw_code:
             return ""
         cleaned = raw_code.strip()
+        # Prefer fenced block content when both fences exist
         fenced = re.findall(r"```(?:python|py)?\s*(.*?)```", cleaned, re.DOTALL)
         if fenced:
             cleaned = fenced[0].strip()
+        else:
+            # Heuristic: strip a leading single fence line if present without closing
+            if cleaned.startswith("```"):
+                # drop the first line (``` or ```python)
+                parts = cleaned.splitlines()
+                if parts:
+                    parts = parts[1:]
+                    cleaned = "\n".join(parts).strip()
+            # remove trailing lone ``` if present
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].rstrip()
         return cleaned
 
     def _validate_generated_code(self, code: str) -> None:
@@ -1089,201 +1098,137 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         metadata_overrides={"status": "error", "error": str(ras_exc)},
                     )
 
-            codeact_enabled = (
-                self.config.get("use_codeact", True)
-                and self.openhands_client
-                and getattr(self.openhands_client, "action_runner", None)
-                and self.openhands_client.action_runner.is_available
-            )
+            # New behavior (no CodeAct loop): RAS -> V2 author+run -> V2 run existing script
+            try:
+                workspace_path = self.openhands_client.workspace_manager.get_workspace_path(  # type: ignore[attr-defined]
+                    session_context.workspace_id
+                )
+                if not workspace_path:
+                    raise RuntimeError("OpenHands workspace path unavailable for V2 execution")
 
-            if codeact_enabled:
+                ws_path = Path(workspace_path)
+                allowed_roots = [ws_path, ws_path / "code", ws_path / "experiments", ws_path / "logs", ws_path / "output", ws_path / "workspace"]
+                v2_client = OpenHandsClientV2(workspace_path=ws_path, allowed_write_roots=allowed_roots)
                 try:
-                    workspace_path = self.openhands_client.workspace_manager.get_workspace_path(
-                        session_context.workspace_id
-                    )
-                    if not workspace_path:
-                        raise RuntimeError("OpenHands workspace path unavailable for CodeAct execution")
+                    v2_runner = CodeActRunnerV2(v2_client, ws_path)
+                    try:
+                        await v2_runner.ensure_bootstrap()
+                    except Exception:
+                        pass
 
-                    from ...services.codeact_runner import CodeActRunner  # lazy import
-
-                    runner = CodeActRunner(self.llm_client, self.openhands_client.action_runner)
-
-                    def _extract_final_result(steps_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-                        obs_text = "\n".join(
-                            [step.get("observation", "") for step in steps_dict.get("steps", [])]
-                        ) if isinstance(steps_dict, dict) else ""
-                        if ("Final result:" in obs_text) or ("Result:" in obs_text):
-                            line = next(
-                                (l for l in obs_text.splitlines() if "Final result:" in l),
-                                None,
-                            ) or next((l for l in obs_text.splitlines() if "Result:" in l), None)
-                            if line:
-                                json_str = line.split(":", 1)[1].strip()
-                                try:
-                                    data = safe_json_loads(sanitize_json_strings(json_str))
-                                except JsonParseError as exc:
-                                    self.logger.debug(
-                                        "CodeAct final result JSON parse failed: %s", exc
-                                    )
-                                    return None
-                                return data if isinstance(data, dict) else None
-                        return None
-
-                    event_offsets = {
-                        "planning": 0.4,
-                        "tool_call": 0.5,
-                        "tool_result": 0.6,
-                        "tool_result_update": 0.65,
-                        "finish": 0.75,
-                        "error": 0.7,
-                    }
-
-                    async def _cb(event: str, data: Dict[str, Any]) -> None:
-                        await _log_collection_event(
-                            suffix=event,
-                            message=f"CodeAct {event}",
-                            offset=event_offsets.get(event, 0.55),
-                            metadata_overrides={
-                                "node_type": "step",
-                                "node_id": codeact_node_id,
-                                "parent_id": parent_node_id,
-                                "status": data.get("success"),
-                                "preview": data.get("observation_preview"),
-                                "tool": data.get("tool"),
-                            },
-                        )
-
-                    base_goal = (
-                        f"Create a Python script at code/collect_data_{execution.id}.py implementing collect_data() to collect real measurements per the plan. "
-                        f"Run it via bash (python3 code/collect_data_{execution.id}.py) and ensure it prints EXACTLY ONE line starting with 'Final result: ' "
-                        f"followed by a JSON object with this minimal schema: "
-                        f"{{ 'success': true|false, 'measurements': [number, ...], 'statistical_tests': {{ 't_test': {{ 'p_value': number }} }}, 'effect_size': number, 'errors': [str,...] }}. "
-                        f"The 'measurements' array MUST be non-empty and derive from real execution (e.g., latencies, runtimes, accuracy). If statistical tests are available, populate them; otherwise omit. "
-                        f"Avoid placeholder/boilerplate; write production-ready code with concrete logic, error handling, and provenance logging. "
-                        f"Avoid using random number generators (e.g. random.uniform, np.random) unless the protocol explicitly requires them. "
-                        f"Do not clone unrelated repositories (e.g., OpenHands); work within the current workspace. "
-                        f"Interact with the actual environment (files, processes, databases, or benchmarks) and save metrics under experiments/{design.id}/results. "
-                        f"When loading data into PostgreSQL from workspace files, use client-side copy (\\copy) or absolute server-readable paths. Server-side COPY to relative workspace paths will fail. "
-                        f"If dependencies are missing, write commands to install or initialize them within the workspace and re-run. "
-                        f"If a ResearchActionSpec JSON does not already exist at experiments/{design.id}/ras_spec.json, author one describing each command sequence, required capabilities, artifacts, and assertions so the orchestrator can execute the workflow autonomously."
-                    )
-
-                    outer_rounds = int(self.config.get("codeact_rounds", 3))
-                    last_obs_preview = ""
-                    for round_idx in range(1, outer_rounds + 1):
-                        goal_text = base_goal
-                        if last_obs_preview:
-                            goal_text += (
-                                "\n\nPrevious attempt feedback (summarized):\n" + last_obs_preview[:800]
-                                + "\nAddress these issues explicitly before running again."
-                            )
-                        result = await runner.run(
-                            workspace_path=workspace_path,
-                            goal=goal_text,
-                            max_steps=int(self.config.get("codeact_max_steps", 10)),
-                            timeout_per_action=int(self.config.get("codeact_action_timeout", 180)),
-                            progress_cb=_cb,
-                        )
-                        execution.intermediate_results.setdefault("codeact_rounds", []).append(result)
-                        final_data = _extract_final_result(result)
-                        if final_data is not None:
-                            normalized = self._normalize_or_salvage_final_result(
-                                design,
-                                execution,
-                                session_context,
-                                final_data,
-                                workspace_path,
-                            )
-                            if normalized:
-                                await _log_collection_event(
-                                    suffix="finish",
-                                    message="CodeAct completed successfully",
-                                    offset=0.85,
-                                    metadata_overrides={"node_type": "result", "status": "completed"},
-                                    node_type="result",
-                                )
-                                return normalized
-                            # Treat empty/invalid result as a failed round to trigger repair
-                            failure_msg = "Final result missing required measurements/statistics"
-                            failure_entry = {
-                                "round": round_idx,
-                                "message": failure_msg,
-                                "observation_preview": "",
-                                "success": False,
-                            }
-                            codeact_failures.append(failure_entry)
-                            execution.logs.append(
-                                f"CodeAct round {round_idx} produced unusable result; requesting repair"
-                            )
-                            execution.output_data.setdefault("codeact_failures", []).append(failure_entry)
-                            await _log_collection_event(
-                                suffix=f"round_{round_idx}_failed",
-                                message=failure_msg,
-                                offset=0.75,
-                                metadata_overrides={"status": "error", "round": round_idx},
-                            )
-                            # continue to next round
-
+                    # 1) If an existing script is present, use it; else author one via LLM and write it deterministically
+                    script_path: Optional[Path] = None
+                    if (ws_path / "code/collect_data.py").exists():
+                        script_path = ws_path / "code/collect_data.py"
+                    else:
                         try:
-                            obs_list = [s.get("observation", "") for s in result.get("steps", [])]
-                            last_obs_preview = "\n".join(obs_list[-5:]) if obs_list else ""
+                            candidates = sorted((ws_path / "code").glob("collect_data_exec_*.py"), key=lambda p: p.stat().st_mtime, reverse=True)
+                            script_path = candidates[0] if candidates else None
                         except Exception:
-                            last_obs_preview = ""
+                            script_path = None
 
-                        failure_msg = (
-                            result.get("message")
-                            or result.get("error")
-                            or (last_obs_preview[:400] if last_obs_preview else "No result emitted")
+                    if not script_path:
+                        # Author a script via LLM (direct codegen), then write it via V2
+                        code_name = f"code/collect_data_{execution.id}.py"
+                        # Simple directive for LLM: produce a script that prints one 'Final result: ' JSON line
+                        author_prompt = (
+                            "Write a Python3 script that collects real measurements required by the experiment below, "
+                            "then prints exactly one line starting with 'Final result: ' followed by a compact JSON object.\n\n"
+                            f"Experiment: {design.name}\nDescription: {design.description}\nMethodology: {design.methodology}\nVariables: {design.variables}\nControls: {design.controls}\nData Collection Plan: {design.data_collection_plan}\n\n"
+                            "The JSON should include at least: success (bool), measurements (non-empty numeric list), "
+                            "and if computed, statistical_tests (e.g., t_test with p_value) and effect_size.\n"
+                            "Avoid placeholders. Use available tools/libraries present in the environment. "
+                            "Do not access external network. Save any intermediate files under experiments/<id>/results.\n"
+                            "The script must be runnable with 'python3 <path>'."
                         )
-                        failure_entry = {
-                            "round": round_idx,
-                            "message": failure_msg,
-                            "observation_preview": last_obs_preview[:800] if last_obs_preview else "",
-                            "success": result.get("success"),
-                        }
-                        codeact_failures.append(failure_entry)
-                        execution.logs.append(
-                            f"CodeAct round {round_idx} did not produce a final result: {failure_msg}"
-                        )
-                        execution.output_data.setdefault("codeact_failures", []).append(failure_entry)
+                        raw_code = await self.llm_client.generate(author_prompt)
+                        code_text = self._clean_code_block(str(raw_code))
+                        if not code_text:
+                            # Debug: persist prompt and LLM outputs for investigation
+                            dbg_dir = ws_path / f"experiments/{design.id}/logs"
+                            try:
+                                dbg_dir.mkdir(parents=True, exist_ok=True)
+                                (dbg_dir / f"llm_collect_data_prompt_{execution.id}.txt").write_text(author_prompt, encoding="utf-8")
+                                (dbg_dir / f"llm_collect_data_raw_{execution.id}.txt").write_text(str(raw_code), encoding="utf-8")
+                                (dbg_dir / f"llm_collect_data_cleaned_{execution.id}.py").write_text(code_text or "", encoding="utf-8")
+                            except Exception:
+                                pass
+                            preview = (code_text or "").strip()[:240].replace("\n", " ")
+                            raise RuntimeError(
+                                "LLM did not produce a valid data collection script (empty cleaned output), "
+                                f"see {dbg_dir} for prompt/raw/cleaned outputs. Preview: {preview}"
+                            )
+                        v2_res = await v2_runner.write(code_name, code_text, overwrite=True)
+                        if not v2_res.success:
+                            raise RuntimeError("Failed to write data collection script via V2")
+                        script_path = ws_path / code_name
+
+                    # 2) Run the script and capture Final result
+                    cmd = f"python3 {script_path.relative_to(ws_path)}"
+                    res = await v2_runner.run(cmd, timeout_sec=int(self.config.get("codeact_action_timeout", 300)))
+                    stdout = (res.stdout or "").strip()
+                    import re as _re
+                    final_line = None
+                    for ln in stdout.splitlines():
+                        if _re.search(r"^\s*Final\s+result\s*:\s*", ln, _re.IGNORECASE):
+                            final_line = ln.strip()
+                            break
+                    if not final_line:
+                        for ln in stdout.splitlines():
+                            if "Final result:".lower() in ln.lower():
+                                final_line = ln.strip()
+                                break
+                    if not final_line:
+                        # Persist stdout to logs for debugging
+                        dbg_dir = ws_path / f"experiments/{design.id}/logs"
+                        try:
+                            dbg_dir.mkdir(parents=True, exist_ok=True)
+                            (dbg_dir / f"collect_stdout_{execution.id}.txt").write_text(stdout, encoding="utf-8")
+                        except Exception:
+                            pass
+                        raise RuntimeError("Data collection script did not print a 'Final result:' line")
+                    json_str = final_line.split(":", 1)[1].strip()
+                    try:
+                        final_data = safe_json_loads(sanitize_json_strings(json_str))
+                    except JsonParseError as exc:
+                        raise RuntimeError(f"Failed to parse Final result JSON: {exc}")
+                    if not isinstance(final_data, dict):
+                        raise RuntimeError("Final result payload is not a JSON object")
+
+                    normalized = self._normalize_or_salvage_final_result(
+                        design,
+                        execution,
+                        session_context,
+                        final_data,
+                        ws_path,
+                    )
+                    if normalized:
                         await _log_collection_event(
-                            suffix=f"round_{round_idx}_failed",
-                            message=f"CodeAct round {round_idx} failed: {failure_msg[:160]}",
-                            offset=0.7,
-                            metadata_overrides={
-                                "status": "error",
-                                "error": failure_msg,
-                                "round": round_idx,
-                            },
+                            suffix="finish",
+                            message="V2 data collection completed",
+                            offset=0.85,
+                            metadata_overrides={"node_type": "result", "status": "completed"},
+                            node_type="result",
                         )
-
-                    summary_parts: List[str] = []
-                    for failure in codeact_failures[-3:]:
-                        round_id = failure.get("round")
-                        snippet_source = (failure.get("message") or "")
-                        if not snippet_source:
-                            snippet_source = failure.get("observation_preview") or ""
-                        snippet = (snippet_source or "").strip().replace("\n", " ")[:180]
-                        summary_parts.append(
-                            f"round {round_id}: {snippet}" if round_id else snippet
-                        )
-                    failure_summary = "; ".join(summary_parts) or "no diagnostic output captured"
-                    raise RuntimeError(
-                        "CodeAct retries exhausted after "
-                        f"{outer_rounds} round(s). Last diagnostics: {failure_summary}"
-                    )
-                except Exception as exc:
-                    await _log_collection_event(
-                        suffix="error",
-                        message=f"CodeAct flow error: {exc}",
-                        offset=0.8,
-                        metadata_overrides={"status": "error", "error": str(exc)},
-                    )
-                    raise RuntimeError(f"CodeAct flow error: {exc}") from exc
-
-            raise RuntimeError(
-                "CodeAct runtime did not produce a final result or is unavailable; refusing direct LLM code generation."
-            )
+                        return normalized
+                    raise RuntimeError("Final result missing required measurements/statistics after normalization")
+                finally:
+                    try:
+                        await v2_client.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                await _log_collection_event(
+                    suffix="error",
+                    message=f"V2 data collection error: {exc}",
+                    offset=0.8,
+                    metadata_overrides={"status": "error", "error": str(exc)},
+                )
+                # bubble to outer handler
+                raise
+            
+            # If we reached here, both RAS and V2 paths failed
+            raise RuntimeError("Data collection did not yield a valid Final result")
         except Exception as exc:
             await _log_collection_event(
                 suffix="failure",
@@ -1551,11 +1496,8 @@ class ScientificResearchEngine:
             config=self.config,
             progress_logger=self._log_progress,
         )
-        self.goal_bridge = (
-            OpenHandsGoalPlanBridge(openhands_client, llm_client)
-            if openhands_client and llm_client
-            else None
-        )
+        # Legacy GoalPlan bridge (CodeAct) removed; use V2-only utilities elsewhere
+        self.goal_bridge = None
 
         # Optional GEPA meta-optimizer (requires dspy/gepa packages)
         self.meta_optimizer = None
@@ -2425,76 +2367,22 @@ class ScientificResearchEngine:
                             parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
                         )
 
-                    goal_plan_nodes: Dict[str, str] = {}
-                    goal_plan: Optional[GoalPlan] = None
-
-                    if self.goal_bridge:
-                        # Pass the unified session ID from the OpenHands context
-                        # This ensures goal_bridge uses the same workspace as the scientific research
-                        plan_context = {
-                            "hypothesis": hypothesis.statement,
-                            "variables": hypothesis.variables,
-                            "analysis_plan": design.analysis_plan,
-                            "resource_requirements": design.resource_requirements,
-                        }
-
-                        # Add the session_id from openhands_context if available
-                        if openhands_context:
-                            plan_context["session_id"] = openhands_context.session_id
-
-                        goal_plan = await self.goal_bridge.generate_goal_plan(design.description or design.name, plan_context)
-                        goal_plan_nodes = await self._log_goal_plan(
-                            session_id,
-                            idea,
-                            goal_plan,
-                            iteration_progress + per_iteration_increment * 0.22,
-                            per_iteration_increment * 0.15,
-                        )
-
-                        async def _plan_callback(event_type: str, payload: Dict[str, Any]) -> None:
-                            if not payload:
-                                return
-                            step_id = payload.get("step_id")
-                            if not step_id:
-                                return
-                            matching = next((s for s in goal_plan.steps if s.id == step_id), None)
-                            if not matching:
-                                return
-                            progress_point = iteration_progress + per_iteration_increment * (0.25 if event_type == "step_started" else 0.28)
-                            await self._log_goal_plan_step_update(
-                                session_id,
-                                idea,
-                                matching,
-                                goal_plan_nodes,
-                                progress_point,
-                            )
-
-                        # Default to v2 bootstrap and plan execution when a workspace is available
-                        try:
-                            ws_path = self.openhands_client.workspace_manager.get_workspace_path(openhands_context.workspace_id)  # type: ignore[attr-defined]
-                            if ws_path:
-                                allowed_roots = [ws_path / "code", ws_path / "experiments", ws_path / "logs", ws_path / "output", ws_path / "workspace"]
-                                v2_client = OpenHandsClientV2(workspace_path=ws_path, allowed_write_roots=allowed_roots)
+                    # V2-only bootstrap (legacy CodeAct goal-plan removed)
+                    try:
+                        ws_path = self.openhands_client.workspace_manager.get_workspace_path(openhands_context.workspace_id)  # type: ignore[attr-defined]
+                        if ws_path:
+                            allowed_roots = [ws_path / "code", ws_path / "experiments", ws_path / "logs", ws_path / "output", ws_path / "workspace"]
+                            v2_client = OpenHandsClientV2(workspace_path=ws_path, allowed_write_roots=allowed_roots)
+                            try:
+                                v2_runner = CodeActRunnerV2(v2_client, ws_path)
+                                await v2_runner.ensure_bootstrap()
+                            finally:
                                 try:
-                                    v2_runner = CodeActRunnerV2(v2_client, ws_path)
-                                    await v2_runner.ensure_bootstrap()
-                                    # Execute an empty v2 plan to establish deterministic environment; retain legacy plan for complex flows
-                                    v2_bridge = OpenHandsBridgeV2(v2_runner)
-                                    try:
-                                        await v2_bridge.execute_steps({"steps": []}, {"workspace_dir": str(ws_path)}, progress_cb=None)
-                                    except Exception:
-                                        pass
-                                finally:
-                                    # Ensure persistent session is torn down after bootstrap
-                                    try:
-                                        await v2_client.close()
-                                    except Exception:
-                                        pass
-                        except Exception as _exc:
-                            self.logger.debug("V2 bootstrap skipped: %s", _exc)
-
-                        # Use legacy execution for full CodeAct planning/execution compatibility
-                        goal_plan = await self.goal_bridge.execute_goal_plan(goal_plan, plan_context, progress_callback=_plan_callback)
+                                    await v2_client.close()
+                                except Exception:
+                                    pass
+                    except Exception as _exc:
+                        self.logger.debug("V2 bootstrap skipped: %s", _exc)
 
                     final_execution, execution_history = await self._execute_experiment_with_retries(
                         idea,
@@ -2508,9 +2396,7 @@ class ScientificResearchEngine:
                         exp_round,
                     )
 
-                    if goal_plan:
-                        for exec_record in execution_history:
-                            exec_record.goal_plan = goal_plan
+                    # Goal plan logging for executions is disabled (legacy CodeAct plan removed)
 
                     idea.executions.extend(execution_history)
 

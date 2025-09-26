@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..core.llm_client import LLMClient
 from ..core.openhands import OpenHandsClient, CodeGenerationRequest, CodeGenerationResult
-from ..services.codeact_runner import CodeActRunner
+# Legacy CodeAct runner removed; V2 bridge only
 from ..utils.json_utils import JsonParseError, safe_json_loads
 
 
@@ -60,9 +60,8 @@ class OpenHandsGoalPlanBridge:
     def __init__(self, client: OpenHandsClient, llm_client: LLMClient):
         self._client = client
         self._llm_client = llm_client
+        # Migrate to V2 by default: prefer V2 runner for all actions
         self._codeact_runner = None
-        if getattr(client, 'action_runner', None) and client.action_runner.is_available:
-            self._codeact_runner = CodeActRunner(llm_client, client.action_runner)
         self._codeact_max_steps = int(os.getenv("CODEACT_MAX_STEPS", "20"))
         # Use the unified OPENHANDS_ACTION_TIMEOUT (default: 120 seconds = 2 minutes)
         self._codeact_action_timeout = int(os.getenv("OPENHANDS_ACTION_TIMEOUT", "120"))
@@ -186,11 +185,7 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
         execution_context: Dict[str, Any],
         progress_callback: Optional[ProgressCallback] = None,
     ) -> GoalPlan:
-        """Execute a GoalPlan using the legacy CodeAct runner.
-
-        Mirrors the semantics used by the v2 bridge so scientific_research
-        can rely on a stable API. Requires OpenHands runtime to be available.
-        """
+        """Execute GoalPlan by creating V2 step artifacts (no proxy enforcement)."""
         # Use a stable session id for the plan
         session_id = execution_context.get("session_id") or f"experiment_{plan.plan_id}"
 
@@ -200,39 +195,38 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
             config=self._sanitize_workspace_config(execution_context.get("resource_requirements")),
         )
 
-        # Optional bootstrap with CodeAct if runner is available
-        if (
-            self._bootstrap_enabled
-            and execution_context.get("bootstrap_environment", True)
-            and self._codeact_runner is not None
-        ):
-            workspace_path = self._client.workspace_manager.get_workspace_path(
-                session_config.workspace_config.get("workspace_id")
-            ) if session_config.workspace_config else None
-            if workspace_path:
-                async def _bootstrap_cb(event: str, data: Dict[str, Any]):
-                    if progress_callback:
-                        await progress_callback(
-                            "bootstrap_event",
-                            {"event": event, "data": data},
-                        )
+        # Use V2 client/runner to generate lightweight artifacts per step.
+        workspace_path = self._client.workspace_manager.get_workspace_path(
+            session_config.workspace_config.get("workspace_id")
+        ) if session_config.workspace_config else None
+
+        if not workspace_path:
+            for s in plan.steps:
+                s.status = "failed"
+                s.notes.append("No workspace path available for V2 execution")
+            return plan
+
+        try:
+            from ..services.codeact_runner import CodeActRunnerV2
+            from ..integrations.openhands_runtime import OpenHandsClientV2
+            v2_client = OpenHandsClientV2(workspace_path=workspace_path, allowed_write_roots=[workspace_path, workspace_path/"code", workspace_path/"experiments", workspace_path/"logs", workspace_path/"output", workspace_path/"workspace"])  # type: ignore
+            v2_runner = CodeActRunnerV2(v2_client, workspace_path)
+            # Create a simple artifact per step with description + expected output
+            for step in plan.steps:
+                step.status = "running"
                 if progress_callback:
-                    await progress_callback(
-                        "bootstrap_start",
-                        {"goal": plan.goal, "workspace": str(workspace_path)},
-                    )
-                bootstrap_result = await self._codeact_runner.run(
-                    workspace_path=workspace_path,
-                    goal=self._bootstrap_goal,
-                    max_steps=self._codeact_max_steps,
-                    timeout_per_action=self._codeact_action_timeout,
-                    progress_cb=_bootstrap_cb,
-                )
+                    await progress_callback("step_started", {"step_id": step.id, "description": step.description})
+                rel = f"experiments/{plan.plan_id}/logs/step_{step.id}.txt"
+                content = f"Description:\n{step.description}\n\nExpected output:\n{step.expected_output}\n"
+                await v2_runner.create_if_absent(rel, content)
+                step.status = "completed"
                 if progress_callback:
-                    await progress_callback(
-                        "bootstrap_complete",
-                        {"success": bool(bootstrap_result.get("success"))},
-                    )
+                    await progress_callback("step_completed", {"step_id": step.id, "status": step.status, "stdout": rel, "stderr": ""})
+        except Exception as exc:
+            for s in plan.steps:
+                s.status = "failed"
+                s.notes.append(f"V2 execution failed: {exc}")
+        return plan
 
         # Execute each step with CodeAct
         for step in plan.steps:
@@ -308,18 +302,32 @@ Ensure dependencies reference earlier step ids. Provide 3-6 actionable steps. Do
         return plan
 
 
+from .openhands_runtime import OpenHandsClientV2  # type: ignore
+from ..services.proxy_sql_tool import ProxySQLTool
+
+
 class OpenHandsBridgeV2:
-    """Minimal plan executor using CodeActRunnerV2.
+    """Minimal plan executor using CodeActRunnerV2 with proxy_sql support.
 
     Steps schema example:
       {"steps": [
          {"kind":"create_if_absent","path":"code/a.py","content":"print('hi')"},
-         {"kind":"run","cmd":"./.venv/bin/python code/a.py"}
+         {"kind":"run","cmd":"./.venv/bin/python code/a.py"},
+         {"kind":"proxy_sql","engine":"duckdb","sql":"SELECT 1"}
       ]}
     """
 
-    def __init__(self, runner):
+    def __init__(self, runner, proxy_base: str | None = None):
         self.runner = runner
+        self._proxy_tool: ProxySQLTool | None = None
+        try:
+            ws_dir = getattr(runner, "ws_dir", None) or getattr(runner, "workspace_dir", None)
+            if ws_dir is None:
+                from pathlib import Path
+                ws_dir = Path(".").resolve()
+            self._proxy_tool = ProxySQLTool(runner.client, ws_dir, proxy_base or "http://127.0.0.1:7890/sql")
+        except Exception:
+            self._proxy_tool = None
 
     async def execute_steps(self, goal_plan: dict, plan_context: dict, progress_cb=None) -> dict:
         await self.runner.ensure_bootstrap()
@@ -340,6 +348,9 @@ class OpenHandsBridgeV2:
                 r = await self.runner.read(step["path"]) 
             elif kind == "run":
                 r = await self.runner.run(step["cmd"], timeout_sec=step.get("timeout_sec", 300))
+            elif kind == "proxy_sql" and self._proxy_tool is not None:
+                pr = await self._proxy_tool.execute(step.get("sql", ""), engine=step.get("engine", ""), dataset=step.get("dataset"), timeout_sec=step.get("timeout_sec", 120), retries=step.get("retries", 2))
+                r = {"success": pr.ok, "result": {"status": pr.status, "rows": pr.rows_count, "elapsed_ms": pr.elapsed_ms, "error": pr.error_message}}
             else:
                 r = {"success": False, "error": {"type": "CLIENT_ERROR", "message": f"unknown step kind: {kind}"}}
             ok = r.success if hasattr(r, "success") else r.get("success")

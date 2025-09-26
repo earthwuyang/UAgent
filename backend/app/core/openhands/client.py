@@ -231,55 +231,8 @@ class OpenHandsClient:
         session_state.last_activity = asyncio.get_event_loop().time()
 
         try:
-            # Prefer CodeAct runtime when available; fully hand over codegen/exec/debug
+            # CodeAct integration removed: rely on explicit scripts or legacy LLM codegen path
             workspace_path = self.workspace_manager.get_workspace_path(session_state.workspace_id)
-            if request.execute_immediately and workspace_path and self.action_runner.is_available and llm_client is not None:
-                try:
-                    # Ensure deterministic bootstrap via v2 before CodeAct planning
-                    try:
-                        from ...integrations.openhands_runtime import OpenHandsClientV2  # type: ignore
-                        from ...services.codeact_runner import CodeActRunnerV2  # type: ignore
-                        allowed_roots = [workspace_path / "code", workspace_path / "experiments", workspace_path / "logs", workspace_path / "output", workspace_path / "workspace"]
-                        v2_client = OpenHandsClientV2(workspace_path=workspace_path, allowed_write_roots=allowed_roots)
-                        try:
-                            v2_runner = CodeActRunnerV2(v2_client, workspace_path)
-                            await v2_runner.ensure_bootstrap()
-                        finally:
-                            try:
-                                await v2_client.close()
-                            except Exception:
-                                pass
-                    except Exception as exc:
-                        logger.debug("V2 bootstrap skipped in OpenHandsClient: %s", exc)
-
-                    from ...services.codeact_runner import CodeActRunner  # type: ignore
-                    runner = CodeActRunner(llm_client, self.action_runner)
-                    goal = (
-                        f"Generate real, runnable code to accomplish: {request.task_description}. "
-                        f"Avoid fabricated outputs; rely on actual execution and measurements. If you need randomness, justify it explicitly and document the seed. "
-                        f"Create a Python file under code/, run it with bash (python3 path.py), and print a single line 'Result: ' + JSON."
-                    )
-                    result = await runner.run(
-                        workspace_path=workspace_path,
-                        goal=goal,
-                        max_steps=int(os.getenv("CODEACT_MAX_STEPS", "12")),
-                        timeout_per_action=int(request.timeout or int(os.getenv("CODEACT_ACTION_TIMEOUT", "300"))),
-                        progress_cb=None,
-                    )
-                    success = bool(result.get("success")) if isinstance(result, dict) else False
-                    analysis = "CodeAct run completed" if success else (result.get("error", "CodeAct failed") if isinstance(result, dict) else "CodeAct failed")
-                    # Do not write any template code; return CodeAct outcome
-                    return CodeGenerationResult(
-                        session_id=request.session_id,
-                        task_description=request.task_description,
-                        generated_code="",
-                        execution_result=None,
-                        analysis=analysis,
-                        success=success,
-                        next_steps=[],
-                    )
-                except Exception as exc:
-                    logger.warning("CodeAct path error; falling back to legacy LLM codegen: %s", exc)
 
             # Legacy LLM codegen path (used only if CodeAct unavailable)
             # Generate code using LLM (generic, engine-agnostic)

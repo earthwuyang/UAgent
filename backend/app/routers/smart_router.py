@@ -434,24 +434,37 @@ async def route_and_execute(request: RouterRequest):
 
             report_markdown = "\n".join(report_lines).strip() + "\n"
 
+            # Determine completion status based on confidence threshold
+            try:
+                import os
+                threshold = float(os.getenv("UAGENT_SCIENCE_COMPLETE_THRESHOLD", os.getenv("CONFIDENCE_THRESHOLD", "0.8")))
+            except Exception:
+                threshold = 0.8
+            is_complete = (execution_result.confidence_score or 0.0) >= threshold
+
             return {
                 "engine_used": "scientific_research",
-                "query": execution_result.query,
-                "hypotheses_count": len(execution_result.hypotheses),
-                "experiments_count": len(execution_result.experiments),
-                "iterations_completed": execution_result.iteration_count,
-                "confidence_score": execution_result.confidence_score,
-                "has_literature_review": execution_result.literature_review is not None,
-                "has_code_analysis": execution_result.code_analysis is not None,
-                "summary": summary_value,
-                "synthesis": execution_result.synthesis,
-                "recommendations": execution_result.recommendations,
-                "report_markdown": report_markdown,
-                "executions": serialized_execs,
-                "experiment_results": serialized_results,
-                "idea_evaluations": {
-                    idea_id: asdict(eval_obj) if eval_obj else None
-                    for idea_id, eval_obj in (execution_result.idea_evaluations or {}).items()
+                    "query": execution_result.query,
+                    "hypotheses_count": len(execution_result.hypotheses),
+                    "experiments_count": len(execution_result.experiments),
+                    "iterations_completed": execution_result.iteration_count,
+                    "confidence_score": execution_result.confidence_score,
+                    "has_literature_review": execution_result.literature_review is not None,
+                    "has_code_analysis": execution_result.code_analysis is not None,
+                    "summary": summary_value,
+                    "synthesis": execution_result.synthesis,
+                    "recommendations": execution_result.recommendations,
+                    "report_markdown": report_markdown,
+                    "executions": serialized_execs,
+                    "experiment_results": serialized_results,
+                    "idea_evaluations": {
+                        idea_id: asdict(eval_obj) if eval_obj else None
+                        for idea_id, eval_obj in (execution_result.idea_evaluations or {}).items()
+                    },
+                "is_complete": bool(is_complete),
+                "complete_criteria": {
+                    "confidence_threshold": threshold,
+                    "met": bool(is_complete),
                 },
             }
 
@@ -471,7 +484,27 @@ async def route_and_execute(request: RouterRequest):
                     "classification": classification_response.dict(),
                     "execution": execution_payload
                 }
-                await session_manager.set_result(session_id, result_payload)
+                # Auto-continue option for incomplete scientific runs
+                auto_passes = 0
+                try:
+                    import os
+                    auto_passes = int(os.getenv("UAGENT_AUTO_CONTINUE_INCOMPLETE", "0"))
+                except Exception:
+                    auto_passes = 0
+
+                if engine_key == "scientificresearch" and isinstance(execution_payload, dict):
+                    passes = 0
+                    while not execution_payload.get("is_complete", True) and passes < auto_passes:
+                        passes += 1
+                        # Re-run scientific engine once more
+                        execution_payload = await execute_scientific()
+                        result_payload["execution"] = execution_payload
+
+                # Mark result completed only when complete or for non-scientific engines
+                if engine_key != "scientificresearch" or execution_payload.get("is_complete", True):
+                    await session_manager.set_result(session_id, result_payload)
+                else:
+                    await session_manager.set_status(session_id, "running")
 
             except Exception as exc:
                 logger.error(
