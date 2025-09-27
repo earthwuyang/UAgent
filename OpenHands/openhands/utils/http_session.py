@@ -8,29 +8,39 @@ from openhands.core.logger import openhands_logger as logger
 
 # Create client that bypasses proxy for localhost connections
 # This fixes the issue where proxy interferes with local OpenHands server connections
-# We override the environment to exclude localhost from proxy
-original_no_proxy = os.environ.get('NO_PROXY', os.environ.get('no_proxy', ''))
-localhost_exclusions = 'localhost,127.0.0.1,0.0.0.0,::1'
+def _create_client_with_localhost_bypass():
+    """Create httpx client that bypasses proxy for localhost"""
+    original_no_proxy = os.environ.get('NO_PROXY', os.environ.get('no_proxy', ''))
+    localhost_exclusions = 'localhost,127.0.0.1,0.0.0.0,::1'
 
-# Temporarily set NO_PROXY to exclude localhost
-if original_no_proxy:
-    os.environ['NO_PROXY'] = f"{original_no_proxy},{localhost_exclusions}"
-    os.environ['no_proxy'] = f"{original_no_proxy},{localhost_exclusions}"
-else:
-    os.environ['NO_PROXY'] = localhost_exclusions
-    os.environ['no_proxy'] = localhost_exclusions
+    # Build comprehensive NO_PROXY list
+    if original_no_proxy:
+        # Check if localhost is already in the list (case-insensitive)
+        existing_entries = [entry.strip().lower() for entry in original_no_proxy.split(',')]
+        new_entries = [entry for entry in localhost_exclusions.split(',')
+                      if entry.lower() not in existing_entries]
+        if new_entries:
+            no_proxy_value = f"{original_no_proxy},{','.join(new_entries)}"
+        else:
+            no_proxy_value = original_no_proxy
+    else:
+        no_proxy_value = localhost_exclusions
 
-# Create client with environment proxy settings (now includes localhost exclusion)
-CLIENT = httpx.Client()
+    # Set environment variables for the client creation
+    os.environ['NO_PROXY'] = no_proxy_value
+    os.environ['no_proxy'] = no_proxy_value
 
-# Restore original NO_PROXY if needed (to not affect other parts of the code)
-if original_no_proxy:
-    os.environ['NO_PROXY'] = original_no_proxy
-    os.environ['no_proxy'] = original_no_proxy
-else:
-    # Remove if it wasn't originally set
-    os.environ.pop('NO_PROXY', None)
-    os.environ.pop('no_proxy', None)
+    # Create client with updated proxy settings
+    client = httpx.Client()
+
+    # Restore original environment if it existed, otherwise keep the localhost bypass
+    if original_no_proxy and original_no_proxy != no_proxy_value:
+        # Keep the localhost bypass in place for other processes
+        pass  # Don't restore, keep localhost bypass active
+
+    return client
+
+CLIENT = _create_client_with_localhost_bypass()
 
 
 @dataclass

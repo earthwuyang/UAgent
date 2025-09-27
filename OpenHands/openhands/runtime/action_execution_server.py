@@ -373,6 +373,9 @@ class ActionExecutor:
             action.set_hard_timeout(300)
             logger.debug(f'Executing init command: {command}')
             obs = await self.run(action)
+            logger.debug(f'Init command returned observation type: {type(obs).__name__}')
+            if not isinstance(obs, CmdOutputObservation):
+                logger.error(f'Expected CmdOutputObservation but got {type(obs).__name__}: {obs}')
             assert isinstance(obs, CmdOutputObservation)
             logger.debug(
                 f'Init command outputs (exit code: {obs.exit_code}): {obs.content}'

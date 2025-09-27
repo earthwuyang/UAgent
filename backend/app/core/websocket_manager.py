@@ -524,6 +524,30 @@ class ResearchProgressTracker:
 
         await self.websocket_manager.broadcast_journal_entry(session_id, journal_entry)
 
+    async def log_openhands_output(self, session_id: str, output_type: str, content: Dict[str, Any]):
+        """Log OpenHands real-time output (commands, file operations, etc.)"""
+        # Create OpenHands output event
+        event = ProgressEvent(
+            event_type=EventType.OPENHANDS_OUTPUT,
+            session_id=session_id,
+            timestamp=datetime.now(),
+            data={
+                "output_type": output_type,
+                "content": content
+            },
+            source="openhands",
+            message=f"OpenHands {output_type}: {content.get('command', content.get('operation', 'action'))}"
+        )
+
+        await self.websocket_manager.broadcast_research_event(session_id, event)
+
+        # Also broadcast to OpenHands-specific connections for real-time monitoring
+        await self.websocket_manager.broadcast_openhands_output(
+            session_id,
+            output=str(content),
+            output_type=output_type
+        )
+
     async def log_error(self, session_id: str, engine: str, error: str, phase: str):
         """Log error event"""
         event = ProgressEvent(

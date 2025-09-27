@@ -38,7 +38,7 @@
                 {
                   "index": 1,
                   "function": {
-                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\"}",
+                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\", \"security_risk\": \"LOW\"}",
                     "name": "str_replace_editor"
                   },
                   "id": "toolu_01USom24cuiyvAembLhEryrn",
@@ -102,7 +102,7 @@
                 {
                   "index": 1,
                   "function": {
-                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\"}",
+                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\", \"security_risk\": \"LOW\"}",
                     "name": "str_replace_editor"
                   },
                   "id": "toolu_01USom24cuiyvAembLhEryrn",
@@ -295,7 +295,7 @@
                 {
                   "index": 1,
                   "function": {
-                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\"}",
+                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\", \"security_risk\": \"LOW\"}",
                     "name": "str_replace_editor"
                   },
                   "id": "toolu_01DodVjoeVmEY3gU5ALbqmGj",
@@ -359,7 +359,7 @@
                 {
                   "index": 1,
                   "function": {
-                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\"}",
+                    "arguments": "{\"command\": \"view\", \"path\": \"/workspace\", \"security_risk\": \"LOW\"}",
                     "name": "str_replace_editor"
                   },
                   "id": "toolu_01DodVjoeVmEY3gU5ALbqmGj",

@@ -67,6 +67,23 @@ async def create_mcp_clients(
     stdio_servers: list[MCPStdioServerConfig] | None = None,
 ) -> list[MCPClient]:
     import sys
+    import os
+
+    # Set NOPROXY for localhost to bypass proxy on port 7890
+    current_noproxy = os.environ.get('NO_PROXY', '')
+    if 'localhost' not in current_noproxy:
+        if current_noproxy:
+            os.environ['NO_PROXY'] = f"{current_noproxy},localhost,127.0.0.1"
+        else:
+            os.environ['NO_PROXY'] = "localhost,127.0.0.1"
+
+    # Also set no_proxy (lowercase) for compatibility
+    current_noproxy_lower = os.environ.get('no_proxy', '')
+    if 'localhost' not in current_noproxy_lower:
+        if current_noproxy_lower:
+            os.environ['no_proxy'] = f"{current_noproxy_lower},localhost,127.0.0.1"
+        else:
+            os.environ['no_proxy'] = "localhost,127.0.0.1"
 
     # Skip MCP clients on Windows
     if sys.platform == 'win32':

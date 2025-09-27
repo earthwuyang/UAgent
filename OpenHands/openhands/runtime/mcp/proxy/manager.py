@@ -34,10 +34,13 @@ class MCPProxyManager:
         """Initialize the MCP Proxy Manager.
 
         Args:
-            name: Name of the proxy server
-            auth_enabled: Whether authentication is enabled
-            api_key: API key for authentication (required if auth_enabled is True)
+            auth_enabled: Whether authentication is enabled (currently not used by FastMCP)
+            api_key: API key for authentication (currently not used by FastMCP)
             logger_level: Logging level for the FastMCP logger
+
+        Note:
+            The auth_enabled and api_key parameters are kept for future compatibility
+            but are not currently used by the FastMCP library.
         """
         self.auth_enabled = auth_enabled
         self.api_key = api_key
@@ -60,10 +63,10 @@ class MCPProxyManager:
             return None
 
         # Create a new proxy with the current configuration
+        # Note: FastMCP.as_proxy() doesn't accept auth_enabled and api_key parameters
+        # Those should be configured through the config dict if needed
         self.proxy = FastMCP.as_proxy(
             self.config,
-            auth_enabled=self.auth_enabled,
-            api_key=self.api_key,
         )
 
         logger.info('FastMCP Proxy initialized successfully')

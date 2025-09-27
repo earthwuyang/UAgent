@@ -691,9 +691,26 @@ def _extract_and_validate_params(
     # Check all required parameters are present
     missing_params = required_params - found_params
     if missing_params:
-        raise FunctionCallValidationError(
-            f"Missing required parameters for function '{fn_name}': {missing_params}"
-        )
+        # Create helpful error message with expected parameter format
+        missing_list = list(missing_params)
+        error_msg = f"Missing required parameters for function '{fn_name}': {missing_params}"
+
+        # Add specific guidance for security_risk parameter if missing
+        if 'security_risk' in missing_params:
+            error_msg += '\n\nIMPORTANT: Please include the "security_risk" parameter with one of these values:'
+            error_msg += '\n- "LOW" for safe operations (file reading, simple commands)'
+            error_msg += '\n- "MEDIUM" for moderate risk operations (file creation, package installation)'
+            error_msg += '\n- "HIGH" for potentially dangerous operations (system modifications, network access)'
+            error_msg += '\n\nExample: <parameter=security_risk>LOW</parameter>'
+
+        # Add general guidance for other missing parameters
+        if len(missing_params) > (1 if 'security_risk' in missing_params else 0):
+            other_missing = missing_params - {'security_risk'}
+            if other_missing:
+                error_msg += f'\n\nAlso missing: {other_missing}'
+                error_msg += '\nPlease check the function documentation for required parameter formats.'
+
+        raise FunctionCallValidationError(error_msg)
     return params
 
 

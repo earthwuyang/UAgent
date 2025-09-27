@@ -12,6 +12,7 @@ from ..core.app_state import get_app_state
 from ..core.smart_router import ClassificationRequest, ClassificationResult
 from ..core.websocket_manager import progress_tracker
 from ..core.streaming_llm_client import StreamingLLMClient
+from ..core.openhands.streaming_integration import enable_openhands_streaming
 
 
 logger = logging.getLogger(__name__)
@@ -305,6 +306,10 @@ async def route_and_execute(request: RouterRequest):
             streaming_llm_client = StreamingLLMClient(base_llm_client, session_id)
             original_llm_client = engine.llm_client
             engine.llm_client = streaming_llm_client
+
+            # Enable OpenHands streaming if available
+            if hasattr(engine, 'openhands_client') and engine.openhands_client:
+                engine.openhands_client = enable_openhands_streaming(engine.openhands_client, session_id)
 
             try:
                 execution_result = await engine.conduct_research(

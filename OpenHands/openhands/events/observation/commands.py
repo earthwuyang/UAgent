@@ -61,12 +61,15 @@ class CmdOutputMetadata(BaseModel):
         matches = []
         for match in CMD_OUTPUT_METADATA_PS1_REGEX.finditer(string):
             try:
-                json.loads(match.group(1).strip())  # Try to parse as JSON
+                # Remove escaping that was added in to_ps1_prompt() before parsing
+                json_str = match.group(1).strip().replace(r'\"', '"')
+                json.loads(json_str)  # Try to parse as JSON
                 matches.append(match)
             except json.JSONDecodeError:
-                logger.warning(
-                    f'Failed to parse PS1 metadata: {match.group(1)}. Skipping.'
-                    + traceback.format_exc()
+                # This is expected for PS1 templates with shell variables like $!, $?, etc.
+                # Only log at DEBUG level to reduce noise
+                logger.debug(
+                    f'PS1 metadata contains shell template variables, skipping: {match.group(1)[:100]}...'
                 )
                 continue  # Skip if not valid JSON
         return matches
@@ -74,7 +77,9 @@ class CmdOutputMetadata(BaseModel):
     @classmethod
     def from_ps1_match(cls, match: re.Match[str]) -> Self:
         """Extract the required metadata from a PS1 prompt."""
-        metadata = json.loads(match.group(1))
+        # Remove escaping that was added in to_ps1_prompt() before parsing
+        json_str = match.group(1).strip().replace(r'\"', '"')
+        metadata = json.loads(json_str)
         # Create a copy of metadata to avoid modifying the original
         processed = metadata.copy()
         # Convert numeric fields

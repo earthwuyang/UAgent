@@ -182,6 +182,11 @@ def response_to_actions(
                     raise FunctionCallValidationError(
                         f'Missing required argument "path" in tool call {tool_call.function.name}'
                     )
+                if 'security_risk' not in arguments:
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "security_risk" in tool call {tool_call.function.name}. '
+                        f'Please include "security_risk" parameter with value "LOW", "MEDIUM", or "HIGH".'
+                    )
                 path = arguments['path']
                 command = arguments['command']
                 other_kwargs = {

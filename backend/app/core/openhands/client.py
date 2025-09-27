@@ -437,6 +437,46 @@ class OpenHandsClient:
             logger.error(f"Failed to close session {session_id}: {e}")
             return False
 
+    async def shutdown(self) -> None:
+        """Shutdown all OpenHands sessions and cleanup resources"""
+        logger.info("Shutting down OpenHands client...")
+
+        # Get list of all active session IDs
+        active_sessions = list(self.sessions.keys())
+
+        if active_sessions:
+            logger.info(f"Closing {len(active_sessions)} active OpenHands sessions...")
+
+            # Close all sessions concurrently
+            close_tasks = []
+            for session_id in active_sessions:
+                task = asyncio.create_task(self._close_session_safe(session_id))
+                close_tasks.append(task)
+
+            # Wait for all sessions to close, with timeout
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*close_tasks, return_exceptions=True),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some OpenHands sessions did not close within timeout")
+
+        # Cleanup workspace manager
+        try:
+            await self.workspace_manager.cleanup_all_workspaces()
+        except Exception as e:
+            logger.error(f"Failed to cleanup workspaces during shutdown: {e}")
+
+        logger.info("OpenHands client shutdown complete")
+
+    async def _close_session_safe(self, session_id: str) -> None:
+        """Safely close a session with error handling"""
+        try:
+            await self.close_session(session_id)
+        except Exception as e:
+            logger.error(f"Error closing session {session_id} during shutdown: {e}")
+
     def _create_code_generation_prompt(self, request: CodeGenerationRequest) -> str:
         """Create prompt for code generation
 

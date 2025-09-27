@@ -202,12 +202,25 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down UAgent system...")
+
+    # Shutdown OpenHands runtime sessions
+    try:
+        await openhands_client.shutdown()
+    except Exception as e:
+        logger.error(f"Error shutting down OpenHands client: {e}")
+
+    # Clear cache
     if cache:
         await cache.clear()
+
+    # Shutdown session manager
     await session_manager.shutdown()
+
+    # Shutdown external OpenHands app client if connected
     openhands_app_client = get_app_state().get("openhands_app")
     if isinstance(openhands_app_client, OpenHandsAppClient):
         await openhands_app_client.shutdown()
+
     clear_app_state()
     logger.info("UAgent system shutdown complete")
 
