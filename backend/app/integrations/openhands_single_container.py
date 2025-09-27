@@ -157,6 +157,8 @@ This file is MANDATORY for completion.
         os.makedirs(f"{openhands_temp}/cache", mode=0o777, exist_ok=True)
         os.makedirs(f"{openhands_temp}/tmp", mode=0o777, exist_ok=True)
         os.makedirs(f"{openhands_temp}/home", mode=0o777, exist_ok=True)
+        # Create Playwright browser cache directory
+        os.makedirs(f"{openhands_temp}/home/.cache/ms-playwright", mode=0o777, exist_ok=True)
 
         # Set proper ownership and permissions
         for root, dirs, files in os.walk(openhands_temp):
@@ -168,9 +170,22 @@ This file is MANDATORY for completion.
                 except PermissionError:
                     pass  # Skip if we can't change ownership
 
+        # Get Docker group ID for proper Docker socket access
+        import subprocess
+        try:
+            # Get the docker group ID
+            docker_gid = subprocess.check_output(["getent", "group", "docker"]).decode().strip().split(":")[2]
+        except subprocess.CalledProcessError:
+            # Fallback: try to get docker group ID directly
+            try:
+                import grp
+                docker_gid = str(grp.getgrnam("docker").gr_gid)
+            except KeyError:
+                docker_gid = "999"  # Default Docker group ID
+
         return {
             "volumes": {
-                "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
+                # No Docker socket needed for headless CLI mode
                 str(cfg.workspace.resolve()): {"bind": "/workspace", "mode": "rw"},
                 f"{openhands_temp}/logs": {"bind": "/openhands/code/logs", "mode": "rw"},
                 f"{openhands_temp}/cache": {"bind": "/openhands/code/cache", "mode": "rw"},
@@ -178,7 +193,7 @@ This file is MANDATORY for completion.
                 f"{openhands_temp}/home": {"bind": "/tmp/openhands_home", "mode": "rw"},
             },
             "temp_dir": openhands_temp,
-            "user": f"{current_uid}:{current_gid}"
+            "user": f"{current_uid}:{current_gid}",  # Use current user and group
         }
 
     def run(self, cfg: SingleContainerConfig) -> SingleContainerResult:
@@ -214,21 +229,42 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             "PYTHONPATH": "/openhands/code",
             "PATH": "/openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin:/usr/local/bin:/usr/bin:/bin",
 
-            # LLM configuration from .env
-            "LLM_MODEL": cfg.llm_model or "openai/Moonshot-Kimi-K2-Instruct",
-            "LLM_API_KEY": cfg.llm_api_key or "",
-            "LLM_BASE_URL": cfg.llm_base_url or "",
+            # LLM configuration - will be set below
+            "LLM_MODEL": "",
+            "LLM_API_KEY": "",
+            "LLM_BASE_URL": "",
 
-            # OpenHands configuration - single container mode (no nested Docker)
-            "RUNTIME": "local",  # Use local runtime instead of Docker-in-Docker
+            # OpenHands configuration - FORCE CLI runtime through ALL possible environment variables
+            "RUNTIME": "cli",                    # Primary runtime setting (checked by OpenHandsConfig)
+            "OPENHANDS_RUNTIME": "cli",          # Alternative runtime env var
+            "OH_RUNTIME": "cli",                 # Another alternative
+            "CORE_RUNTIME": "cli",               # In case it checks [core] section prefix
             "WORKSPACE_BASE": "/workspace",
+            "WORKSPACE_MOUNT_PATH": "/workspace",
+
+            # Disable Docker completely
+            "DISABLE_DOCKER": "true",
+            "DOCKER_HOST": "",                   # Clear Docker socket path
+            "DOCKER_API_VERSION": "",            # Clear Docker API version
+            "DOCKER_CONFIG": "",                 # Clear Docker config path
+
+            # Clear proxy settings that interfere with container networking
+            "http_proxy": "",                    # Clear HTTP proxy
+            "https_proxy": "",                   # Clear HTTPS proxy
+            "HTTP_PROXY": "",                    # Clear HTTP proxy (uppercase)
+            "HTTPS_PROXY": "",                   # Clear HTTPS proxy (uppercase)
+            "no_proxy": "",                      # Clear no proxy list
+            "NO_PROXY": "",                      # Clear no proxy list (uppercase)
 
             # User configuration for proper permissions
-            "HOME": "/tmp/openhands_home",  # Temporary home directory
+            "HOME": "/tmp/openhands_home",       # Temporary home directory
             "USER": "containeruser",
 
-            # Disable Docker-in-Docker to avoid permission conflicts
-            "SANDBOX_USE_HOST_NETWORK": "false",
+            # Playwright configuration
+            "PLAYWRIGHT_BROWSERS_PATH": "/tmp/openhands_home/.cache/ms-playwright",
+            "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "false",
+
+            # Runtime configuration
             "SANDBOX_TIMEOUT": "300",
 
             # Debug and logging
@@ -236,23 +272,151 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             "LOG_LEVEL": "DEBUG",
         }
 
-        # Load LLM config from environment if not provided
+        # Simple LLM configuration - prioritize user config, then Moonshot, then fallbacks
         import os
-        if not cfg.llm_model and "LITELLM_MODEL" in os.environ:
-            env["LLM_MODEL"] = os.environ["LITELLM_MODEL"]
-        if not cfg.llm_api_key and "LITELLM_API_KEY" in os.environ:
-            env["LLM_API_KEY"] = os.environ["LITELLM_API_KEY"]
-        if not cfg.llm_base_url and "LITELLM_API_BASE" in os.environ:
-            env["LLM_BASE_URL"] = os.environ["LITELLM_API_BASE"]
 
-        # OpenHands CLI command using Poetry Python
+        def get_bashrc_var(var_name):
+            """Simple function to read environment variables from ~/.bashrc"""
+            try:
+                with open(os.path.expanduser("~/.bashrc"), 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith(f'export {var_name}='):
+                            value = line.split('=', 1)[1]
+                            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                                value = value[1:-1]
+                            return value
+                return None
+            except:
+                return None
+
+        # Set LLM configuration in priority order:
+        # 1. User-provided config
+        if cfg.llm_model and cfg.llm_api_key:
+            env["LLM_MODEL"] = cfg.llm_model
+            env["LLM_API_KEY"] = cfg.llm_api_key
+            env["LLM_BASE_URL"] = cfg.llm_base_url or ""
+            logger.info(f"Using user-provided LLM config: {cfg.llm_model}")
+
+        # 2. Moonshot/Kimi from ~/.bashrc (user's preferred)
+        else:
+            moonshot_api_key = get_bashrc_var("MOONSHOT_API_KEY")
+            moonshot_base_url = get_bashrc_var("MOONSHOT_BASE_URL")
+
+            if moonshot_api_key and moonshot_base_url:
+                env["LLM_MODEL"] = cfg.llm_model or "openai/kimi-k2-turbo-preview"
+                env["LLM_API_KEY"] = moonshot_api_key
+                env["LLM_BASE_URL"] = moonshot_base_url
+                env["OPENAI_API_KEY"] = moonshot_api_key  # LiteLLM compatibility
+                env["OPENAI_API_BASE"] = moonshot_base_url
+                # Add timeout and retry settings for better connectivity
+                env["OPENAI_TIMEOUT"] = "60"
+                env["OPENAI_MAX_RETRIES"] = "3"
+                logger.info(f"Using Moonshot/Kimi API: {env['LLM_MODEL']} at {moonshot_base_url}")
+
+            # 3. Fallback to available APIs
+            elif os.environ.get("DASHSCOPE_API_KEY"):
+                env["LLM_MODEL"] = "qwen/qwen-max"
+                env["LLM_API_KEY"] = os.environ["DASHSCOPE_API_KEY"]
+                env["LLM_BASE_URL"] = "https://dashscope.aliyuncs.com/api/v1"
+                logger.info("Using DashScope/Qwen fallback")
+
+            elif os.environ.get("OPENAI_API_KEY"):
+                env["LLM_MODEL"] = "gpt-4o-mini"
+                env["LLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
+                env["LLM_BASE_URL"] = "https://api.openai.com/v1"
+                logger.info("Using OpenAI fallback")
+
+            else:
+                logger.warning("No LLM API key found!")
+
+        # Pass additional API keys for tools that need them
+        for api_var in ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "TAVILY_API_KEY"]:
+            if api_var in os.environ:
+                env[api_var] = os.environ[api_var]
+
+        # Create OpenHands config file to force CLI runtime (no Docker!)
+        config_content = f"""[core]
+runtime = "cli"
+workspace_base = "/workspace"
+debug = true
+disable_color = true
+max_iterations = {cfg.max_steps}
+
+[sandbox]
+timeout = 300
+
+[llm]
+model = "{env['LLM_MODEL']}"
+api_key = "{env['LLM_API_KEY']}"
+base_url = "{env['LLM_BASE_URL']}"
+"""
+
+        # OpenHands CLI command with config file
         cmd = [
-            "/openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python",
-            "-m", "openhands.core.main",
-            "-t", enhanced_goal,
-            "-n", cfg.session_name,
-            "--max-iterations", str(cfg.max_steps),
-            "--no-auto-continue"
+            "bash", "-c", f"""
+            # Create config file and verify it
+            cat > /tmp/openhands_config.toml << 'EOF'
+{config_content}
+EOF
+            echo "=== Config file created ==="
+            cat /tmp/openhands_config.toml
+            echo "=== End config file ==="
+
+            # Install Playwright browsers if not already installed
+            export PLAYWRIGHT_BROWSERS_PATH=/tmp/openhands_home/.cache/ms-playwright
+            export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=false
+            /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m playwright install chromium --with-deps || echo "Playwright install failed, continuing..."
+
+            # Try to force local runtime with help flag first to see available options
+            echo "Checking OpenHands CLI options:"
+            /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m openhands.core.main --help || true
+
+            # Run OpenHands with CLI runtime (no Docker!) - force via environment with extreme prejudice
+            export PYTHONPATH=/openhands/code:$PYTHONPATH
+            # Set ALL possible runtime environment variables to force CLI runtime
+            export RUNTIME=cli
+            export OPENHANDS_RUNTIME=cli
+            export OH_RUNTIME=cli
+            export CORE_RUNTIME=cli
+            # Ensure no Docker configuration can interfere
+            unset DOCKER_HOST
+            unset DOCKER_API_VERSION
+            unset DOCKER_CONFIG
+            echo "=== Environment check ==="
+            echo "RUNTIME=$RUNTIME"
+            echo "OPENHANDS_RUNTIME=$OPENHANDS_RUNTIME"
+            echo "CORE_RUNTIME=$CORE_RUNTIME"
+            echo "Docker vars cleared"
+            # Display what runtime class will be used - debug info
+            echo "=== Checking runtime configuration ==="
+            /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -c "
+import os
+from openhands.runtime import get_runtime_cls
+
+# Show what runtime we will get
+runtime_name = os.getenv('RUNTIME', 'docker')
+runtime_cls = get_runtime_cls(runtime_name)
+print('Runtime name: ' + runtime_name)
+print('Runtime class: ' + runtime_cls.__name__)
+print('Available runtimes: docker, local, cli, remote, kubernetes')
+" || echo "Runtime check failed"
+            echo "=== Starting OpenHands ==="
+            echo "Using model: $LLM_MODEL"
+            echo "API endpoint: $LLM_BASE_URL"
+
+            # Test API connectivity first
+            echo "=== Testing API connectivity ==="
+            timeout 10 curl -s -o /dev/null -w "%{{http_code}}" "$LLM_BASE_URL" || echo "API endpoint connectivity test failed (this might be normal)"
+
+            # Run OpenHands with error handling
+            /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m openhands.core.main \
+                -t '{enhanced_goal.replace("'", "'\"'\"'")}' \
+                -n {cfg.session_name} \
+                --max-iterations {cfg.max_steps} \
+                --config-file /tmp/openhands_config.toml \
+                --no-auto-continue || echo "OpenHands execution completed with exit code: $?"
+            """
         ]
 
         # Create live monitoring directory
@@ -275,6 +439,7 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             },
             "working_dir": "/workspace",
             "user": container_dirs["user"],  # Use prepared user mapping
+            "network_mode": "host",  # Use host networking for API connectivity
             "detach": True,  # Changed to detach so we can monitor
             "remove": False,  # Keep container for debugging
             "stdout": True,
