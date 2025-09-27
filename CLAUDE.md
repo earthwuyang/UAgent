@@ -1,5 +1,15 @@
 # UNIVERSAL AGENT (UAGENT) - KEY DEVELOPMENT INSTRUCTIONS
 
+## Recent Updates (2025-09-26)
+
+### OpenHands V3 Integration (Default Enabled)
+- **OpenHands V3 headless mode is now ENABLED by default** for scientific research experiments
+- Uses deterministic subprocess execution with artifact-based communication
+- To disable and use legacy V2 mode: `export UAGENT_OPENHANDS_V3=0`
+- See `OPENHANDS_V3_MIGRATION.md` for full migration details
+
+# UNIVERSAL AGENT (UAGENT) - KEY DEVELOPMENT INSTRUCTIONS
+
 ## Core Principles
 
 1. **Test-Driven Development**: After implementing any new function, write comprehensive tests in `test/*test.py` before proceeding

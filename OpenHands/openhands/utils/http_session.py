@@ -1,11 +1,36 @@
 from dataclasses import dataclass, field
 from typing import MutableMapping
+import os
 
 import httpx
 
 from openhands.core.logger import openhands_logger as logger
 
+# Create client that bypasses proxy for localhost connections
+# This fixes the issue where proxy interferes with local OpenHands server connections
+# We override the environment to exclude localhost from proxy
+original_no_proxy = os.environ.get('NO_PROXY', os.environ.get('no_proxy', ''))
+localhost_exclusions = 'localhost,127.0.0.1,0.0.0.0,::1'
+
+# Temporarily set NO_PROXY to exclude localhost
+if original_no_proxy:
+    os.environ['NO_PROXY'] = f"{original_no_proxy},{localhost_exclusions}"
+    os.environ['no_proxy'] = f"{original_no_proxy},{localhost_exclusions}"
+else:
+    os.environ['NO_PROXY'] = localhost_exclusions
+    os.environ['no_proxy'] = localhost_exclusions
+
+# Create client with environment proxy settings (now includes localhost exclusion)
 CLIENT = httpx.Client()
+
+# Restore original NO_PROXY if needed (to not affect other parts of the code)
+if original_no_proxy:
+    os.environ['NO_PROXY'] = original_no_proxy
+    os.environ['no_proxy'] = original_no_proxy
+else:
+    # Remove if it wasn't originally set
+    os.environ.pop('NO_PROXY', None)
+    os.environ.pop('no_proxy', None)
 
 
 @dataclass

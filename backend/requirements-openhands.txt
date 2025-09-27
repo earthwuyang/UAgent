@@ -1,0 +1,16 @@
+# Additional requirements for OpenHands V3 headless execution
+# These are needed when running OpenHands from source without Docker
+
+# Required by OpenHands LocalRuntime
+jupyter>=1.0.0
+libtmux>=0.37.0
+
+# Dependencies that may not be in main requirements.txt
+# but are needed by OpenHands core
+pydantic>=2.0.0
+httpx>=0.24.0
+tenacity>=8.0.0
+toml>=0.10.0
+
+# Optional: for better terminal handling
+pexpect>=4.8.0

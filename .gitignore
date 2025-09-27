@@ -160,6 +160,9 @@ final_papers/
 cache/
 huggingface/
 
+
+OpenHands/logs
+
 # From agent_laboratory_local
 venv*
 tst*

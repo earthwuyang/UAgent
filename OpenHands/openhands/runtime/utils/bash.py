@@ -9,7 +9,11 @@ from typing import Any
 import bashlex
 import libtmux
 
-from openhands.core.logger import openhands_logger as logger
+from openhands.core.logger import openhands_logger as base_logger
+
+# Create a specialized logger for bash operations with reduced verbosity
+logger = base_logger.getChild('bash')
+logger.setLevel(base_logger.level)
 from openhands.events.action import CmdRunAction
 from openhands.events.observation import ErrorObservation
 from openhands.events.observation.commands import (
@@ -19,6 +23,12 @@ from openhands.events.observation.commands import (
 )
 from openhands.runtime.utils.bash_constants import TIMEOUT_MESSAGE_TEMPLATE
 from openhands.utils.shutdown_listener import should_continue
+
+# Import APT manager for handling package installation locks
+try:
+    from .apt_manager import apt_manager
+except ImportError:
+    apt_manager = None
 
 
 def split_bash_commands(commands: str) -> list[str]:
@@ -173,7 +183,7 @@ def _remove_command_prefix(command_output: str, command: str) -> str:
 
 
 class BashSession:
-    POLL_INTERVAL = 0.5
+    POLL_INTERVAL = 1.0  # Reduced polling frequency from 0.5s to 1.0s
     HISTORY_LIMIT = 10_000
     PS1 = CmdOutputMetadata.to_ps1_prompt()
 
@@ -181,7 +191,7 @@ class BashSession:
         self,
         work_dir: str,
         username: str | None = None,
-        no_change_timeout_seconds: int = 30,
+        no_change_timeout_seconds: int = 15,  # Reduced from 30s to 15s for faster response
         max_memory_mb: int | None = None,
     ):
         self.NO_CHANGE_TIMEOUT_SECONDS = no_change_timeout_seconds
@@ -275,6 +285,41 @@ class BashSession:
     @property
     def cwd(self) -> str:
         return self._cwd
+
+    def _is_trivial_content_change(self, new_content: str, old_content: str) -> bool:
+        """Check if the content change is trivial (only whitespace, timestamps, etc.)."""
+        if not old_content:
+            return False
+
+        # Remove common trivial differences
+        import re
+
+        def normalize_content(content):
+            # Remove timestamps and session IDs
+            content = re.sub(r'\d{2}:\d{2}:\d{2}', 'TIME', content)
+            content = re.sub(r'session_\w+', 'SESSION_ID', content)
+            content = re.sub(r'\d+\.\d+', 'FLOAT', content)
+            # Remove extra whitespace
+            return ' '.join(content.split())
+
+        normalized_new = normalize_content(new_content)
+        normalized_old = normalize_content(old_content)
+
+        # If they're identical after normalization, it's trivial
+        return normalized_new == normalized_old
+
+    def _is_apt_command(self, command: str) -> bool:
+        """Check if a command is an APT-related command that might need lock management."""
+        apt_commands = [
+            'apt', 'apt-get', 'apt-cache', 'aptitude', 'dpkg',
+            'sudo apt', 'sudo apt-get', 'sudo apt-cache', 'sudo aptitude', 'sudo dpkg'
+        ]
+
+        # Normalize command by removing extra spaces and converting to lowercase
+        normalized_command = ' '.join(command.lower().split())
+
+        return any(normalized_command.startswith(cmd + ' ') or normalized_command == cmd
+                  for cmd in apt_commands)
 
     def _is_special_key(self, command: str) -> bool:
         """Check if the command is a special key."""
@@ -520,6 +565,25 @@ class BashSession:
                 )
             )
 
+        # Handle APT commands with lock management
+        if apt_manager and self._is_apt_command(command):
+            logger.info(f"Detected APT command: {command}")
+            try:
+                # Check for existing locks before proceeding
+                lock_holder = apt_manager._check_lock_status()
+                if lock_holder:
+                    logger.warning(f"APT lock detected before command execution: {lock_holder}")
+                    # Wait for lock release with exponential backoff
+                    if not apt_manager._wait_for_lock_release():
+                        return ErrorObservation(
+                            content=f"ERROR: APT lock timeout. Cannot execute: {command}\n"
+                                  f"Lock held by: {lock_holder}\n"
+                                  f"Please try again later or resolve the blocking process."
+                        )
+            except Exception as e:
+                logger.warning(f"APT lock check failed: {e}")
+                # Continue with normal execution but log the warning
+
         # Get initial state before sending command
         initial_pane_output = self._get_pane_content()
         initial_ps1_matches = CmdOutputMetadata.matches_ps1_metadata(
@@ -598,24 +662,32 @@ class BashSession:
         # Loop until the command completes or times out
         while should_continue():
             _start_time = time.time()
-            logger.debug(f'GETTING PANE CONTENT at {_start_time}')
+            # Only log pane content retrieval in high debug mode
+            if logger.isEnabledFor(logging.DEBUG) and os.getenv('OPENHANDS_BASH_VERBOSE_DEBUG', 'False').lower() == 'true':
+                logger.debug(f'GETTING PANE CONTENT at {_start_time}')
             cur_pane_output = self._get_pane_content()
-            logger.debug(
-                f'PANE CONTENT GOT after {time.time() - _start_time:.2f} seconds'
-            )
+            # Reduce pane content logging frequency
+            elapsed = time.time() - _start_time
+            if elapsed > 1.0:  # Only log if it takes longer than 1 second
+                logger.debug(f'PANE CONTENT GOT after {elapsed:.2f} seconds (slow)')
             cur_pane_lines = cur_pane_output.split('\n')
-            if len(cur_pane_lines) <= 20:
-                logger.debug('PANE_CONTENT: {cur_pane_output}')
-            else:
-                logger.debug(f'BEGIN OF PANE CONTENT: {cur_pane_lines[:10]}')
-                logger.debug(f'END OF PANE CONTENT: {cur_pane_lines[-10:]}')
+            # Only log pane content in verbose debug mode
+            if logger.isEnabledFor(logging.DEBUG) and os.getenv('OPENHANDS_BASH_VERBOSE_DEBUG', 'False').lower() == 'true':
+                if len(cur_pane_lines) <= 20:
+                    logger.debug('PANE_CONTENT: {cur_pane_output}')
+                else:
+                    logger.debug(f'BEGIN OF PANE CONTENT: {cur_pane_lines[:10]}')
+                    logger.debug(f'END OF PANE CONTENT: {cur_pane_lines[-10:]}')
+
             ps1_matches = CmdOutputMetadata.matches_ps1_metadata(cur_pane_output)
             current_ps1_count = len(ps1_matches)
 
             if cur_pane_output != last_pane_output:
                 last_pane_output = cur_pane_output
                 last_change_time = time.time()
-                logger.debug(f'CONTENT UPDATED DETECTED at {last_change_time}')
+                # Only log content updates if they contain meaningful changes
+                if not self._is_trivial_content_change(cur_pane_output, last_pane_output if 'last_pane_output' in locals() else ''):
+                    logger.debug(f'CONTENT UPDATED DETECTED at {last_change_time}')
 
             # 1) Execution completed:
             # Condition 1: A new prompt has appeared since the command started.
@@ -638,9 +710,11 @@ class BashSession:
             # for a while (self.NO_CHANGE_TIMEOUT_SECONDS)
             # We ignore this if the command is *blocking*
             time_since_last_change = time.time() - last_change_time
-            logger.debug(
-                f'CHECKING NO CHANGE TIMEOUT ({self.NO_CHANGE_TIMEOUT_SECONDS}s): elapsed {time_since_last_change}. Action blocking: {action.blocking}'
-            )
+            # Only log timeout checks if we're getting close to the timeout
+            if time_since_last_change > self.NO_CHANGE_TIMEOUT_SECONDS * 0.8:  # 80% of timeout
+                logger.debug(
+                    f'CHECKING NO CHANGE TIMEOUT ({self.NO_CHANGE_TIMEOUT_SECONDS}s): elapsed {time_since_last_change:.1f}s. Action blocking: {action.blocking}'
+                )
             if (
                 not action.blocking
                 and time_since_last_change >= self.NO_CHANGE_TIMEOUT_SECONDS
@@ -653,9 +727,11 @@ class BashSession:
 
             # 3) Execution timed out due to hard timeout
             elapsed_time = time.time() - start_time
-            logger.debug(
-                f'CHECKING HARD TIMEOUT ({action.timeout}s): elapsed {elapsed_time:.2f}'
-            )
+            # Only log hard timeout checks if we're getting close to the timeout
+            if action.timeout and elapsed_time > action.timeout * 0.8:  # 80% of timeout
+                logger.debug(
+                    f'CHECKING HARD TIMEOUT ({action.timeout}s): elapsed {elapsed_time:.2f}s'
+                )
             if action.timeout and elapsed_time >= action.timeout:
                 logger.debug('Hard timeout triggered.')
                 return self._handle_hard_timeout_command(
@@ -665,6 +741,15 @@ class BashSession:
                     timeout=action.timeout,
                 )
 
-            logger.debug(f'SLEEPING for {self.POLL_INTERVAL} seconds for next poll')
-            time.sleep(self.POLL_INTERVAL)
+            # Adaptive polling: increase interval if no changes detected for a while
+            adaptive_interval = self.POLL_INTERVAL
+            if time_since_last_change > 5:  # No changes for 5 seconds
+                adaptive_interval = min(self.POLL_INTERVAL * 2, 3.0)  # Max 3 seconds
+            elif time_since_last_change > 10:  # No changes for 10 seconds
+                adaptive_interval = min(self.POLL_INTERVAL * 3, 5.0)  # Max 5 seconds
+
+            # Only log sleep if interval is longer than normal (adaptive polling active)
+            if adaptive_interval > self.POLL_INTERVAL or logger.isEnabledFor(logging.DEBUG) and os.getenv('OPENHANDS_BASH_VERBOSE_DEBUG', 'False').lower() == 'true':
+                logger.debug(f'SLEEPING for {adaptive_interval} seconds for next poll (adaptive)')
+            time.sleep(adaptive_interval)
         raise RuntimeError('Bash session was likely interrupted...')

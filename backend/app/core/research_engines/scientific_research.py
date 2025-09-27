@@ -18,11 +18,17 @@ from ..openhands import OpenHandsClient, CodeGenerationRequest
 from ..websocket_manager import progress_tracker
 from .deep_research import DeepResearchEngine, ResearchResult as DeepResearchResult
 from .code_research import CodeResearchEngine, CodeResearchResult
-from ...integrations.openhands_bridge import OpenHandsBridgeV2
-from ...integrations.openhands_bridge import GoalPlan  # typing only
-from ...integrations.openhands_bridge import GoalPlanStep  # typing only
-from ...integrations.openhands_runtime import OpenHandsClientV2
-from ...services.codeact_runner import CodeActRunnerV2
+# V3 headless bridge (optional, feature-flagged)
+try:
+    from ...integrations.openhands_codeact_bridge_v3 import (
+        OpenHandsCodeActBridgeV3,
+        CodeActRunConfig,
+        CodeActRunSummary,
+    )
+except ImportError:
+    OpenHandsCodeActBridgeV3 = None  # type: ignore
+    CodeActRunConfig = None  # type: ignore
+    CodeActRunSummary = None  # type: ignore
 from ...utils.json_utils import (
     JsonParseError,
     safe_json_loads,
@@ -126,7 +132,6 @@ class ExperimentExecution:
     logs: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     intermediate_results: Dict[str, Any] = field(default_factory=dict)
-    goal_plan: Optional[GoalPlan] = None
     workspace_id: Optional[str] = None
     session_id: Optional[str] = None
 
@@ -1098,153 +1103,139 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         metadata_overrides={"status": "error", "error": str(ras_exc)},
                     )
 
-            # New behavior (no CodeAct loop): RAS -> V2 author+run -> V2 run existing script
-            try:
-                workspace_path = self.openhands_client.workspace_manager.get_workspace_path(  # type: ignore[attr-defined]
-                    session_context.workspace_id
-                )
-                if not workspace_path:
-                    raise RuntimeError("OpenHands workspace path unavailable for V2 execution")
-
-                ws_path = Path(workspace_path)
-                allowed_roots = [ws_path, ws_path / "code", ws_path / "experiments", ws_path / "logs", ws_path / "output", ws_path / "workspace"]
-                v2_client = OpenHandsClientV2(workspace_path=ws_path, allowed_write_roots=allowed_roots)
+            # V3 Headless Bridge Path (always enabled, no fallback)
+            if OpenHandsCodeActBridgeV3 and CodeActRunConfig:
                 try:
-                    v2_runner = CodeActRunnerV2(v2_client, ws_path)
-                    try:
-                        await v2_runner.ensure_bootstrap()
-                    except Exception:
-                        pass
+                    self.logger.info("Using OpenHands V3 headless bridge for experiment execution")
 
-                    # 1) If an existing script is present, use it; else author one via LLM and write it deterministically
-                    script_path: Optional[Path] = None
-                    if (ws_path / "code/collect_data.py").exists():
-                        script_path = ws_path / "code/collect_data.py"
-                    else:
-                        try:
-                            candidates = sorted((ws_path / "code").glob("collect_data_exec_*.py"), key=lambda p: p.stat().st_mtime, reverse=True)
-                            script_path = candidates[0] if candidates else None
-                        except Exception:
-                            script_path = None
-
-                    if not script_path:
-                        # Author a script via LLM (direct codegen), then write it via V2
-                        code_name = f"code/collect_data_{execution.id}.py"
-                        # Simple directive for LLM: produce a script that prints one 'Final result: ' JSON line
-                        author_prompt = (
-                            "Write a Python3 script that collects real measurements required by the experiment below, "
-                            "then prints exactly one line starting with 'Final result: ' followed by a compact JSON object.\n\n"
-                            f"Experiment: {design.name}\nDescription: {design.description}\nMethodology: {design.methodology}\nVariables: {design.variables}\nControls: {design.controls}\nData Collection Plan: {design.data_collection_plan}\n\n"
-                            "The JSON should include at least: success (bool), measurements (non-empty numeric list), "
-                            "and if computed, statistical_tests (e.g., t_test with p_value) and effect_size.\n"
-                            "Avoid placeholders. Use available tools/libraries present in the environment. "
-                            "Do not access external network. Save any intermediate files under experiments/<id>/results.\n"
-                            "The script must be runnable with 'python3 <path>'."
-                        )
-                        raw_code = await self.llm_client.generate(author_prompt)
-                        code_text = self._clean_code_block(str(raw_code))
-                        if not code_text:
-                            # Debug: persist prompt and LLM outputs for investigation
-                            dbg_dir = ws_path / f"experiments/{design.id}/logs"
-                            try:
-                                dbg_dir.mkdir(parents=True, exist_ok=True)
-                                (dbg_dir / f"llm_collect_data_prompt_{execution.id}.txt").write_text(author_prompt, encoding="utf-8")
-                                (dbg_dir / f"llm_collect_data_raw_{execution.id}.txt").write_text(str(raw_code), encoding="utf-8")
-                                (dbg_dir / f"llm_collect_data_cleaned_{execution.id}.py").write_text(code_text or "", encoding="utf-8")
-                            except Exception:
-                                pass
-                            preview = (code_text or "").strip()[:240].replace("\n", " ")
-                            raise RuntimeError(
-                                "LLM did not produce a valid data collection script (empty cleaned output), "
-                                f"see {dbg_dir} for prompt/raw/cleaned outputs. Preview: {preview}"
-                            )
-                        v2_res = await v2_runner.write(code_name, code_text, overwrite=True)
-                        if not v2_res.success:
-                            raise RuntimeError("Failed to write data collection script via V2")
-                        script_path = ws_path / code_name
-
-                    # 2) Run the script and capture Final result
-                    cmd = f"python3 {script_path.relative_to(ws_path)}"
-                    res = await v2_runner.run(cmd, timeout_sec=int(self.config.get("codeact_action_timeout", 300)))
-                    stdout = (res.stdout or "").strip()
-                    import re as _re
-                    final_line = None
-                    for ln in stdout.splitlines():
-                        if _re.search(r"^\s*Final\s+result\s*:\s*", ln, _re.IGNORECASE):
-                            final_line = ln.strip()
-                            break
-                    if not final_line:
-                        for ln in stdout.splitlines():
-                            if "Final result:".lower() in ln.lower():
-                                final_line = ln.strip()
-                                break
-                    if not final_line:
-                        # Persist stdout to logs for debugging
-                        dbg_dir = ws_path / f"experiments/{design.id}/logs"
-                        try:
-                            dbg_dir.mkdir(parents=True, exist_ok=True)
-                            (dbg_dir / f"collect_stdout_{execution.id}.txt").write_text(stdout, encoding="utf-8")
-                        except Exception:
-                            pass
-                        raise RuntimeError("Data collection script did not print a 'Final result:' line")
-                    json_str = final_line.split(":", 1)[1].strip()
-                    try:
-                        final_data = safe_json_loads(sanitize_json_strings(json_str))
-                    except JsonParseError as exc:
-                        raise RuntimeError(f"Failed to parse Final result JSON: {exc}")
-                    if not isinstance(final_data, dict):
-                        raise RuntimeError("Final result payload is not a JSON object")
-
-                    normalized = self._normalize_or_salvage_final_result(
-                        design,
-                        execution,
-                        session_context,
-                        final_data,
-                        ws_path,
+                    workspace_path = self.openhands_client.workspace_manager.get_workspace_path(  # type: ignore[attr-defined]
+                        session_context.workspace_id
                     )
-                    if normalized:
-                        await _log_collection_event(
-                            suffix="finish",
-                            message="V2 data collection completed",
-                            offset=0.85,
-                            metadata_overrides={"node_type": "result", "status": "completed"},
-                            node_type="result",
-                        )
-                        return normalized
-                    raise RuntimeError("Final result missing required measurements/statistics after normalization")
-                finally:
-                    try:
-                        await v2_client.close()
-                    except Exception:
-                        pass
-            except Exception as exc:
-                await _log_collection_event(
-                    suffix="error",
-                    message=f"V2 data collection error: {exc}",
-                    offset=0.8,
-                    metadata_overrides={"status": "error", "error": str(exc)},
-                )
-                # bubble to outer handler
-                raise
-            
-            # If we reached here, both RAS and V2 paths failed
-            raise RuntimeError("Data collection did not yield a valid Final result")
+                    if not workspace_path:
+                        raise RuntimeError("OpenHands workspace path unavailable for V3 execution")
+
+                    ws_path = Path(workspace_path)
+
+                    # Prepare experiment goal for V3 bridge
+                    v3_goal = f"""Execute the following scientific experiment and save results to experiments/{design.id}/results/final.json:
+
+Experiment: {design.name}
+Description: {design.description}
+Methodology: {design.methodology}
+Variables: {json.dumps(design.variables)}
+Controls: {json.dumps(design.controls)}
+Data Collection Plan: {json.dumps(design.data_collection_plan)}
+
+Requirements:
+1. Collect REAL experimental data (no simulation or random data)
+2. Perform the analysis according to the methodology
+3. Save final results to experiments/{design.id}/results/final.json with:
+   - success: boolean
+   - data: dict with raw measurements
+   - analysis: dict with statistical analysis
+   - conclusions: list of conclusion strings
+   - measurements: list of numeric values
+4. Handle errors gracefully and report them in the final.json"""
+
+                    if prior_errors:
+                        v3_goal += f"\n\nPrevious errors to fix:\n{json.dumps(prior_errors[-3:], indent=2)}"
+
+                    # Configure V3 run
+                    v3_config = CodeActRunConfig(
+                        goal=v3_goal,
+                        workspace=ws_path,
+                        session_name=design.id,
+                        max_steps=int(os.getenv("UAGENT_OPENHANDS_MAX_STEPS", "80")),
+                        max_minutes=int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "30")),
+                        disable_browser=os.getenv("UAGENT_OPENHANDS_DISABLE_BROWSER", "true").lower() == "true"
+                    )
+
+                    # Execute via V3 bridge
+                    v3_bridge = OpenHandsCodeActBridgeV3()
+                    v3_result = await v3_bridge.run_async(v3_config)
+
+                    await _log_collection_event(
+                        suffix="v3_complete" if v3_result.success else "v3_failed",
+                        message=f"V3 headless execution {'completed' if v3_result.success else 'failed'}",
+                        offset=0.5,
+                        metadata_overrides={
+                            "status": "completed" if v3_result.success else "error",
+                            "duration_seconds": v3_result.duration_seconds,
+                            "exit_code": v3_result.exit_code
+                        }
+                    )
+
+                    if v3_result.success and v3_result.final_json:
+                        # Return the V3 results
+                        result_data = {
+                            "success": True,
+                            "measurements": v3_result.final_json.get("measurements", []),
+                            "data": v3_result.final_json.get("data", {}),
+                            "analysis": v3_result.final_json.get("analysis", {}),
+                            "conclusions": v3_result.final_json.get("conclusions", []),
+                            "source": "v3_headless_bridge",
+                            "duration_seconds": v3_result.duration_seconds
+                        }
+
+                        # Store raw result for debugging
+                        execution.intermediate_results["v3_result"] = v3_result.final_json
+                        execution.logs.append(f"V3 execution completed in {v3_result.duration_seconds:.1f}s")
+
+                        return result_data
+                    else:
+                        # V3 failed, return error
+                        error_msg = f"V3 execution failed: {v3_result.reason}"
+                        if v3_result.stderr_tail:
+                            error_msg += f"\nStderr: {v3_result.stderr_tail[-500:]}"
+
+                        self.logger.error(error_msg)
+                        execution.errors.append(error_msg)
+
+                        return {
+                            "success": False,
+                            "error": error_msg,
+                            "measurements": [],
+                            "source": "v3_headless_bridge"
+                        }
+
+                except Exception as v3_exc:
+                    self.logger.error(f"V3 bridge execution failed: {v3_exc}")
+                    execution.errors.append(f"V3 bridge error: {str(v3_exc)}")
+
+                    await _log_collection_event(
+                        suffix="v3_error",
+                        message=f"V3 bridge error: {v3_exc}",
+                        offset=0.4,
+                        metadata_overrides={"status": "error", "error": str(v3_exc)}
+                    )
+
+                    return {
+                        "success": False,
+                        "error": f"V3 bridge error: {str(v3_exc)}",
+                        "measurements": [],
+                        "source": "v3_headless_bridge"
+                    }
+            else:
+                # V3 bridge not available
+                error_msg = "OpenHands V3 bridge is required but not available"
+                self.logger.error(error_msg)
+                execution.errors.append(error_msg)
+
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "measurements": [],
+                    "source": "v3_headless_bridge"
+                }
         except Exception as exc:
-            await _log_collection_event(
-                suffix="failure",
-                message=f"Data collection error: {str(exc)[:160]}",
-                offset=0.95,
-                metadata_overrides={"status": "error", "error": str(exc)},
-            )
-            self.logger.exception(
-                "Data collection failed for experiment %s (%s)",
-                design.id,
-                design.name,
-            )
-            failure_payload: Dict[str, Any] = {"success": False, "error": str(exc)}
-            if codeact_failures:
-                failure_payload["codeact_failures"] = codeact_failures
-            return failure_payload
+            # V3 is the only path, so any failure is final
+            self.logger.error(f"Data collection failed: {exc}")
+            return {
+                "success": False,
+                "error": str(exc),
+                "measurements": [],
+                "source": "error"
+            }
 
     async def _run_ras_plan(
         self,
@@ -1547,7 +1538,7 @@ class ScientificResearchEngine:
         self.confidence_threshold = self.config.get("confidence_threshold", 0.8)
         # Load from environment variables with fallback to config
         self.experiments_per_hypothesis = max(1, int(os.getenv("EXPERIMENTS_PER_HYPOTHESIS", self.config.get("experiments_per_hypothesis", 2))))
-        self.max_attempts_per_experiment = max(1, int(self.config.get("max_attempts_per_experiment", 5)))
+        self.max_attempts_per_experiment = max(1, int(self.config.get("max_attempts_per_experiment", 2)))  # Reduced from 5 to prevent retry loops
 
         # Log the parallelism settings for debugging
         self.logger.info(
@@ -2221,87 +2212,6 @@ class ScientificResearchEngine:
 
         return literature_result, code_result
 
-    async def _log_goal_plan(
-        self,
-        session_id: Optional[str],
-        idea: ResearchIdea,
-        plan: GoalPlan,
-        base_progress: float,
-        progress_window: float,
-    ) -> Dict[str, str]:
-        if not session_id or not idea.node_id or not plan:
-            return {}
-
-        plan_node = await self._log_progress(
-            session_id,
-            phase=f"{idea.id}_goal_plan",
-            progress=base_progress,
-            message="Goal plan generated",
-            metadata={
-                "parent_id": idea.node_id,
-                "node_type": "plan",
-                "title": "Goal Plan",
-                "summary": plan.summary,
-            },
-            parent_phase=f"idea_{idea.id}",
-        )
-
-        step_nodes: Dict[str, str] = {"__plan__": plan_node}
-        for idx, step in enumerate(plan.steps, start=1):
-            offset = progress_window * (0.1 + 0.05 * idx)
-            step_node = await self._log_progress(
-                session_id,
-                phase=f"{idea.id}_goal_plan_step_{idx}",
-                progress=base_progress + offset,
-                message=step.description,
-                metadata={
-                    "parent_id": plan_node,
-                    "node_type": "step",
-                    "title": step.description,
-                    "expected_output": step.expected_output,
-                    "status": step.status,
-                },
-                parent_phase=f"{idea.id}_goal_plan",
-            )
-            step_nodes[step.id] = step_node
-
-        return step_nodes
-
-    async def _log_goal_plan_step_update(
-        self,
-        session_id: Optional[str],
-        idea: ResearchIdea,
-        step: GoalPlanStep,
-        node_map: Dict[str, str],
-        progress_value: float,
-    ) -> None:
-        if not session_id or not idea.node_id:
-            return
-        node_id = node_map.get(step.id)
-        if not node_id:
-            return
-        stdout = ""
-        stderr = ""
-        if step.code_result and step.code_result.execution_result:
-            stdout = step.code_result.execution_result.stdout
-            stderr = step.code_result.execution_result.stderr
-
-        await self._log_progress(
-            session_id,
-            phase=f"{idea.id}_goal_plan_step_{step.id}_update",
-            progress=progress_value,
-            message=f"{step.description} [{step.status}]",
-            metadata={
-                "node_id": node_id,
-                "parent_id": node_map.get("__plan__") or idea.node_id,
-                "node_type": "step",
-                "status": step.status,
-                "stdout": stdout,
-                "stderr": stderr,
-            },
-            parent_phase=f"idea_{idea.id}_goal_plan",
-        )
-
     async def _run_experiments_for_idea(
         self,
         idea: ResearchIdea,
@@ -2367,22 +2277,6 @@ class ScientificResearchEngine:
                             parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
                         )
 
-                    # V2-only bootstrap (legacy CodeAct goal-plan removed)
-                    try:
-                        ws_path = self.openhands_client.workspace_manager.get_workspace_path(openhands_context.workspace_id)  # type: ignore[attr-defined]
-                        if ws_path:
-                            allowed_roots = [ws_path / "code", ws_path / "experiments", ws_path / "logs", ws_path / "output", ws_path / "workspace"]
-                            v2_client = OpenHandsClientV2(workspace_path=ws_path, allowed_write_roots=allowed_roots)
-                            try:
-                                v2_runner = CodeActRunnerV2(v2_client, ws_path)
-                                await v2_runner.ensure_bootstrap()
-                            finally:
-                                try:
-                                    await v2_client.close()
-                                except Exception:
-                                    pass
-                    except Exception as _exc:
-                        self.logger.debug("V2 bootstrap skipped: %s", _exc)
 
                     final_execution, execution_history = await self._execute_experiment_with_retries(
                         idea,

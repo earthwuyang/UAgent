@@ -17,6 +17,10 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 DEBUG = os.getenv('DEBUG', 'False').lower() in ['true', '1', 'yes']
 DEBUG_LLM = os.getenv('DEBUG_LLM', 'False').lower() in ['true', '1', 'yes']
 
+# Smart logging configuration
+SMART_LOGGING = os.getenv('OPENHANDS_SMART_LOGGING', 'True').lower() in ['true', '1', 'yes']
+SMART_LOGGING_MODE = os.getenv('OPENHANDS_SMART_LOGGING_MODE', 'smart')  # 'smart', 'important', or 'normal'
+
 # Structured logs with JSON, disabled by default
 LOG_JSON = os.getenv('LOG_JSON', 'False').lower() in ['true', '1', 'yes']
 LOG_JSON_LEVEL_KEY = os.getenv('LOG_JSON_LEVEL_KEY', 'level')
@@ -24,11 +28,19 @@ LOG_JSON_LEVEL_KEY = os.getenv('LOG_JSON_LEVEL_KEY', 'level')
 
 # Configure litellm logging based on DEBUG_LLM
 if DEBUG_LLM:
-    confirmation = input(
-        '\n⚠️ WARNING: You are enabling DEBUG_LLM which may expose sensitive information like API keys.\n'
-        'This should NEVER be enabled in production.\n'
-        "Type 'y' to confirm you understand the risks: "
-    )
+    # Check if auto-confirmation is enabled (for headless operation)
+    auto_confirm = os.getenv('DEBUG_LLM_AUTO_CONFIRM', 'False').lower() in ['true', '1', 'yes']
+
+    if auto_confirm:
+        print('⚠️ DEBUG_LLM enabled automatically (headless mode)')
+        confirmation = 'y'
+    else:
+        confirmation = input(
+            '\n⚠️ WARNING: You are enabling DEBUG_LLM which may expose sensitive information like API keys.\n'
+            'This should NEVER be enabled in production.\n'
+            "Type 'y' to confirm you understand the risks: "
+        )
+
     if confirmation.lower() == 'y':
         litellm.suppress_debug_info = False
         litellm.set_verbose = True
@@ -413,6 +425,30 @@ for logger_name in LOQUACIOUS_LOGGERS:
     logging.getLogger(logger_name).setLevel('WARNING')
 
 
+def _apply_basic_component_levels():
+    """Fallback function to apply basic log level optimization without smart filters."""
+    basic_levels = {
+        'openhands.runtime.utils.bash': logging.WARNING,
+        'openhands.controller.agent_controller': logging.INFO,
+        'openhands.runtime.impl.local.local_runtime': logging.WARNING,
+        'openhands.memory': logging.INFO,
+        'openhands.agenthub.codeact_agent': logging.INFO,
+    }
+
+    for component, level in basic_levels.items():
+        logging.getLogger(component).setLevel(level)
+
+# Apply smart logging filters and optimized component levels
+if SMART_LOGGING:
+    try:
+        from .smart_logger_filter import setup_smart_logging
+        setup_smart_logging(SMART_LOGGING_MODE)
+    except ImportError as e:
+        openhands_logger.warning(f"Smart logging filter not available: {e}")
+        # Fallback: apply basic component level optimization
+        _apply_basic_component_levels()
+
+
 class LlmFileHandler(logging.FileHandler):
     """LLM prompt and response logging."""
 
@@ -488,6 +524,36 @@ def _setup_llm_logger(name: str, log_level: int) -> logging.Logger:
 
 llm_prompt_logger = _setup_llm_logger('prompt', current_log_level)
 llm_response_logger = _setup_llm_logger('response', current_log_level)
+
+# Custom combined LLM interaction logger (concise, single file)
+class ConciseLlmFileHandler(logging.FileHandler):
+    """Custom handler that writes concise LLM interactions to a single file"""
+
+    def __init__(self, workspace_dir: str):
+        log_dir = os.path.join(workspace_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'llm_interactions.log')
+        super().__init__(log_file, mode='a', encoding='utf-8')
+        self.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
+
+def _setup_concise_llm_logger(workspace_dir: str) -> logging.Logger:
+    """Setup a concise LLM logger that combines prompts and responses"""
+    logger = logging.getLogger('concise_llm')
+    logger.handlers.clear()  # Remove any existing handlers
+    logger.propagate = False
+    logger.setLevel(current_log_level)
+
+    if workspace_dir and LOG_TO_FILE:
+        try:
+            handler = ConciseLlmFileHandler(workspace_dir)
+            logger.addHandler(handler)
+        except Exception as e:
+            openhands_logger.error(f"Failed to setup concise LLM logger: {e}")
+
+    return logger
+
+# Global variable to store the concise logger
+concise_llm_logger = None
 
 
 class OpenHandsLoggerAdapter(logging.LoggerAdapter):

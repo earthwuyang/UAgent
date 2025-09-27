@@ -4,13 +4,36 @@ from typing import Any
 from litellm import ChatCompletionMessageToolCall
 from litellm.types.utils import ModelResponse
 
-from openhands.core.logger import llm_prompt_logger, llm_response_logger
+from openhands.core.logger import llm_prompt_logger, llm_response_logger, concise_llm_logger, _setup_concise_llm_logger
 from openhands.core.logger import openhands_logger as logger
+import os
 
 MESSAGE_SEPARATOR = '\n\n----------\n\n'
 
 
 class DebugMixin:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._init_concise_logging()
+
+    def _init_concise_logging(self):
+        """Initialize concise logging attributes"""
+        if not hasattr(self, '_concise_logger'):
+            self._concise_logger = None
+        if not hasattr(self, '_pending_prompt'):
+            self._pending_prompt = None
+
+    def _get_concise_logger(self):
+        """Get or create the concise LLM logger"""
+        # Ensure attributes are initialized
+        if not hasattr(self, '_concise_logger'):
+            self._init_concise_logging()
+
+        if self._concise_logger is None:
+            workspace_dir = os.environ.get('WORKSPACE_BASE', '/tmp')
+            self._concise_logger = _setup_concise_llm_logger(workspace_dir)
+        return self._concise_logger
+
     def log_prompt(self, messages: list[dict[str, Any]] | dict[str, Any]) -> None:
         if not logger.isEnabledFor(DEBUG):
             # Don't use memory building message string if not logging.
@@ -28,6 +51,12 @@ class DebugMixin:
 
         if debug_message:
             llm_prompt_logger.debug(debug_message)
+            # Store for concise logging (exclude system prompts)
+            if not hasattr(self, '_pending_prompt'):
+                self._init_concise_logging()
+            user_messages = [msg for msg in messages if msg.get('role') == 'user']
+            if user_messages:
+                self._pending_prompt = self._format_message_content(user_messages[-1])
         else:
             logger.debug('No completion messages!')
 
@@ -47,6 +76,17 @@ class DebugMixin:
 
         if message_back:
             llm_response_logger.debug(message_back)
+
+            # Log concise combined interaction
+            try:
+                concise_logger = self._get_concise_logger()
+                if self._pending_prompt and concise_logger:
+                    # Format: USER: prompt | ASSISTANT: response
+                    combined_log = f"USER: {self._pending_prompt.strip()}\nASSISTANT: {message_back.strip()}"
+                    concise_logger.info(combined_log)
+                    self._pending_prompt = None  # Clear after logging
+            except Exception as e:
+                logger.error(f"Failed to log concise LLM interaction: {e}")
 
     def _format_message_content(self, message: dict[str, Any]) -> str:
         content = message['content']

@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.websockets import WebSocketState
 
-from app.core.websocket_manager import websocket_manager, progress_tracker
+from ..core.websocket_manager import websocket_manager, progress_tracker
 
 logger = logging.getLogger(__name__)
 
