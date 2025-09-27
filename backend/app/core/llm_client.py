@@ -91,7 +91,7 @@ class AnthropicClient(LLMClient):
 
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=1000,
+                max_tokens=int(os.getenv("MAX_TOKENS", "20000")),
                 temperature=0.1,
                 messages=[{
                     "role": "user",
@@ -119,7 +119,7 @@ class AnthropicClient(LLMClient):
             self.logger.error(f"Anthropic classification error: {e}")
             raise
 
-    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+    async def generate(self, prompt: str, max_tokens: int = None, **kwargs) -> str:
         """Generate text using Claude
 
         Args:
@@ -130,6 +130,8 @@ class AnthropicClient(LLMClient):
         Returns:
             Generated text
         """
+        if max_tokens is None:
+            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
         try:
             response = await self.client.messages.create(
                 model=self.model,
@@ -191,7 +193,7 @@ class OpenAIClient(LLMClient):
                     "content": full_prompt
                 }],
                 temperature=0.1,
-                max_tokens=1000
+                max_tokens=int(os.getenv("MAX_TOKENS", "20000"))
             )
 
             content = response.choices[0].message.content
@@ -213,7 +215,7 @@ class OpenAIClient(LLMClient):
             self.logger.error(f"OpenAI classification error: {e}")
             raise
 
-    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+    async def generate(self, prompt: str, max_tokens: int = None, **kwargs) -> str:
         """Generate text using GPT
 
         Args:
@@ -224,6 +226,8 @@ class OpenAIClient(LLMClient):
         Returns:
             Generated text
         """
+        if max_tokens is None:
+            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -352,7 +356,7 @@ class DashScopeClient(LLMClient):
             model=self.model,
             prompt=prompt,
             temperature=0.1,
-            max_tokens=1000,
+            max_tokens=int(os.getenv("MAX_TOKENS", "20000")),
             top_p=0.1,
         )
 
@@ -361,7 +365,7 @@ class DashScopeClient(LLMClient):
         else:
             raise Exception(f"DashScope API error: {response.status_code} - {response.message}")
 
-    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+    async def generate(self, prompt: str, max_tokens: int = None, **kwargs) -> str:
         """Generate text using Qwen
 
         Args:
@@ -372,6 +376,8 @@ class DashScopeClient(LLMClient):
         Returns:
             Generated text
         """
+        if max_tokens is None:
+            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
         try:
             # Use async generation with retry + rate limiting
             await DashScopeClient._acquire_rate_slot()
@@ -441,7 +447,7 @@ class DashScopeClient(LLMClient):
                         model=self.model,
                         prompt=prompt,
                         temperature=kwargs.get("temperature", 0.7),
-                        max_tokens=kwargs.get("max_tokens", 1000),
+                        max_tokens=kwargs.get("max_tokens", int(os.getenv("MAX_TOKENS", "20000"))),
                         top_p=kwargs.get("top_p", 0.8),
                         stream=True,  # Enable streaming
                     )
@@ -593,7 +599,9 @@ class LiteLLMClient(LLMClient):
         result.setdefault("reasoning", "")
         return result
 
-    async def generate(self, prompt: str, max_tokens: int = 1000, **kwargs) -> str:
+    async def generate(self, prompt: str, max_tokens: int = None, **kwargs) -> str:
+        if max_tokens is None:
+            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
         messages = [{"role": "user", "content": prompt}]
         options = self._build_request(
             messages=messages,
@@ -658,7 +666,7 @@ class LiteLLMClient(LLMClient):
         options = self._build_request(
             messages=messages,
             temperature=kwargs.get("temperature", 0.7),
-            max_tokens=kwargs.get("max_tokens", 1000),
+            max_tokens=kwargs.get("max_tokens", int(os.getenv("MAX_TOKENS", "20000"))),
             stream=True,
         )
         try:

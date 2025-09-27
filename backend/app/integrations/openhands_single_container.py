@@ -141,27 +141,41 @@ This file is MANDATORY for completion.
             raise
 
     def _prepare_container_directories(self, cfg: SingleContainerConfig) -> Dict[str, Any]:
-        """Prepare container volume mappings with proper directories"""
+        """Prepare container volume mappings with proper directories in workspace"""
         import os
-        import tempfile
 
         # Get current user info for permission mapping
         current_uid = os.getuid()
         current_gid = os.getgid()
 
-        # Create temporary directory for OpenHands internal directories
-        openhands_temp = tempfile.mkdtemp(prefix="openhands_internal_")
+        # Create OpenHands directories within the experiment session directory
+        experiment_dir = cfg.workspace / "experiments" / cfg.session_name
+        openhands_dir = experiment_dir / "openhands_internal"
 
         # Create necessary OpenHands directories that it expects to write to
-        os.makedirs(f"{openhands_temp}/logs", mode=0o777, exist_ok=True)
-        os.makedirs(f"{openhands_temp}/cache", mode=0o777, exist_ok=True)
-        os.makedirs(f"{openhands_temp}/tmp", mode=0o777, exist_ok=True)
-        os.makedirs(f"{openhands_temp}/home", mode=0o777, exist_ok=True)
-        # Create Playwright browser cache directory
-        os.makedirs(f"{openhands_temp}/home/.cache/ms-playwright", mode=0o777, exist_ok=True)
+        openhands_logs = openhands_dir / "logs"
+        openhands_cache = openhands_dir / "cache"
+        openhands_tmp = openhands_dir / "tmp"
+        openhands_home = openhands_dir / "home"
 
-        # Set proper ownership and permissions
-        for root, dirs, files in os.walk(openhands_temp):
+        # Create all directories with proper permissions
+        for directory in [openhands_logs, openhands_cache, openhands_tmp, openhands_home]:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o777)
+            try:
+                os.chown(directory, current_uid, current_gid)
+            except PermissionError:
+                pass  # Skip if we can't change ownership
+
+        # Create Playwright browser cache directory
+        playwright_cache = openhands_home / ".cache" / "ms-playwright"
+        playwright_cache.mkdir(parents=True, exist_ok=True, mode=0o777)
+        try:
+            os.chown(playwright_cache, current_uid, current_gid)
+        except PermissionError:
+            pass
+
+        # Set proper ownership and permissions recursively
+        for root, dirs, files in os.walk(openhands_dir):
             for d in dirs:
                 dir_path = os.path.join(root, d)
                 os.chmod(dir_path, 0o777)
@@ -170,29 +184,15 @@ This file is MANDATORY for completion.
                 except PermissionError:
                     pass  # Skip if we can't change ownership
 
-        # Get Docker group ID for proper Docker socket access
-        import subprocess
-        try:
-            # Get the docker group ID
-            docker_gid = subprocess.check_output(["getent", "group", "docker"]).decode().strip().split(":")[2]
-        except subprocess.CalledProcessError:
-            # Fallback: try to get docker group ID directly
-            try:
-                import grp
-                docker_gid = str(grp.getgrnam("docker").gr_gid)
-            except KeyError:
-                docker_gid = "999"  # Default Docker group ID
-
         return {
             "volumes": {
                 # No Docker socket needed for headless CLI mode
                 str(cfg.workspace.resolve()): {"bind": "/workspace", "mode": "rw"},
-                f"{openhands_temp}/logs": {"bind": "/openhands/code/logs", "mode": "rw"},
-                f"{openhands_temp}/cache": {"bind": "/openhands/code/cache", "mode": "rw"},
-                f"{openhands_temp}/tmp": {"bind": "/tmp/openhands", "mode": "rw"},
-                f"{openhands_temp}/home": {"bind": "/tmp/openhands_home", "mode": "rw"},
+                str(openhands_logs.resolve()): {"bind": "/openhands/code/logs", "mode": "rw"},
+                str(openhands_cache.resolve()): {"bind": "/openhands/code/cache", "mode": "rw"},
+                str(openhands_tmp.resolve()): {"bind": "/tmp/openhands", "mode": "rw"},
+                str(openhands_home.resolve()): {"bind": "/tmp/openhands_home", "mode": "rw"},
             },
-            "temp_dir": openhands_temp,
             "user": f"{current_uid}:{current_gid}",  # Use current user and group
         }
 
@@ -480,14 +480,8 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             )
 
         finally:
-            # Clean up temporary directories
-            try:
-                import shutil
-                if 'container_dirs' in locals() and 'temp_dir' in container_dirs:
-                    shutil.rmtree(container_dirs['temp_dir'], ignore_errors=True)
-                    logger.debug(f"Cleaned up temporary directory: {container_dirs['temp_dir']}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary directory: {e}")
+            # No cleanup needed - logs are persisted in workspace
+            pass
 
     def _parse_artifacts(self, cfg: SingleContainerConfig) -> Optional[Dict[str, Any]]:
         """Parse final.json from workspace"""

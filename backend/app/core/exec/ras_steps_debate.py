@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -29,7 +30,7 @@ class RASDebateStepHandler:
             num_rounds=int(raw_cfg.get("num_rounds", 2)),
             groups=int(raw_cfg.get("groups", 1)),
             rubric=str(raw_cfg.get("rubric", "")),
-            max_tokens=int(raw_cfg.get("max_tokens", 800)),
+            max_tokens=int(raw_cfg.get("max_tokens", os.getenv("MAX_TOKENS", "20000"))),
             temperature=float(raw_cfg.get("temperature", 0.6)),
         )
         debaters = [

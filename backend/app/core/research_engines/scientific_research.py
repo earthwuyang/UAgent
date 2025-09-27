@@ -1950,7 +1950,7 @@ class ScientificResearchEngine:
         prompt_used = self._format_idea_prompt(question, max_ideas)
         response = await self.llm_client.generate(
             prompt_used,
-            max_tokens=6000,  # Increased to prevent truncation of complex hypotheses
+            max_tokens=int(os.getenv("MAX_TOKENS", "20000")),  # Use environment variable for max tokens
             temperature=self.config.get("idea_generation_temperature", 0.6),
         )
         return response, prompt_used, False
@@ -2541,7 +2541,7 @@ Return JSON only.
 
         response = await self.llm_client.generate(
             evaluation_prompt,
-            max_tokens=4000,  # Increased to prevent truncation of evaluation
+            max_tokens=int(os.getenv("MAX_TOKENS", "20000")),  # Use environment variable for max tokens
             temperature=self.config.get("idea_evaluation_temperature", 0.3),
         )
 
@@ -2770,8 +2770,8 @@ Return JSON only.
         Returns:
             Comprehensive scientific research result
         """
-        include_code_analysis = False
-        include_literature_review = False
+        # include_code_analysis = False
+        # include_literature_review = False
         
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
@@ -3626,7 +3626,7 @@ if GEPAOptimizer is not None:
             response = asyncio.run(
                 self.llm_client.generate(
                     prompt_text,
-                    max_tokens=6000,  # Increased to prevent truncation of complex hypotheses
+                    max_tokens=int(os.getenv("MAX_TOKENS", "20000")),  # Use environment variable for max tokens
                     temperature=self.temperature,
                 )
             )
