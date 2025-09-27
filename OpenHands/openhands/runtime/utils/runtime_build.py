@@ -176,6 +176,12 @@ def build_runtime_image_in_folder(
     extra_build_args: list[str] | None = None,
     enable_browser: bool = True,
 ) -> str:
+    # UAgent: If SANDBOX_USE_BASE_IMAGE_DIRECTLY is set, skip all custom building
+    # and use the base image as-is for hardware isolation without custom modifications
+    if os.environ.get('SANDBOX_USE_BASE_IMAGE_DIRECTLY', 'false').lower() == 'true':
+        logger.info(f'Using base image directly (no custom building): {base_image}')
+        return base_image
+
     runtime_image_repo, _ = get_runtime_image_repo_and_tag(base_image)
     lock_tag = f'oh_v{oh_version}_{get_hash_for_lock_files(base_image, enable_browser)}'
     versioned_tag = (

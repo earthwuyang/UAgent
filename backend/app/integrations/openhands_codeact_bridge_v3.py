@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 
+from dotenv import load_dotenv
+from .docker_transition_manager import docker_transition_manager
+
+# Load environment variables from .env file
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,8 +121,21 @@ class OpenHandsCodeActBridgeV3:
             pythonpath = f"{pythonpath}:{env['PYTHONPATH']}"
         env["PYTHONPATH"] = pythonpath
 
-        # Set runtime to local (no Docker)
-        env["RUNTIME"] = "local"
+        # Ensure Docker is ready for operations
+        if not docker_transition_manager.ensure_docker_ready():
+            status = docker_transition_manager.get_transition_status()
+            logger.error(f"Docker not ready: {status}")
+            raise RuntimeError(f"Docker environment not ready: {status['recommended_action']}")
+
+        # Get optimized Docker configuration
+        docker_config = docker_transition_manager.get_docker_config()
+        env.update(docker_config)
+
+        # Override conda/mamba environment to fully isolate Poetry
+        env["CONDA_PREFIX"] = ""
+        env["CONDA_DEFAULT_ENV"] = ""
+        env["MAMBA_EXE"] = ""
+
         env["WORKSPACE_BASE"] = str(cfg.workspace.resolve())
 
         # Disable browser if requested
@@ -130,22 +149,28 @@ class OpenHandsCodeActBridgeV3:
         env["LOG_LEVEL"] = "DEBUG"
         env["LLM_LOG_FILE"] = str(cfg.workspace / "logs" / "openhands_llm_interactions.log")
 
-        # Map LLM configuration
-        # Priority: explicit config > LLM_* env > LITELLM_* env
+        # Map LLM configuration from .env file
+        # Priority: explicit config > .env LITELLM_* > LLM_* env
         if cfg.llm_model:
             env["LLM_MODEL"] = cfg.llm_model
-        elif "LLM_MODEL" not in env and "LITELLM_MODEL" in os.environ:
+        elif "LITELLM_MODEL" in os.environ:
             env["LLM_MODEL"] = os.environ["LITELLM_MODEL"]
+        elif "LLM_MODEL" in os.environ:
+            env["LLM_MODEL"] = os.environ["LLM_MODEL"]
 
         if cfg.llm_api_key:
             env["LLM_API_KEY"] = cfg.llm_api_key
-        elif "LLM_API_KEY" not in env and "LITELLM_API_KEY" in os.environ:
+        elif "LITELLM_API_KEY" in os.environ:
             env["LLM_API_KEY"] = os.environ["LITELLM_API_KEY"]
+        elif "LLM_API_KEY" in os.environ:
+            env["LLM_API_KEY"] = os.environ["LLM_API_KEY"]
 
         if cfg.llm_base_url:
             env["LLM_BASE_URL"] = cfg.llm_base_url
-        elif "LLM_BASE_URL" not in env and "LITELLM_API_BASE" in os.environ:
+        elif "LITELLM_API_BASE" in os.environ:
             env["LLM_BASE_URL"] = os.environ["LITELLM_API_BASE"]
+        elif "LLM_BASE_URL" in os.environ:
+            env["LLM_BASE_URL"] = os.environ["LLM_BASE_URL"]
 
         # Additional OpenHands settings from environment
         if "UAGENT_OPENHANDS_MAX_STEPS" in os.environ:
@@ -159,12 +184,26 @@ class OpenHandsCodeActBridgeV3:
         """Build the command to execute OpenHands"""
         python = sys.executable or "python"
 
+        # Enhance goal with explicit final.json requirement
+        enhanced_goal = f"""{cfg.goal}
+
+CRITICAL: When you complete this task, you MUST create a file at experiments/{cfg.session_name}/results/final.json with the following structure:
+{{
+    "success": true/false,
+    "data": {{...experiment results...}},
+    "analysis": {{...analysis results...}},
+    "conclusions": ["conclusion1", "conclusion2", ...],
+    "errors": ["error1", "error2", ...]
+}}
+
+Create the experiments/{cfg.session_name}/results/ directory if it doesn't exist. This final.json file is mandatory for the experiment to be considered complete."""
+
         cmd = [
             python,
             "-m", "openhands.core.main",
-            "-t", cfg.goal,
+            "-t", enhanced_goal,
             "-n", cfg.session_name,
-            "-i", str(cfg.max_steps),
+            "--max-iterations", str(cfg.max_steps),
             "--no-auto-continue"
         ]
 
@@ -269,11 +308,16 @@ class OpenHandsCodeActBridgeV3:
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"Failed to execute OpenHands: {e}")
+
+            # Create standardized error report
+            error_report = docker_transition_manager.create_error_report(e, cfg.workspace)
+
             return CodeActRunSummary(
                 success=False,
                 exit_code=-1,
                 duration_seconds=duration,
-                reason=f"Execution error: {str(e)}"
+                reason=f"Docker execution error: {str(e)}",
+                final_json=error_report
             )
 
         # Process completed

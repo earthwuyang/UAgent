@@ -939,6 +939,22 @@ class OpenHandsActionServerRunner:
         env["SESSION_API_KEY"] = session_api_key
         env.setdefault("PYTHONUNBUFFERED", "1")
 
+        # Force Docker runtime for hardware isolation - no local fallback
+        env["RUNTIME"] = "docker"
+
+        # Use pre-built OpenHands image to avoid build issues
+        env["SANDBOX_BOX_TYPE"] = "remote"
+        env["SANDBOX_CONTAINER_IMAGE"] = "ghcr.io/all-hands-ai/openhands:latest"
+        env["SANDBOX_FORCE_REBUILD"] = "false"  # Don't rebuild image
+
+        # Map LLM configuration from .env file to OpenHands format
+        if "LITELLM_MODEL" in os.environ:
+            env["LLM_MODEL"] = os.environ["LITELLM_MODEL"]
+        if "LITELLM_API_KEY" in os.environ:
+            env["LLM_API_KEY"] = os.environ["LITELLM_API_KEY"]
+        if "LITELLM_API_BASE" in os.environ:
+            env["LLM_BASE_URL"] = os.environ["LITELLM_API_BASE"]
+
         proxy_url = _detect_local_proxy()
         if proxy_url:
             for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):

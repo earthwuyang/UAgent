@@ -8,6 +8,19 @@
 - To disable and use legacy V2 mode: `export UAGENT_OPENHANDS_V3=0`
 - See `OPENHANDS_V3_MIGRATION.md` for full migration details
 
+### Docker Runtime Integration (Mandatory)
+- **Docker runtime is now MANDATORY** for hardware isolation and system crash prevention
+- Provides complete hardware isolation between UAgent and host system
+- Prevents experimental code from affecting host system stability
+- Local runtime has been completely removed to ensure system safety
+- Requires Docker to be installed and running on the host system
+
+### LLM Model Configuration Integration
+- **OpenHands automatically uses the model configured in .env**
+- Reads `LITELLM_MODEL`, `LITELLM_API_KEY`, and `LITELLM_API_BASE` from .env
+- Seamless integration with UAgent's model configuration
+- No separate OpenHands model configuration needed
+
 # UNIVERSAL AGENT (UAGENT) - KEY DEVELOPMENT INSTRUCTIONS
 
 ## Core Principles
@@ -194,8 +207,9 @@ Brief description and purpose
 - **Type Check**: `mypy app/`
 - **Lint Code**: `ruff check app/`
 - **Format Code**: `black app/`
-- **Start Backend**: `uvicorn app.main:app --reload --port 8000`
+- **Start Backend**: `source .venv/bin/activate && uvicorn app.main:app --reload --port 8000`
 - **Start Frontend**: `cd frontend && npm run dev`
+- **Pull OpenHands Runtime Image**: `docker pull ghcr.io/all-hands-ai/runtime:latest` (required for Docker runtime)
 - **Headless Research Monitor**: `python -m backend.scripts.cli_research --query "<prompt>"`
 - **Attach to Existing Session**: `python -m backend.scripts.cli_research --session <session_id>`
 - **Install Playwright Chromium (RepoMaster search)**: `playwright install --with-deps chromium`

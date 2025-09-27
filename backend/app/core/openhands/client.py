@@ -77,7 +77,10 @@ class OpenHandsClient:
         self.sessions: Dict[str, SessionConfig] = {}
         self.session_states: Dict[str, SessionState] = {}
         self.action_runner = OpenHandsActionServerRunner()
-        logger.info("OpenHandsClient initialized")
+
+        # Force Docker runtime for hardware isolation - no local fallback
+        self.runtime_type = "docker"
+        logger.info(f"OpenHandsClient initialized with Docker runtime for hardware isolation")
 
     @staticmethod
     def _clean_generated_code(raw_code: str) -> str:

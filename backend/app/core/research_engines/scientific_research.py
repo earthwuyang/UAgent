@@ -18,17 +18,17 @@ from ..openhands import OpenHandsClient, CodeGenerationRequest
 from ..websocket_manager import progress_tracker
 from .deep_research import DeepResearchEngine, ResearchResult as DeepResearchResult
 from .code_research import CodeResearchEngine, CodeResearchResult
-# V3 headless bridge (optional, feature-flagged)
+# Single container bridge (optimal solution)
 try:
-    from ...integrations.openhands_codeact_bridge_v3 import (
-        OpenHandsCodeActBridgeV3,
-        CodeActRunConfig,
-        CodeActRunSummary,
+    from ...integrations.openhands_single_container import (
+        OpenHandsSingleContainer,
+        SingleContainerConfig,
+        SingleContainerResult,
     )
 except ImportError:
-    OpenHandsCodeActBridgeV3 = None  # type: ignore
-    CodeActRunConfig = None  # type: ignore
-    CodeActRunSummary = None  # type: ignore
+    OpenHandsSingleContainer = None  # type: ignore
+    SingleContainerConfig = None  # type: ignore
+    SingleContainerResult = None  # type: ignore
 from ...utils.json_utils import (
     JsonParseError,
     safe_json_loads,
@@ -1103,21 +1103,21 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                         metadata_overrides={"status": "error", "error": str(ras_exc)},
                     )
 
-            # V3 Headless Bridge Path (always enabled, no fallback)
-            if OpenHandsCodeActBridgeV3 and CodeActRunConfig:
+            # Single Container Bridge Path (optimal solution)
+            if OpenHandsSingleContainer and SingleContainerConfig:
                 try:
-                    self.logger.info("Using OpenHands V3 headless bridge for experiment execution")
+                    self.logger.info("Using OpenHands single container bridge for experiment execution")
 
                     workspace_path = self.openhands_client.workspace_manager.get_workspace_path(  # type: ignore[attr-defined]
                         session_context.workspace_id
                     )
                     if not workspace_path:
-                        raise RuntimeError("OpenHands workspace path unavailable for V3 execution")
+                        raise RuntimeError("OpenHands workspace path unavailable for single container execution")
 
                     ws_path = Path(workspace_path)
 
-                    # Prepare experiment goal for V3 bridge
-                    v3_goal = f"""Execute the following scientific experiment and save results to experiments/{design.id}/results/final.json:
+                    # Prepare experiment goal for single container execution
+                    container_goal = f"""Execute the following scientific experiment and save results to experiments/{design.id}/results/final.json:
 
 Experiment: {design.name}
 Description: {design.description}
@@ -1138,55 +1138,54 @@ Requirements:
 4. Handle errors gracefully and report them in the final.json"""
 
                     if prior_errors:
-                        v3_goal += f"\n\nPrevious errors to fix:\n{json.dumps(prior_errors[-3:], indent=2)}"
+                        container_goal += f"\n\nPrevious errors to fix:\n{json.dumps(prior_errors[-3:], indent=2)}"
 
-                    # Configure V3 run
-                    v3_config = CodeActRunConfig(
-                        goal=v3_goal,
+                    # Configure single container run
+                    container_config = SingleContainerConfig(
+                        goal=container_goal,
                         workspace=ws_path,
                         session_name=design.id,
                         max_steps=int(os.getenv("UAGENT_OPENHANDS_MAX_STEPS", "80")),
-                        max_minutes=int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "30")),
-                        disable_browser=os.getenv("UAGENT_OPENHANDS_DISABLE_BROWSER", "true").lower() == "true"
+                        max_minutes=int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "30"))
                     )
 
-                    # Execute via V3 bridge
-                    v3_bridge = OpenHandsCodeActBridgeV3()
-                    v3_result = await v3_bridge.run_async(v3_config)
+                    # Execute via single container bridge
+                    container_bridge = OpenHandsSingleContainer()
+                    container_result = await container_bridge.run_async(container_config)
 
                     await _log_collection_event(
-                        suffix="v3_complete" if v3_result.success else "v3_failed",
-                        message=f"V3 headless execution {'completed' if v3_result.success else 'failed'}",
+                        suffix="container_complete" if container_result.success else "container_failed",
+                        message=f"Single container execution {'completed' if container_result.success else 'failed'}",
                         offset=0.5,
                         metadata_overrides={
-                            "status": "completed" if v3_result.success else "error",
-                            "duration_seconds": v3_result.duration_seconds,
-                            "exit_code": v3_result.exit_code
+                            "status": "completed" if container_result.success else "error",
+                            "duration_seconds": container_result.duration_seconds,
+                            "exit_code": container_result.exit_code
                         }
                     )
 
-                    if v3_result.success and v3_result.final_json:
-                        # Return the V3 results
+                    if container_result.success and container_result.final_json:
+                        # Return the single container results
                         result_data = {
                             "success": True,
-                            "measurements": v3_result.final_json.get("measurements", []),
-                            "data": v3_result.final_json.get("data", {}),
-                            "analysis": v3_result.final_json.get("analysis", {}),
-                            "conclusions": v3_result.final_json.get("conclusions", []),
-                            "source": "v3_headless_bridge",
-                            "duration_seconds": v3_result.duration_seconds
+                            "measurements": container_result.final_json.get("measurements", []),
+                            "data": container_result.final_json.get("data", {}),
+                            "analysis": container_result.final_json.get("analysis", {}),
+                            "conclusions": container_result.final_json.get("conclusions", []),
+                            "source": "single_container_bridge",
+                            "duration_seconds": container_result.duration_seconds
                         }
 
                         # Store raw result for debugging
-                        execution.intermediate_results["v3_result"] = v3_result.final_json
-                        execution.logs.append(f"V3 execution completed in {v3_result.duration_seconds:.1f}s")
+                        execution.intermediate_results["container_result"] = container_result.final_json
+                        execution.logs.append(f"Single container execution completed in {container_result.duration_seconds:.1f}s")
 
                         return result_data
                     else:
-                        # V3 failed, return error
-                        error_msg = f"V3 execution failed: {v3_result.reason}"
-                        if v3_result.stderr_tail:
-                            error_msg += f"\nStderr: {v3_result.stderr_tail[-500:]}"
+                        # Single container failed, return error
+                        error_msg = f"Single container execution failed: {container_result.error_message}"
+                        if container_result.stderr_logs:
+                            error_msg += f"\nStderr: {container_result.stderr_logs[-500:]}"
 
                         self.logger.error(error_msg)
                         execution.errors.append(error_msg)
@@ -1195,29 +1194,29 @@ Requirements:
                             "success": False,
                             "error": error_msg,
                             "measurements": [],
-                            "source": "v3_headless_bridge"
+                            "source": "single_container_bridge"
                         }
 
-                except Exception as v3_exc:
-                    self.logger.error(f"V3 bridge execution failed: {v3_exc}")
-                    execution.errors.append(f"V3 bridge error: {str(v3_exc)}")
+                except Exception as container_exc:
+                    self.logger.error(f"Single container bridge execution failed: {container_exc}")
+                    execution.errors.append(f"Single container bridge error: {str(container_exc)}")
 
                     await _log_collection_event(
-                        suffix="v3_error",
-                        message=f"V3 bridge error: {v3_exc}",
+                        suffix="container_error",
+                        message=f"Single container bridge error: {container_exc}",
                         offset=0.4,
-                        metadata_overrides={"status": "error", "error": str(v3_exc)}
+                        metadata_overrides={"status": "error", "error": str(container_exc)}
                     )
 
                     return {
                         "success": False,
-                        "error": f"V3 bridge error: {str(v3_exc)}",
+                        "error": f"Single container bridge error: {str(container_exc)}",
                         "measurements": [],
-                        "source": "v3_headless_bridge"
+                        "source": "single_container_bridge"
                     }
             else:
-                # V3 bridge not available
-                error_msg = "OpenHands V3 bridge is required but not available"
+                # Single container bridge not available
+                error_msg = "OpenHands single container bridge is required but not available"
                 self.logger.error(error_msg)
                 execution.errors.append(error_msg)
 

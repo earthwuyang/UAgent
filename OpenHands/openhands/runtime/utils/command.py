@@ -2,14 +2,7 @@ from openhands.core.config import OpenHandsConfig
 from openhands.core.logger import openhands_logger as logger
 from openhands.runtime.plugins import PluginRequirement
 
-DEFAULT_PYTHON_PREFIX = [
-    '/openhands/micromamba/bin/micromamba',
-    'run',
-    '-n',
-    'openhands',
-    'poetry',
-    'run',
-]
+DEFAULT_PYTHON_PREFIX = []
 DEFAULT_MAIN_MODULE = 'openhands.runtime.action_execution_server'
 
 
