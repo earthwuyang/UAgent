@@ -66,6 +66,9 @@ def combine_thought(action: Action, thought: str) -> Action:
 def set_security_risk(action: Action, arguments: dict) -> None:
     """Set the security risk level for the action."""
 
+    if 'security_risk' not in arguments: # added by wuy manually
+        arguments['security_risk'] = ActionSecurityRisk.LOW
+        
     # Set security_risk attribute if provided
     if 'security_risk' in arguments:
         if arguments['security_risk'] in RISK_LEVELS:
@@ -189,11 +192,9 @@ def response_to_actions(
                     raise FunctionCallValidationError(
                         f'Missing required argument "path" in tool call {tool_call.function.name}'
                     )
+                # Set default security_risk if not provided
                 if 'security_risk' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "security_risk" in tool call {tool_call.function.name}. '
-                        f'Please include "security_risk" parameter with value "LOW", "MEDIUM", or "HIGH".'
-                    )
+                    arguments['security_risk'] = 'LOW'
                 path = arguments['path']
                 command = arguments['command']
                 other_kwargs = {

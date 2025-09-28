@@ -693,7 +693,7 @@ def _extract_and_validate_params(
     if missing_params:
         # Create helpful error message with expected parameter format
         missing_list = list(missing_params)
-        error_msg = f"Missing required parameters for function '{fn_name}': {missing_params}"
+        error_msg = f"Missing required parameters for function '{fn_name}': {missing_params}; params:{params}"
 
         # Add specific guidance for security_risk parameter if missing
         if 'security_risk' in missing_params:

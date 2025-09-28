@@ -153,9 +153,10 @@ def create_str_replace_editor_tool(
                         'type': 'string',
                         'description': SECURITY_RISK_DESC,
                         'enum': RISK_LEVELS,
+                        'default': 'LOW',
                     },
                 },
-                'required': ['command', 'path', 'security_risk'],
+                'required': ['command', 'path'],
             },
         ),
     )
