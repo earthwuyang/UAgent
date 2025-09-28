@@ -688,6 +688,13 @@ def _extract_and_validate_params(
         params[param_name] = param_value
         found_params.add(param_name)
 
+    # Special handling for str_replace_editor security_risk parameter
+    if fn_name == 'str_replace_editor' and 'security_risk' in required_params and 'security_risk' not in found_params:
+        # Auto-add security_risk=LOW for str_replace_editor to fix compatibility
+        params['security_risk'] = 'LOW'
+        found_params.add('security_risk')
+        print(f"[AUTO-FIX] Added security_risk=LOW to str_replace_editor call")
+
     # Check all required parameters are present
     missing_params = required_params - found_params
     if missing_params:

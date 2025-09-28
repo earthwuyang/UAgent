@@ -194,6 +194,8 @@ This file is MANDATORY for completion.
                 str(openhands_cache.resolve()): {"bind": "/openhands/code/cache", "mode": "rw"},
                 str(openhands_tmp.resolve()): {"bind": "/tmp/openhands", "mode": "rw"},
                 str(openhands_home.resolve()): {"bind": "/tmp/openhands_home", "mode": "rw"},
+                # Mount our modified OpenHands source code to override the container's version
+                "/home/wuy/AI/UAgent/OpenHands/openhands": {"bind": "/openhands/code/openhands", "mode": "ro"},
             },
             "user": "0:0",  # Run as root to avoid permission issues with poetry environment
         }
@@ -449,6 +451,9 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             # Test API connectivity first
             echo "=== Testing API connectivity ==="
             timeout 10 curl -s -o /dev/null -w "%{{http_code}}" "$LLM_BASE_URL" || echo "API endpoint connectivity test failed (this might be normal)"
+
+            # OpenHands source code is now mounted from our local directory with security_risk fixes
+            echo "=== Using modified OpenHands source code with security_risk fixes ==="
 
             # Run OpenHands with error handling and security bypass
             /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m openhands.core.main \
