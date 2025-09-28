@@ -22,6 +22,7 @@ from .core.openhands import OpenHandsClient
 from .core.session_manager import ResearchSessionManager
 from .core.app_state import clear_app_state, get_app_state, set_app_state
 from .core.experiment_manager import initialize_experiment_manager, shutdown_experiment_manager
+from .core.docker_container_manager import get_container_manager
 from .connectors import ArxivClient, CrossrefClient, OpenAlexClient, PubMedClient
 from .pipelines import ClaimVerifier, EvidenceRetriever, EvidenceSynthesizer
 from .services import ArtifactStore, PlaywrightCaptureService, QwenVisionAnalyzer, ResearchGraphService
@@ -209,6 +210,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down UAgent system...")
+
+    # Shutdown Docker containers first (highest priority)
+    try:
+        container_manager = get_container_manager()
+        container_manager.shutdown()
+    except Exception as e:
+        logger.error(f"Error shutting down Docker container manager: {e}")
 
     # Shutdown OpenHands runtime sessions
     try:

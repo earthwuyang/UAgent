@@ -183,6 +183,18 @@ Brief description and purpose
 - **Files Added**: `backend/app/core/streaming_llm_client.py`
 - **Files Modified**: `backend/app/routers/smart_router.py` (temporary LLM client replacement during research)
 
+### Recent Implementation Updates (2025-09-28)
+#### Docker Container Auto-Cleanup ✅ **IMPLEMENTED**
+- **Feature**: Automatic cleanup of OpenHands Docker containers when UAgent shuts down
+- **Implementation**: Global `DockerContainerManager` singleton with shutdown hooks
+- **Files Added**:
+  - `backend/app/core/docker_container_manager.py` (container management and cleanup)
+  - `backend/scripts/cleanup_containers.py` (manual cleanup CLI tool)
+- **Files Modified**:
+  - `backend/app/main.py` (shutdown integration, lines 214-219)
+  - `backend/app/integrations/openhands_single_container.py` (container registration, lines 504-506)
+- **Manual Cleanup**: `python backend/scripts/cleanup_containers.py --openhands`
+
 ## Critical Success Metrics
 
 - **Router Accuracy**: >95% correct classification of user requests

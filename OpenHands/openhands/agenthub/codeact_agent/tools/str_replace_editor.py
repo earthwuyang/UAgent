@@ -129,19 +129,19 @@ def create_str_replace_editor_tool(
                         'type': 'string',
                     },
                     'file_text': {
-                        'description': 'Required parameter of `create` command, with the content of the file to be created.',
+                        'description': 'REQUIRED for `create` command: The complete content of the file to be created. Must be provided when command is "create".',
                         'type': 'string',
                     },
                     'old_str': {
-                        'description': 'Required parameter of `str_replace` command containing the string in `path` to replace.',
+                        'description': 'REQUIRED for `str_replace` command: The exact string in the file to replace. Must match file content exactly including whitespace.',
                         'type': 'string',
                     },
                     'new_str': {
-                        'description': 'Optional parameter of `str_replace` command containing the new string (if not given, no string will be added). Required parameter of `insert` command containing the string to insert.',
+                        'description': 'REQUIRED for `insert` command: The string to insert. Optional for `str_replace` command (if omitted, old_str is deleted).',
                         'type': 'string',
                     },
                     'insert_line': {
-                        'description': 'Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.',
+                        'description': 'REQUIRED for `insert` command: Line number after which to insert new_str. Must be provided when command is "insert".',
                         'type': 'integer',
                     },
                     'view_range': {

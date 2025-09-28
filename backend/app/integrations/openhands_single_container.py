@@ -20,6 +20,7 @@ load_dotenv()
 
 # Import experiment manager after load_dotenv
 from ..core.experiment_manager import get_experiment_manager
+from ..core.docker_container_manager import get_container_manager
 
 logger = logging.getLogger(__name__)
 
@@ -500,6 +501,10 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             container = self.docker_client.containers.run(**container_config)
             container_id = container.id
 
+            # Register container with the global container manager for cleanup
+            container_manager = get_container_manager()
+            container_manager.register_container(container_id)
+
             logger.info(f"OpenHands container started: {container_id}")
             logger.info(f"Live monitoring at: {monitoring_dir}")
 
@@ -643,11 +648,15 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             # Parse artifacts
             final_json = self._parse_artifacts(cfg)
 
-            # Clean up container
+            # Clean up container and unregister from manager
+            container_manager = get_container_manager()
             try:
                 container.remove()
+                container_manager.unregister_container(container.id)
             except Exception as e:
                 logger.warning(f"Failed to remove container: {e}")
+                # Still unregister even if removal failed
+                container_manager.unregister_container(container.id)
 
             # Determine success
             success = exit_code == 0 and final_json is not None and final_json.get("success", False)
@@ -696,12 +705,16 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             with open(container_status, 'w') as f:
                 json.dump(status_info, f, indent=2)
 
-            # Try to clean up
+            # Try to clean up and unregister from manager
+            container_manager = get_container_manager()
             try:
                 container.kill()
                 container.remove()
+                container_manager.unregister_container(container.id)
             except Exception as cleanup_e:
                 logger.warning(f"Failed to cleanup container: {cleanup_e}")
+                # Still unregister even if cleanup failed
+                container_manager.unregister_container(container.id)
 
             return SingleContainerResult(
                 success=False,
