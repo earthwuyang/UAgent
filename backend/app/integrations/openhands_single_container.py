@@ -248,6 +248,9 @@ CRITICAL FINAL STEP: When you complete this task, you MUST create a file at expe
 
 Create the directory experiments/{cfg.session_name}/results/ if needed. This final.json file is MANDATORY."""
 
+        # Add explicit guidance for file editor tool usage to avoid missing file_text on create
+        enhanced_goal += "\n\nIMPORTANT TOOL USAGE:\n- When using the file editor (str_replace_editor) with command=\"create\", you MUST include a 'file_text' argument containing the full file contents.\n- If content is lengthy, consider creating the file and then performing 'write' operations with 'content' chunks. Do not omit 'file_text' on create.\n"
+
         # Container environment - completely isolated Poetry environment
         env = {
             # Completely disable conda/mamba interference
@@ -405,6 +408,13 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             if api_var in os.environ:
                 env[api_var] = os.environ[api_var]
 
+        # Token limits: prioritize .env; provide sane defaults to avoid truncated tool calls
+        env.setdefault("LLM_MAX_OUTPUT_TOKENS", os.getenv("LLM_MAX_OUTPUT_TOKENS", os.getenv("MAX_TOKENS", "4096")))
+        env.setdefault("LLM_MAX_INPUT_TOKENS", os.getenv("LLM_MAX_INPUT_TOKENS", "32768"))
+        env.setdefault("MAX_TOKENS", os.getenv("MAX_TOKENS", "4096"))
+        # Some libraries check these OpenAI-style envs for defaults
+        env.setdefault("OPENAI_MAX_TOKENS", os.getenv("OPENAI_MAX_TOKENS", env["MAX_TOKENS"]))
+
         # Create OpenHands config file to force CLI runtime (no Docker!)
         config_content = f"""[core]
 runtime = "cli"
@@ -420,6 +430,7 @@ timeout = 300
 model = "{env['LLM_MODEL']}"
 api_key = "{env['LLM_API_KEY']}"
 base_url = "{env['LLM_BASE_URL']}"
+max_output_tokens = {int(os.getenv('LLM_MAX_OUTPUT_TOKENS', os.getenv('MAX_TOKENS', '4096')))}
 """
 
         # OpenHands CLI command with config file
