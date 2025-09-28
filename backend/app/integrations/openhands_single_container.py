@@ -7,6 +7,7 @@ This is the cleanest approach: one container, complete isolation, simple archite
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,7 +87,6 @@ This file is MANDATORY for completion.
 
     def _prepare_workspace_with_permissions(self, cfg: SingleContainerConfig) -> None:
         """Prepare workspace with proper permissions for container access"""
-        import os
         import stat
 
         try:
@@ -146,7 +146,6 @@ This file is MANDATORY for completion.
 
     def _prepare_container_directories(self, cfg: SingleContainerConfig) -> Dict[str, Any]:
         """Prepare container volume mappings with proper directories in workspace"""
-        import os
 
         # Get current user info for permission mapping
         current_uid = os.getuid()
@@ -197,7 +196,7 @@ This file is MANDATORY for completion.
                 str(openhands_tmp.resolve()): {"bind": "/tmp/openhands", "mode": "rw"},
                 str(openhands_home.resolve()): {"bind": "/tmp/openhands_home", "mode": "rw"},
             },
-            "user": f"{current_uid}:{current_gid}",  # Use current user and group
+            "user": "0:0",  # Run as root to avoid permission issues with poetry environment
         }
 
     def run(self, cfg: SingleContainerConfig) -> SingleContainerResult:
@@ -263,13 +262,17 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             "DOCKER_API_VERSION": "",            # Clear Docker API version
             "DOCKER_CONFIG": "",                 # Clear Docker config path
 
-            # Clear proxy settings that interfere with container networking
-            "http_proxy": "",                    # Clear HTTP proxy
-            "https_proxy": "",                   # Clear HTTPS proxy
-            "HTTP_PROXY": "",                    # Clear HTTP proxy (uppercase)
-            "HTTPS_PROXY": "",                   # Clear HTTPS proxy (uppercase)
-            "no_proxy": "",                      # Clear no proxy list
-            "NO_PROXY": "",                      # Clear no proxy list (uppercase)
+            # Configure proxy settings for git clone and wget operations
+            # Inherit proxy settings from environment variables
+            "http_proxy": os.getenv("http_proxy", ""),
+            "https_proxy": os.getenv("https_proxy", ""),
+            "HTTP_PROXY": os.getenv("HTTP_PROXY", os.getenv("http_proxy", "")),
+            "HTTPS_PROXY": os.getenv("HTTPS_PROXY", os.getenv("https_proxy", "")),
+            "GIT_HTTP_PROXY": os.getenv("http_proxy", ""),
+            "GIT_HTTPS_PROXY": os.getenv("https_proxy", ""),
+            # Inherit no_proxy settings from environment
+            "no_proxy": os.getenv("no_proxy", "localhost,127.0.0.1,0.0.0.0,::1"),
+            "NO_PROXY": os.getenv("NO_PROXY", os.getenv("no_proxy", "localhost,127.0.0.1,0.0.0.0,::1")),
 
             # User configuration for proper permissions
             "HOME": "/tmp/openhands_home",       # Temporary home directory
@@ -288,7 +291,6 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
         }
 
         # Simple LLM configuration - prioritize user config, then Moonshot, then fallbacks
-        import os
 
         def get_bashrc_var(var_name):
             """Simple function to read environment variables from ~/.bashrc"""

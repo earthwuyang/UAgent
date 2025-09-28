@@ -1127,6 +1127,11 @@ Variables: {json.dumps(design.variables)}
 Controls: {json.dumps(design.controls)}
 Data Collection Plan: {json.dumps(design.data_collection_plan)}
 
+CRITICAL ANTI-SIMULATION CONSTRAINTS:
+- DO NOT use dummy simulation, mock simulation, or fake any experimental operations
+- NO simulated, estimated, or placeholder data allowed
+- MUST perform real measurements and collect actual data
+
 Requirements:
 1. Collect REAL experimental data (no simulation or random data)
 2. Perform the analysis according to the methodology
@@ -2771,8 +2776,8 @@ Return JSON only.
         Returns:
             Comprehensive scientific research result
         """
-        # include_code_analysis = False
-        # include_literature_review = False
+        include_code_analysis = False
+        include_literature_review = False
         
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
