@@ -113,11 +113,10 @@ def response_to_actions(
             # ================================================
 
             if tool_call.function.name == create_cmd_run_tool()['function']['name']:
-                # Auto-fix missing command parameter
                 if 'command' not in arguments:
-                    arguments['command'] = ''  # Default to empty command for log retrieval
-                    logger.warning(f'[AUTO-FIX] Added missing command parameter to execute_bash call')
-
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "command" in tool call {tool_call.function.name}'
+                    )
                 # convert is_input to boolean
                 is_input = arguments.get('is_input', 'false') == 'true'
                 action = CmdRunAction(command=arguments['command'], is_input=is_input)
@@ -185,21 +184,14 @@ def response_to_actions(
                 tool_call.function.name
                 == create_str_replace_editor_tool()['function']['name']
             ):
-                # Auto-fix missing command parameter
                 if 'command' not in arguments:
-                    arguments['command'] = 'view'  # Default to view command
-                    logger.warning(f'[AUTO-FIX] Added missing command parameter to str_replace_editor call, defaulting to "view"')
-
-                # Auto-fix missing path parameter
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "command" in tool call {tool_call.function.name}'
+                    )
                 if 'path' not in arguments:
-                    arguments['path'] = '/workspace'  # Default to workspace root
-                    logger.warning(f'[AUTO-FIX] Added missing path parameter to str_replace_editor call, defaulting to "/workspace"')
-
-                # Auto-fix missing file_text for create command
-                if arguments.get('command') == 'create' and 'file_text' not in arguments:
-                    arguments['file_text'] = '# TODO: Add file content\n'
-                    logger.warning(f'[AUTO-FIX] Added missing file_text parameter to str_replace_editor create command')
-
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "path" in tool call {tool_call.function.name}'
+                    )
                 # Set default security_risk if not provided
                 if 'security_risk' not in arguments:
                     arguments['security_risk'] = 'LOW'
