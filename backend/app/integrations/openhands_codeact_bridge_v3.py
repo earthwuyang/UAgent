@@ -150,25 +150,25 @@ class OpenHandsCodeActBridgeV3:
         env["LLM_LOG_FILE"] = str(cfg.workspace / "logs" / "openhands_llm_interactions.log")
 
         # Map LLM configuration from .env file
-        # Priority: explicit config > .env LITELLM_* > LLM_* env
+        # Priority: explicit config > .env LLM_* env
         if cfg.llm_model:
             env["LLM_MODEL"] = cfg.llm_model
-        elif "LITELLM_MODEL" in os.environ:
-            env["LLM_MODEL"] = os.environ["LITELLM_MODEL"]
+        elif "LLM_MODEL" in os.environ:
+            env["LLM_MODEL"] = os.environ["LLM_MODEL"]
         elif "LLM_MODEL" in os.environ:
             env["LLM_MODEL"] = os.environ["LLM_MODEL"]
 
         if cfg.llm_api_key:
             env["LLM_API_KEY"] = cfg.llm_api_key
-        elif "LITELLM_API_KEY" in os.environ:
-            env["LLM_API_KEY"] = os.environ["LITELLM_API_KEY"]
+        elif "LLM_API_KEY" in os.environ:
+            env["LLM_API_KEY"] = os.environ["LLM_API_KEY"]
         elif "LLM_API_KEY" in os.environ:
             env["LLM_API_KEY"] = os.environ["LLM_API_KEY"]
 
         if cfg.llm_base_url:
             env["LLM_BASE_URL"] = cfg.llm_base_url
-        elif "LITELLM_API_BASE" in os.environ:
-            env["LLM_BASE_URL"] = os.environ["LITELLM_API_BASE"]
+        elif "LLM_BASE_URL" in os.environ:
+            env["LLM_BASE_URL"] = os.environ["LLM_BASE_URL"]
         elif "LLM_BASE_URL" in os.environ:
             env["LLM_BASE_URL"] = os.environ["LLM_BASE_URL"]
 

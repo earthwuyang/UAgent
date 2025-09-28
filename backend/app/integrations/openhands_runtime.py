@@ -25,7 +25,7 @@ from .openhands.types import ActionResult, ActionError
 
 # Read default timeout from environment variable (default: 120 seconds = 2 minutes)
 DEFAULT_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_TIMEOUT", "120"))
-OPENHANDS_MAX_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_ACTION_MAX_TIMEOUT", "900"))
+OPENHANDS_MAX_ACTION_TIMEOUT = int(os.getenv("OPENHANDS_MAX_ACTION_TIMEOUT", "900"))
 OPENHANDS_RUN_ADAPTIVE_MULTIPLIER = float(os.getenv("OPENHANDS_RUN_TIMEOUT_MULTIPLIER", "1.75"))
 OPENHANDS_RUN_MAX_ATTEMPTS = int(os.getenv("OPENHANDS_RUN_MAX_ATTEMPTS", "3"))
 OPENHANDS_PACKAGE_CMD_MIN_TIMEOUT = int(os.getenv("OPENHANDS_PACKAGE_CMD_MIN_TIMEOUT", "600"))
@@ -948,12 +948,12 @@ class OpenHandsActionServerRunner:
         env["SANDBOX_FORCE_REBUILD"] = "false"  # Don't rebuild image
 
         # Map LLM configuration from .env file to OpenHands format
-        if "LITELLM_MODEL" in os.environ:
-            env["LLM_MODEL"] = os.environ["LITELLM_MODEL"]
-        if "LITELLM_API_KEY" in os.environ:
-            env["LLM_API_KEY"] = os.environ["LITELLM_API_KEY"]
-        if "LITELLM_API_BASE" in os.environ:
-            env["LLM_BASE_URL"] = os.environ["LITELLM_API_BASE"]
+        if "LLM_MODEL" in os.environ:
+            env["LLM_MODEL"] = os.environ["LLM_MODEL"]
+        if "LLM_API_KEY" in os.environ:
+            env["LLM_API_KEY"] = os.environ["LLM_API_KEY"]
+        if "LLM_BASE_URL" in os.environ:
+            env["LLM_BASE_URL"] = os.environ["LLM_BASE_URL"]
 
         proxy_url = _detect_local_proxy()
         if proxy_url:

@@ -16,6 +16,7 @@ from enum import Enum
 from ..llm_client import LLMClient
 from ..openhands import OpenHandsClient, CodeGenerationRequest
 from ..websocket_manager import progress_tracker
+from ..experiment_manager import get_experiment_manager
 from .deep_research import DeepResearchEngine, ResearchResult as DeepResearchResult
 from .code_research import CodeResearchEngine, CodeResearchResult
 # Single container bridge (optimal solution)
@@ -231,7 +232,7 @@ class HypothesisGenerator:
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
         self.max_json_retries = 3
-        self.max_generation_tokens = int(os.getenv("HYPOTHESIS_MAX_TOKENS", "3200"))
+        self.max_generation_tokens = int(os.getenv("HYPOTHESIS_MAX_TOKENS", "20000"))
 
     async def generate_hypotheses(
         self,
@@ -510,7 +511,7 @@ class ExperimentDesigner:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
-        self.max_generation_tokens = int(os.getenv("EXPERIMENT_DESIGN_MAX_TOKENS", "2800"))
+        self.max_generation_tokens = int(os.getenv("EXPERIMENT_DESIGN_MAX_TOKENS", "20000"))
 
     @staticmethod
     def _safe_loads(payload: str) -> Dict[str, Any]:
@@ -1145,8 +1146,8 @@ Requirements:
                         goal=container_goal,
                         workspace=ws_path,
                         session_name=design.id,
-                        max_steps=int(os.getenv("UAGENT_OPENHANDS_MAX_STEPS", "80")),
-                        max_minutes=int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "30"))
+                        max_steps=int(os.getenv("UAGENT_OPENHANDS_MAX_STEPS", "999999999")),
+                        max_minutes=int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "9999999"))
                     )
 
                     # Execute via single container bridge
@@ -2776,6 +2777,23 @@ Return JSON only.
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
 
+        # Register experiment with experiment manager
+        experiment_manager = get_experiment_manager()
+        workspace_path = None
+        if experiment_manager and session_id:
+            # Get workspace path from OpenHands client if available
+            if self.openhands_client:
+                try:
+                    # Try to get workspace path from OpenHands client
+                    workspace_config = await self.openhands_client.workspace_manager.create_workspace(
+                        research_id=session_id
+                    )
+                    workspace_path = Path(workspace_config.base_path)
+                    experiment_manager.register_experiment(session_id, research_question, workspace_path)
+                    self.logger.info(f"Registered experiment {session_id} with workspace: {workspace_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to register experiment with manager: {e}")
+
         root_id = self._get_root_node_id(session_id)
 
         await self._log_progress(
@@ -3107,6 +3125,51 @@ Return JSON only.
                 self._session_phase_nodes.pop(session_id, None)
                 self._session_root_nodes.pop(session_id, None)
             await self._release_all_openhands_sessions(session_id)
+
+            # Complete experiment with experiment manager
+            experiment_manager = get_experiment_manager()
+            if experiment_manager and session_id and experiment_manager.is_experiment_active(session_id):
+                try:
+                    # Determine if experiment was successful
+                    success = (
+                        result.confidence_score > 0.7 and
+                        result.final_conclusions and
+                        len(result.final_conclusions) > 0 and
+                        not any("error" in conclusion.lower() for conclusion in result.final_conclusions)
+                    )
+
+                    # Create final result summary
+                    final_result = {
+                        "research_id": result.research_id,
+                        "query": result.query,
+                        "confidence_score": result.confidence_score,
+                        "hypotheses_count": len(result.hypotheses),
+                        "experiments_count": len(result.experiments),
+                        "final_conclusions": result.final_conclusions,
+                        "recommendations": getattr(result, 'recommendations', []),
+                        "literature_review_summary": result.literature_review.summary if result.literature_review else None,
+                        "code_analysis_summary": result.code_analysis.summary if result.code_analysis else None,
+                    }
+
+                    error_message = None
+                    if not success and result.final_conclusions:
+                        error_message = "; ".join(result.final_conclusions)
+
+                    # Complete the experiment
+                    arxiv_path = await experiment_manager.complete_experiment(
+                        session_id=session_id,
+                        success=success,
+                        final_result=final_result,
+                        error_message=error_message
+                    )
+
+                    if arxiv_path:
+                        self.logger.info(f"Experiment {session_id} archived to: {arxiv_path}")
+                    else:
+                        self.logger.warning(f"Failed to archive experiment {session_id}")
+
+                except Exception as e:
+                    self.logger.error(f"Failed to complete experiment {session_id}: {e}")
 
         return result
 

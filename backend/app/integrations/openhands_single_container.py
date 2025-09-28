@@ -4,6 +4,7 @@ Run OpenHands CLI directly inside the runtime container in headless mode.
 This is the cleanest approach: one container, complete isolation, simple architecture.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -16,6 +17,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Import experiment manager after load_dotenv
+from ..core.experiment_manager import get_experiment_manager
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,8 +29,8 @@ class SingleContainerConfig:
     goal: str
     workspace: Path
     session_name: str = "exp"
-    max_steps: int = 80
-    max_minutes: int = 30
+    max_steps: int = 999999999
+    max_minutes: int = 9999999
     llm_model: Optional[str] = None
     llm_api_key: Optional[str] = None
     llm_base_url: Optional[str] = None
@@ -202,6 +206,17 @@ This file is MANDATORY for completion.
 
         # Prepare workspace with proper permissions
         self._prepare_workspace_with_permissions(cfg)
+
+        # Register experiment with experiment manager
+        experiment_manager = get_experiment_manager()
+        if experiment_manager and hasattr(cfg, 'session_name') and cfg.session_name != "exp":
+            # Use session_name as session_id if it's not the default
+            session_id = cfg.session_name
+            try:
+                experiment_manager.register_experiment(session_id, cfg.goal, cfg.workspace)
+                logger.info(f"Registered OpenHands experiment {session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to register OpenHands experiment: {e}")
 
         # Enhanced goal with explicit final.json requirement
         enhanced_goal = f"""{cfg.goal}
@@ -605,6 +620,26 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
 
             # Determine success
             success = exit_code == 0 and final_json is not None and final_json.get("success", False)
+
+            # Complete experiment with experiment manager
+            experiment_manager = get_experiment_manager()
+            if experiment_manager and hasattr(cfg, 'session_name') and cfg.session_name != "exp":
+                session_id = cfg.session_name
+                if experiment_manager.is_experiment_active(session_id):
+                    try:
+                        error_message = None if success else f"Exit code {exit_code}" + ("" if final_json else ", no final.json found")
+
+                        arxiv_path = asyncio.run(experiment_manager.complete_experiment(
+                            session_id=session_id,
+                            success=success,
+                            final_result=final_json,
+                            error_message=error_message
+                        ))
+
+                        if arxiv_path:
+                            logger.info(f"OpenHands experiment {session_id} archived to: {arxiv_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to complete OpenHands experiment {session_id}: {e}")
 
             return SingleContainerResult(
                 success=success,

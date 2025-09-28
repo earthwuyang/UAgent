@@ -3,6 +3,7 @@ import React from 'react'
 interface CardProps {
   className?: string
   children: React.ReactNode
+  onClick?: () => void
 }
 
 interface CardHeaderProps {
@@ -20,8 +21,16 @@ interface CardContentProps {
   children: React.ReactNode
 }
 
-export const Card: React.FC<CardProps> = ({ className = '', children }) => (
-  <div className={`bg-white shadow-sm border border-gray-200 rounded-lg ${className}`}>
+interface CardDescriptionProps {
+  className?: string
+  children: React.ReactNode
+}
+
+export const Card: React.FC<CardProps> = ({ className = '', children, onClick }) => (
+  <div
+    className={`bg-white shadow-sm border border-gray-200 rounded-lg ${className}`}
+    onClick={onClick}
+  >
     {children}
   </div>
 )
@@ -42,4 +51,10 @@ export const CardContent: React.FC<CardContentProps> = ({ className = '', childr
   <div className={`px-6 py-4 ${className}`}>
     {children}
   </div>
+)
+
+export const CardDescription: React.FC<CardDescriptionProps> = ({ className = '', children }) => (
+  <p className={`text-sm text-gray-600 mt-1 ${className}`}>
+    {children}
+  </p>
 )

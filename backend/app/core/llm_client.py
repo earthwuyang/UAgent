@@ -540,19 +540,19 @@ class LiteLLMClient(LLMClient):
         if provider_prefix and "/" not in normalized_model:
             normalized_model = f"{provider_prefix}/{normalized_model}"
         self.model = normalized_model
-        self.api_key = api_key or os.getenv("LITELLM_API_KEY")
-        self.api_base = api_base or os.getenv("LITELLM_API_BASE")
+        self.api_key = api_key or os.getenv("LLM_API_KEY")
+        self.api_base = api_base or os.getenv("LLM_BASE_URL")
         self.extra_options: Dict[str, Any] = {}
         if extra_options:
             self.extra_options.update(extra_options)
-        env_extra = os.getenv("LITELLM_EXTRA_OPTIONS")
+        env_extra = os.getenv("LLM_EXTRA_OPTIONS")
         if env_extra:
             try:
                 parsed = json.loads(env_extra)
                 if isinstance(parsed, dict):
                     self.extra_options.update(parsed)
             except json.JSONDecodeError:
-                self.logger.warning("Invalid JSON in LITELLM_EXTRA_OPTIONS; ignoring.")
+                self.logger.warning("Invalid JSON in LLM_EXTRA_OPTIONS; ignoring.")
 
     def _build_request(self, **overrides: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = dict(self.extra_options)
@@ -565,7 +565,7 @@ class LiteLLMClient(LLMClient):
         return payload
 
     async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
-        env_tokens = int(os.getenv("LITELLM_CLASSIFICATION_MAX_TOKENS", "8192"))
+        env_tokens = int(os.getenv("LLM_CLASSIFICATION_MAX_TOKENS", "8192"))
         classification_tokens = max(1, min(env_tokens, 8192))
         full_prompt = (
             f"{prompt}\n\nUser request: {request}\n\n"
@@ -727,7 +727,7 @@ def create_llm_client(provider: str, api_key: Optional[str] = None, model: Optio
         env_key = f"{normalized_provider.upper()}_MODEL"
         resolved_model = os.getenv(env_key)
     if not resolved_model:
-        resolved_model = os.getenv("LITELLM_MODEL")
+        resolved_model = os.getenv("LLM_MODEL")
     if not resolved_model:
         resolved_model = DEFAULT_LITELLM_MODELS[normalized_provider]
 
@@ -735,16 +735,16 @@ def create_llm_client(provider: str, api_key: Optional[str] = None, model: Optio
     if not resolved_api_key:
         resolved_api_key = os.getenv(f"{normalized_provider.upper()}_API_KEY")
     if not resolved_api_key:
-        resolved_api_key = os.getenv("LITELLM_API_KEY")
+        resolved_api_key = os.getenv("LLM_API_KEY")
 
     if not resolved_api_key:
         raise ValueError(
             f"API key required for provider '{normalized_provider}'. "
-            "Set LITELLM_API_KEY or the provider-specific key."
+            "Set LLM_API_KEY or the provider-specific key."
         )
 
     extra_options: Dict[str, Any] = {}
-    env_extra = os.getenv("LITELLM_EXTRA_OPTIONS")
+    env_extra = os.getenv("LLM_EXTRA_OPTIONS")
     if env_extra:
         try:
             parsed = json.loads(env_extra)
@@ -752,12 +752,12 @@ def create_llm_client(provider: str, api_key: Optional[str] = None, model: Optio
                 extra_options.update(parsed)
         except json.JSONDecodeError:
             logging.getLogger(__name__).warning(
-                "Invalid JSON in LITELLM_EXTRA_OPTIONS; ignoring.")
+                "Invalid JSON in LLM_EXTRA_OPTIONS; ignoring.")
 
     return LiteLLMClient(
         api_key=resolved_api_key,
         model=resolved_model,
         provider=None if normalized_provider == "litellm" else normalized_provider,
-        api_base=os.getenv("LITELLM_API_BASE"),
+        api_base=os.getenv("LLM_BASE_URL"),
         extra_options=extra_options,
     )

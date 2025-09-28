@@ -21,6 +21,7 @@ from .core.research_engines import (
 from .core.openhands import OpenHandsClient
 from .core.session_manager import ResearchSessionManager
 from .core.app_state import clear_app_state, get_app_state, set_app_state
+from .core.experiment_manager import initialize_experiment_manager, shutdown_experiment_manager
 from .connectors import ArxivClient, CrossrefClient, OpenAlexClient, PubMedClient
 from .pipelines import ClaimVerifier, EvidenceRetriever, EvidenceSynthesizer
 from .services import ArtifactStore, PlaywrightCaptureService, QwenVisionAnalyzer, ResearchGraphService
@@ -29,7 +30,9 @@ from .memory import AgentMemory, AVDBConfig
 
 
 # Load environment configuration from .env before setup
-load_dotenv()
+# Load from parent directory where the main .env file is located
+load_dotenv(dotenv_path="../.env")
+load_dotenv()  # Also load from current directory if exists
 
 # Configure logging
 logging.basicConfig(
@@ -52,12 +55,12 @@ async def lifespan(app: FastAPI):
     api_key = (
         os.getenv("LLM_API_KEY")
         or os.getenv(f"{provider.upper()}_API_KEY")
-        or os.getenv("LITELLM_API_KEY")
+        or os.getenv("LLM_API_KEY")
     )
     model_name = (
         os.getenv("LLM_MODEL")
         or os.getenv(f"{provider.upper()}_MODEL")
-        or os.getenv("LITELLM_MODEL")
+        or os.getenv("LLM_MODEL")
     )
 
     try:
@@ -90,6 +93,9 @@ async def lifespan(app: FastAPI):
 
     # Initialize session manager
     session_manager = ResearchSessionManager()
+
+    # Initialize experiment manager
+    experiment_manager = initialize_experiment_manager(workspace_dir)
 
     # Optional agent memory
     memory_store: Optional[AgentMemory] = None
@@ -182,6 +188,7 @@ async def lifespan(app: FastAPI):
         },
         "smart_router": smart_router,
         "session_manager": session_manager,
+        "experiment_manager": experiment_manager,
         "openhands_app": openhands_app_client,
         "science_tools": {
             "connectors": connectors,
@@ -215,6 +222,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown session manager
     await session_manager.shutdown()
+
+    # Shutdown experiment manager and preserve active experiments
+    await shutdown_experiment_manager()
 
     # Shutdown external OpenHands app client if connected
     openhands_app_client = get_app_state().get("openhands_app")
@@ -283,7 +293,8 @@ async def root():
             "research": "/api/research/",
             "router": "/api/router/",
             "openhands": "/api/openhands/",
-            "engines": "/api/engines/"
+            "engines": "/api/engines/",
+            "experiments": "/api/experiments/"
         }
     }
 
@@ -295,12 +306,14 @@ from .routers import (
     science,
     smart_router as router_endpoints,
     websocket,
+    experiments,
 )
 
 app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(science.router, prefix="/api/science", tags=["science"])
 app.include_router(router_endpoints.router, prefix="/api/router", tags=["smart_router"])
 app.include_router(openhands_router.router, prefix="/api/openhands", tags=["openhands"])
+app.include_router(experiments.router, prefix="/api/experiments", tags=["experiments"])
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 

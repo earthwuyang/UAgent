@@ -113,16 +113,16 @@ class DockerTransitionManager:
         })
 
         # Map LLM configuration from .env file to OpenHands format
-        if "LITELLM_MODEL" in os.environ:
-            config["LLM_MODEL"] = os.environ["LITELLM_MODEL"]
-        if "LITELLM_API_KEY" in os.environ:
-            config["LLM_API_KEY"] = os.environ["LITELLM_API_KEY"]
-        if "LITELLM_API_BASE" in os.environ:
-            config["LLM_BASE_URL"] = os.environ["LITELLM_API_BASE"]
+        if "LLM_MODEL" in os.environ:
+            config["LLM_MODEL"] = os.environ["LLM_MODEL"]
+        if "LLM_API_KEY" in os.environ:
+            config["LLM_API_KEY"] = os.environ["LLM_API_KEY"]
+        if "LLM_BASE_URL" in os.environ:
+            config["LLM_BASE_URL"] = os.environ["LLM_BASE_URL"]
 
         # Also copy any additional LiteLLM options
-        if "LITELLM_EXTRA_OPTIONS" in os.environ:
-            config["LLM_EXTRA_OPTIONS"] = os.environ["LITELLM_EXTRA_OPTIONS"]
+        if "LLM_EXTRA_OPTIONS" in os.environ:
+            config["LLM_EXTRA_OPTIONS"] = os.environ["LLM_EXTRA_OPTIONS"]
 
         return config
 

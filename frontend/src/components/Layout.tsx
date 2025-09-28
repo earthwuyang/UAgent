@@ -1,6 +1,6 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { Brain, Search, BarChart3, Settings } from 'lucide-react'
+import { Brain, Search, BarChart3, Settings, History } from 'lucide-react'
 import { clsx } from 'clsx'
 
 interface LayoutProps {
@@ -13,6 +13,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const navigationItems = [
     { path: '/', label: 'Research', icon: Search },
     { path: '/dashboard', label: 'Dashboard', icon: BarChart3 },
+    { path: '/experiments', label: 'Experiments', icon: History },
     { path: '/status', label: 'System Status', icon: Settings },
   ]
 
