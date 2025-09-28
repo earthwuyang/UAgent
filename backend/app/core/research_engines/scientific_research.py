@@ -695,10 +695,10 @@ class ExperimentExecutor:
         except Exception:
             pass
 
-        # Attempt to salvage from artifacts under experiments/{design.id}/results
+        # Attempt to salvage from artifacts under results/
         try:
             if workspace_path is not None:
-                results_dir = workspace_path / f"experiments/{design.id}/results"
+                results_dir = workspace_path / "results"
                 if results_dir.exists() and results_dir.is_dir():
                     import json as _json
                     measurements: list[float] = []
@@ -1071,10 +1071,10 @@ Non-negotiable constraints:
 1. Interact with the actual workspace or databases (PostgreSQL, DuckDB, etc.); do not fabricate or simulate results.
 2. Do not use random generators, synthetic stubs, or placeholder measurements.
 3. Run real commands or database queries to gather metrics, logging each step.
-4. Save collected metrics under 'experiments/{design.id}/results'.
+4. Save collected metrics under 'results/'.
 5. Use only standard libraries or dependencies already available.
 6. Avoid external network calls.
-7. If the experiment requires multi-step command execution, author a ResearchActionSpec JSON (following backend/app/core/exec/ras.py) at 'experiments/{design.id}/ras_spec.json' that lists every fetch/build/run step plus required assertions so the orchestrator can execute it deterministically.
+7. If the experiment requires multi-step command execution, author a ResearchActionSpec JSON (following backend/app/core/exec/ras.py) at 'ras_spec.json' that lists every fetch/build/run step plus required assertions so the orchestrator can execute it deterministically.
 {error_context}
 
 The script must emit detailed logs, gracefully handle errors, and return a dict summarising the collected metrics derived from actual execution.
@@ -1118,7 +1118,7 @@ The script must emit detailed logs, gracefully handle errors, and return a dict 
                     ws_path = Path(workspace_path)
 
                     # Prepare experiment goal for single container execution
-                    container_goal = f"""Execute the following scientific experiment and save results to experiments/{design.id}/results/final.json:
+                    container_goal = f"""Execute the following scientific experiment and save results to results/final.json:
 
 Experiment: {design.name}
 Description: {design.description}
@@ -1135,7 +1135,7 @@ CRITICAL ANTI-SIMULATION CONSTRAINTS:
 Requirements:
 1. Collect REAL experimental data (no simulation or random data)
 2. Perform the analysis according to the methodology
-3. Save final results to experiments/{design.id}/results/final.json with:
+3. Save final results to results/final.json with:
    - success: boolean
    - data: dict with raw measurements
    - analysis: dict with statistical analysis
