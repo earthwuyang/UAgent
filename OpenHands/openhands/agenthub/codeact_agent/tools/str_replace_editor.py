@@ -14,6 +14,7 @@ _DETAILED_STR_REPLACE_EDITOR_DESCRIPTION = """Custom editing tool for viewing, c
 * If `path` is a text file, `view` displays the result of applying `cat -n`. If `path` is a directory, `view` lists non-hidden files and directories up to 2 levels deep
 * The following binary file extensions can be viewed in Markdown format: [".xlsx", ".pptx", ".wav", ".mp3", ".m4a", ".flac", ".pdf", ".docx"]. IT DOES NOT HANDLE IMAGES.
 * The `create` command cannot be used if the specified `path` already exists as a file
+* **CRITICAL FOR CREATE COMMAND**: When using command="create", you MUST provide the "file_text" parameter with the complete file content. The create command will fail without file_text.
 * If a `command` generates a long output, it will be truncated and marked with `<response clipped>`
 * The `undo_edit` command will revert the last edit made to the file at `path`
 * This tool can be used for creating and editing files in plain-text format.
@@ -46,6 +47,7 @@ _SHORT_STR_REPLACE_EDITOR_DESCRIPTION = """Custom editing tool for viewing, crea
 * State is persistent across command calls and discussions with the user
 * If `path` is a file, `view` displays the result of applying `cat -n`. If `path` is a directory, `view` lists non-hidden files and directories up to 2 levels deep
 * The `create` command cannot be used if the specified `path` already exists as a file
+* **IMPORTANT**: For command="create", you MUST include "file_text" parameter with the file content
 * If a `command` generates a long output, it will be truncated and marked with `<response clipped>`
 * The `undo_edit` command will revert the last edit made to the file at `path`
 Notes for using the `str_replace` command:
@@ -114,7 +116,7 @@ def create_str_replace_editor_tool(
                 'type': 'object',
                 'properties': {
                     'command': {
-                        'description': 'The commands to run. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.',
+                        'description': 'The commands to run. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`. CRITICAL: When using "create", you MUST also provide the "file_text" parameter.',
                         'enum': [
                             'view',
                             'create',
