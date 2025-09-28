@@ -187,17 +187,32 @@ This file is MANDATORY for completion.
                 except PermissionError:
                     pass  # Skip if we can't change ownership
 
+        # Base volumes always mounted
+        volumes: Dict[str, Dict[str, str]] = {
+            # No Docker socket needed for headless CLI mode
+            str(cfg.workspace.resolve()): {"bind": "/workspace", "mode": "rw"},
+            str(openhands_logs.resolve()): {"bind": "/openhands/code/logs", "mode": "rw"},
+            str(openhands_cache.resolve()): {"bind": "/openhands/code/cache", "mode": "rw"},
+            str(openhands_tmp.resolve()): {"bind": "/tmp/openhands", "mode": "rw"},
+            str(openhands_home.resolve()): {"bind": "/tmp/openhands_home", "mode": "rw"},
+        }
+
+        # Optional: mount local OpenHands source to override container's version
+        # Controlled via OPENHANDS_SOURCE_PATH in .env
+        openhands_src = os.getenv("OPENHANDS_SOURCE_PATH", "/Users/wuy/Desktop/code/UAgent/OpenHands/openhands").strip()
+        if openhands_src:
+            try:
+                src_path = Path(openhands_src).expanduser().resolve()
+                if src_path.exists():
+                    volumes[str(src_path)] = {"bind": "/openhands/code/openhands", "mode": "ro"}
+                    logger.info(f"Mounting OPENHANDS_SOURCE_PATH: {src_path}")
+                else:
+                    logger.warning(f"OPENHANDS_SOURCE_PATH does not exist: {src_path}; skipping mount")
+            except Exception as e:
+                logger.warning(f"Invalid OPENHANDS_SOURCE_PATH '{openhands_src}': {e}")
+
         return {
-            "volumes": {
-                # No Docker socket needed for headless CLI mode
-                str(cfg.workspace.resolve()): {"bind": "/workspace", "mode": "rw"},
-                str(openhands_logs.resolve()): {"bind": "/openhands/code/logs", "mode": "rw"},
-                str(openhands_cache.resolve()): {"bind": "/openhands/code/cache", "mode": "rw"},
-                str(openhands_tmp.resolve()): {"bind": "/tmp/openhands", "mode": "rw"},
-                str(openhands_home.resolve()): {"bind": "/tmp/openhands_home", "mode": "rw"},
-                # Mount our modified OpenHands source code to override the container's version
-                "/home/wuy/AI/UAgent/OpenHands/openhands": {"bind": "/openhands/code/openhands", "mode": "ro"},
-            },
+            "volumes": volumes,
             "user": "0:0",  # Run as root to avoid permission issues with poetry environment
         }
 

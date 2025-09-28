@@ -35,10 +35,10 @@ from .memory import AgentMemory, AVDBConfig
 load_dotenv(dotenv_path="../.env")
 load_dotenv()  # Also load from current directory if exists
 
-# Configure logging
+# Configure logging (include filename and line number)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -60,9 +60,9 @@ async def lifespan(app: FastAPI):
     )
     model_name = (
         os.getenv("LLM_MODEL")
-        or os.getenv(f"{provider.upper()}_MODEL")
-        or os.getenv("LLM_MODEL")
     )
+    
+    
 
     try:
         llm_client = create_llm_client(provider, api_key=api_key, model=model_name)

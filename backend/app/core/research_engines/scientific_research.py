@@ -512,6 +512,7 @@ class ExperimentDesigner:
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
         self.max_generation_tokens = int(os.getenv("EXPERIMENT_DESIGN_MAX_TOKENS", "20000"))
+        self.max_json_retries = 3
 
     @staticmethod
     def _safe_loads(payload: str) -> Dict[str, Any]:
@@ -522,8 +523,8 @@ class ExperimentDesigner:
             data = safe_json_loads(sanitized)
         except JsonParseError as exc:
             preview = (payload or "").strip().replace("\n", " ")
-            if len(preview) > 500:
-                preview = preview[:497] + "..."
+            # if len(preview) > 500:
+            #     preview = preview[:497] + "..."
             logging.getLogger(__name__).error(
                 "Experiment design JSON parse failed: %s | raw=%s",
                 exc,
@@ -542,9 +543,9 @@ class ExperimentDesigner:
         hypothesis: ResearchHypothesis,
         resources: Optional[Dict[str, Any]] = None
     ) -> ExperimentDesign:
-        """Design experiment to test hypothesis"""
+        """Design experiment to test hypothesis with JSON-regeneration retries on parse failure"""
 
-        design_prompt = f"""
+        base_prompt = f"""
         Design a rigorous experiment to test the following hypothesis:
 
         Hypothesis: {hypothesis.statement}
@@ -567,28 +568,75 @@ class ExperimentDesigner:
         11. "dependencies": External dependencies needed
 
         Respond with a raw JSON object only (no markdown fences, no commentary, no code blocks).
-        """
+        """.rstrip()
 
-        response = await self.llm_client.generate(
-            design_prompt,
-            max_tokens=self.max_generation_tokens,
-        )
-        design_data = self._safe_loads(response)
+        prompt = base_prompt + "\n\nReturn ONLY a valid JSON object."
+        design_dict: Optional[Dict[str, Any]] = None
+        last_response: Optional[str] = None
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, self.max_json_retries + 1):
+            response = await self.llm_client.generate(
+                prompt,
+                max_tokens=self.max_generation_tokens,
+                temperature=0.3 if attempt > 1 else 0.4,
+            )
+            raw = str(response or "").strip()
+            last_response = raw
+
+            if not raw:
+                self.logger.warning("Experiment design generation returned empty response on attempt %s", attempt)
+                last_error = RuntimeError("Empty response from LLM")
+                continue
+
+            try:
+                sanitized = sanitize_json_strings(raw)
+                parsed = safe_json_loads(sanitized)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        f"Experiment design must be a JSON object; got {type(parsed).__name__}"
+                    )
+                design_dict = parsed
+                break
+            except Exception as exc:  # JsonParseError or RuntimeError
+                last_error = exc
+                self.logger.warning(
+                    "Failed to parse experiment design JSON on attempt %s: %s. Raw response: %s",
+                    attempt,
+                    exc,
+                    (raw[:1500] + "...") if len(raw) > 1500 else raw,
+                )
+                if attempt < self.max_json_retries:
+                    prompt = (
+                        base_prompt
+                        + "\n\nIMPORTANT: Your previous answer was not valid JSON and raised the following parsing error\n"
+                        f"{exc}.\n"
+                        "Return ONLY a valid JSON object (no backticks, no extra commentary) following the schema above."
+                    )
+
+        if design_dict is None:
+            # Surface last parse error with a concise preview for observability
+            preview = (last_response or "").replace("\n", " ").strip()
+            if len(preview) > 500:
+                preview = preview[:497] + "..."
+            self.logger.error("Experiment design failed after retries: %s | raw=%s", last_error or "unknown", preview or "<empty>")
+            # Re-raise a descriptive error
+            raise RuntimeError(f"Experiment design returned invalid JSON after retries: {last_error}")
 
         design = ExperimentDesign(
             id=f"exp_{uuid.uuid4().hex[:8]}",
             hypothesis_id=hypothesis.id,
-            name=design_data.get("name", f"Experiment for {hypothesis.id}"),
-            description=design_data.get("description", "Experimental validation"),
-            methodology=design_data.get("methodology", "Standard experimental methodology"),
-            variables=design_data.get("variables", hypothesis.variables),
-            controls=design_data.get("controls", []),
-            data_collection_plan=design_data.get("data_collection_plan", {}),
-            analysis_plan=design_data.get("analysis_plan", "Statistical analysis of results"),
-            expected_duration=design_data.get("expected_duration", "1-2 hours"),
-            resource_requirements=design_data.get("resource_requirements", {}),
-            code_requirements=design_data.get("code_requirements", []),
-            dependencies=design_data.get("dependencies", []),
+            name=design_dict.get("name", f"Experiment for {hypothesis.id}"),
+            description=design_dict.get("description", "Experimental validation"),
+            methodology=design_dict.get("methodology", "Standard experimental methodology"),
+            variables=design_dict.get("variables", hypothesis.variables),
+            controls=design_dict.get("controls", []),
+            data_collection_plan=design_dict.get("data_collection_plan", {}),
+            analysis_plan=design_dict.get("analysis_plan", "Statistical analysis of results"),
+            expected_duration=design_dict.get("expected_duration", "1-2 hours"),
+            resource_requirements=design_dict.get("resource_requirements", {}),
+            code_requirements=design_dict.get("code_requirements", []),
+            dependencies=design_dict.get("dependencies", []),
         )
 
         return design
