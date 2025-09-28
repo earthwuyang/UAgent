@@ -152,7 +152,7 @@ review_iclr_bench/iclr_papers/
 review_iclr_bench/iclr_parsed_w_img/
 review_iclr_bench/generated_paper/
 review_iclr_bench/iclr_parsed/
-experiments/
+./experiments/
 aisci_outputs/
 slurm_logs/
 .out

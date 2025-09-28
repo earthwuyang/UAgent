@@ -407,6 +407,7 @@ EOF
             export OPENHANDS_DEFAULT_SECURITY_RISK=LOW
             export OPENHANDS_FORCE_SECURITY=false
             export OPENHANDS_SECURITY_ENABLED=false
+            export OPENHANDS_AUTO_SECURITY_RISK=LOW
 
             # Try to force local runtime with help flag first to see available options
             echo "Checking OpenHands CLI options:"
