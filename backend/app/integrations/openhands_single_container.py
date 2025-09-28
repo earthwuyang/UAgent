@@ -288,6 +288,11 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             # Debug and logging
             "DEBUG": "true",
             "LOG_LEVEL": "DEBUG",
+
+            # Security and confirmation settings
+            "OPENHANDS_SECURITY_CONFIRMATION": "false",
+            "OPENHANDS_AUTO_CONFIRM": "true",
+            "CONFIRM_MODE": "auto",
         }
 
         # Simple LLM configuration - prioritize user config, then Moonshot, then fallbacks
