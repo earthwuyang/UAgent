@@ -320,7 +320,7 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             "FORCE_ACTION_SECURITY_RISK": "LOW",
         }
 
-        # Simple LLM configuration - prioritize user config, then Moonshot, then fallbacks
+        # Simple LLM configuration - prioritize user config, then .env, then bashrc, then fallbacks
 
         def get_bashrc_var(var_name):
             """Simple function to read environment variables from ~/.bashrc"""
@@ -345,37 +345,60 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             env["LLM_BASE_URL"] = cfg.llm_base_url or ""
             logger.info(f"Using user-provided LLM config: {cfg.llm_model}")
 
-        # 2. Moonshot/Kimi from ~/.bashrc (user's preferred)
+        # 2. Values from environment (.env via load_dotenv has already been applied)
         else:
-            moonshot_api_key = get_bashrc_var("MOONSHOT_API_KEY")
-            moonshot_base_url = get_bashrc_var("MOONSHOT_BASE_URL")
+            env_llm_key = os.getenv("LLM_API_KEY")
+            env_llm_model = os.getenv("LLM_MODEL")
+            env_llm_base = os.getenv("LLM_BASE_URL")
 
-            if moonshot_api_key and moonshot_base_url:
-                env["LLM_MODEL"] = cfg.llm_model or "openai/kimi-k2-turbo-preview"
-                env["LLM_API_KEY"] = moonshot_api_key
-                env["LLM_BASE_URL"] = moonshot_base_url
-                env["OPENAI_API_KEY"] = moonshot_api_key  # LiteLLM compatibility
-                env["OPENAI_API_BASE"] = moonshot_base_url
-                # Add timeout and retry settings for better connectivity
-                env["OPENAI_TIMEOUT"] = "60"
-                env["OPENAI_MAX_RETRIES"] = "3"
-                logger.info(f"Using Moonshot/Kimi API: {env['LLM_MODEL']} at {moonshot_base_url}")
-
-            # 3. Fallback to available APIs
-            elif os.environ.get("DASHSCOPE_API_KEY"):
-                env["LLM_MODEL"] = "qwen/qwen-max"
-                env["LLM_API_KEY"] = os.environ["DASHSCOPE_API_KEY"]
-                env["LLM_BASE_URL"] = "https://dashscope.aliyuncs.com/api/v1"
-                logger.info("Using DashScope/Qwen fallback")
-
-            elif os.environ.get("OPENAI_API_KEY"):
-                env["LLM_MODEL"] = "gpt-4o-mini"
-                env["LLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
-                env["LLM_BASE_URL"] = "https://api.openai.com/v1"
-                logger.info("Using OpenAI fallback")
+            if env_llm_key:
+                env["LLM_MODEL"] = cfg.llm_model or env_llm_model or env.get("LLM_MODEL") or "gpt-4o-mini"
+                env["LLM_API_KEY"] = env_llm_key
+                env["LLM_BASE_URL"] = env_llm_base or ""
+                # Compatibility for libraries expecting OpenAI-style vars
+                env["OPENAI_API_KEY"] = env_llm_key
+                if env_llm_base:
+                    env["OPENAI_API_BASE"] = env_llm_base
+                # Reasonable network settings
+                env["OPENAI_TIMEOUT"] = env.get("OPENAI_TIMEOUT", "60")
+                env["OPENAI_MAX_RETRIES"] = env.get("OPENAI_MAX_RETRIES", "3")
+                logger.info(
+                    "Using LLM config from environment: model=%s base=%s",
+                    env["LLM_MODEL"],
+                    env.get("LLM_BASE_URL", ""),
+                )
 
             else:
-                logger.warning("No LLM API key found!")
+                # 3. Moonshot/Kimi from ~/.bashrc (fallback user preference)
+                moonshot_api_key = get_bashrc_var("MOONSHOT_API_KEY")
+                moonshot_base_url = get_bashrc_var("MOONSHOT_BASE_URL")
+
+                if moonshot_api_key and moonshot_base_url:
+                    env["LLM_MODEL"] = cfg.llm_model or "openai/kimi-k2-turbo-preview"
+                    env["LLM_API_KEY"] = moonshot_api_key
+                    env["LLM_BASE_URL"] = moonshot_base_url
+                    env["OPENAI_API_KEY"] = moonshot_api_key  # LiteLLM compatibility
+                    env["OPENAI_API_BASE"] = moonshot_base_url
+                    # Add timeout and retry settings for better connectivity
+                    env["OPENAI_TIMEOUT"] = env.get("OPENAI_TIMEOUT", "60")
+                    env["OPENAI_MAX_RETRIES"] = env.get("OPENAI_MAX_RETRIES", "3")
+                    logger.info(f"Using Moonshot/Kimi API: {env['LLM_MODEL']} at {moonshot_base_url}")
+
+                # 4. Fallback to available APIs
+                elif os.environ.get("DASHSCOPE_API_KEY"):
+                    env["LLM_MODEL"] = "qwen/qwen-max"
+                    env["LLM_API_KEY"] = os.environ["DASHSCOPE_API_KEY"]
+                    env["LLM_BASE_URL"] = "https://dashscope.aliyuncs.com/api/v1"
+                    logger.info("Using DashScope/Qwen fallback")
+
+                elif os.environ.get("OPENAI_API_KEY"):
+                    env["LLM_MODEL"] = "gpt-4o-mini"
+                    env["LLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
+                    env["LLM_BASE_URL"] = "https://api.openai.com/v1"
+                    logger.info("Using OpenAI fallback")
+
+                else:
+                    logger.warning("No LLM API key found!")
 
         # Pass additional API keys for tools that need them
         for api_var in ["DASHSCOPE_API_KEY", "OPENAI_API_KEY", "TAVILY_API_KEY"]:
