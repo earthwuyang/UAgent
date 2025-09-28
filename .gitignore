@@ -166,7 +166,6 @@ OpenHands/logs
 # From agent_laboratory_local
 venv*
 tst*
-state*
 junk/*
 huggingface_*
 junk/logs
