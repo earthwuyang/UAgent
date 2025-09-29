@@ -178,7 +178,7 @@ This file is MANDATORY for completion.
             pass
 
         # Set proper ownership and permissions recursively
-        for root, dirs, files in os.walk(openhands_dir):
+        for root, dirs, _files in os.walk(openhands_dir):
             for d in dirs:
                 dir_path = os.path.join(root, d)
                 os.chmod(dir_path, 0o777)
@@ -301,6 +301,7 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             # Playwright configuration
             "PLAYWRIGHT_BROWSERS_PATH": "/tmp/openhands_home/.cache/ms-playwright",
             "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "false",
+            "OPENHANDS_AUTO_INSTALL_PLAYWRIGHT": os.getenv("OPENHANDS_AUTO_INSTALL_PLAYWRIGHT", "true"),
 
             # Runtime configuration
             "SANDBOX_TIMEOUT": "300",
@@ -444,10 +445,23 @@ EOF
             cat /tmp/openhands_config.toml
             echo "=== End config file ==="
 
-            # Install Playwright browsers if not already installed
+            # Install Playwright browsers if enabled and not already installed
             export PLAYWRIGHT_BROWSERS_PATH=/tmp/openhands_home/.cache/ms-playwright
             export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=false
-            /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m playwright install chromium --with-deps || echo "Playwright install failed, continuing..."
+
+            echo "=== Playwright Installation Check ==="
+            echo "OPENHANDS_AUTO_INSTALL_PLAYWRIGHT='${{OPENHANDS_AUTO_INSTALL_PLAYWRIGHT}}'"
+
+            if [ "${{OPENHANDS_AUTO_INSTALL_PLAYWRIGHT}}" = "true" ]; then
+                echo "Installing Playwright (OPENHANDS_AUTO_INSTALL_PLAYWRIGHT=true)..."
+                /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m playwright install chromium --with-deps || echo "Playwright install failed, continuing..."
+            elif [ "${{OPENHANDS_AUTO_INSTALL_PLAYWRIGHT}}" = "false" ]; then
+                echo "Skipping Playwright installation (OPENHANDS_AUTO_INSTALL_PLAYWRIGHT=false)"
+            else
+                echo "OPENHANDS_AUTO_INSTALL_PLAYWRIGHT not set or invalid value, defaulting to skip installation"
+                echo "Value was: '${{OPENHANDS_AUTO_INSTALL_PLAYWRIGHT}}'"
+            fi
+            echo "=== End Playwright Installation Check ==="
 
             # Create environment override to force security_risk parameter
             export OPENHANDS_FORCE_SECURITY_RISK=LOW
@@ -524,7 +538,7 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
 
         # Container configuration with live monitoring and correct user permissions
         container_config = {
-            "image": "docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik",
+            "image": os.getenv("UAGENT_OPENHANDS_IMAGE", "docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik"),
             "command": cmd,
             "environment": env,
             "volumes": {
@@ -547,26 +561,55 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
 
         try:
             # Start container in detached mode
-            container = self.docker_client.containers.run(**container_config)
-            container_id = container.id
+            try:
+                container = self.docker_client.containers.run(**container_config)
+                container_id = container.id
+            except Exception as e:
+                logger.error(f"container run error: {e}")
+                raise  # Re-raise the exception to be handled by outer try/catch
+
 
             # Register container with the global container manager for cleanup
-            container_manager = get_container_manager()
-            container_manager.register_container(container_id)
+            try:
+                container_manager = get_container_manager()
+                container_manager.register_container(container_id)
+            except Exception as e:
+                logger.warning(f"Failed to register container with manager: {e}")
+                # Don't fail the entire operation just because container registration failed
 
             logger.info(f"OpenHands container started: {container_id}")
             logger.info(f"Live monitoring at: {monitoring_dir}")
 
-            # Create monitoring summary file for user
-            self._create_monitoring_summary(monitoring_dir, container_id, cfg)
+            try:
+                # Create monitoring summary file for user
+                self._create_monitoring_summary(monitoring_dir, container_id, cfg)
+            except Exception as e:
+                logger.error(f"create monitoring summary error: {e}")
 
-            # Start real-time monitoring
-            result = self._monitor_container_with_streaming(container, cfg, start_time, monitoring_dir)
+            try:
+                # Start real-time monitoring
+                result = self._monitor_container_with_streaming(container, cfg, start_time, monitoring_dir)
 
-            # Update final monitoring summary
-            self._update_monitoring_summary(monitoring_dir, result)
+                # Update final monitoring summary
+                try:
+                    self._update_monitoring_summary(monitoring_dir, result)
+                except Exception as summary_e:
+                    logger.warning(f"Failed to update monitoring summary: {summary_e}")
+                    # Don't fail the entire operation just because summary update failed
 
-            return result
+                return result
+
+            except Exception as e:
+                logger.error(f"Monitor container with streaming error: {e}")
+                duration = time.time() - start_time
+
+                # Return error result instead of letting it fall through to outer exception handler
+                return SingleContainerResult(
+                    success=False,
+                    exit_code=-1,
+                    duration_seconds=duration,
+                    error_message=f"Container monitoring error: {str(e)}"
+                )
 
         except Exception as e:
             duration = time.time() - start_time
@@ -576,7 +619,7 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
                 success=False,
                 exit_code=-1,
                 duration_seconds=duration,
-                error_message=f"Container startup error: {str(e)}"
+                error_message=f"Container startup error new: {str(e)}"
             )
 
         finally:
@@ -625,16 +668,38 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
         import threading
         import time
 
-        # Create live log files
-        live_stdout = monitoring_dir / "live_stdout.log"
-        live_stderr = monitoring_dir / "live_stderr.log"
-        live_combined = monitoring_dir / "live_combined.log"
-        container_status = monitoring_dir / "container_status.json"
+        # Initialize variables first to avoid undefined variable errors in exception handler
+        full_stdout = ""
+        full_stderr = ""
+        live_stdout = None
+        live_stderr = None
+        live_combined = None
+        container_status = None
 
-        # Initialize log files
-        live_stdout.write_text("")
-        live_stderr.write_text("")
-        live_combined.write_text("")
+        try:
+            # Create live log files
+            live_stdout = monitoring_dir / "live_stdout.log"
+            live_stderr = monitoring_dir / "live_stderr.log"
+            live_combined = monitoring_dir / "live_combined.log"
+            container_status = monitoring_dir / "container_status.json"
+
+            # Ensure monitoring directory exists
+            monitoring_dir.mkdir(parents=True, exist_ok=True)
+
+            # Initialize log files
+            live_stdout.write_text("")
+            live_stderr.write_text("")
+            live_combined.write_text("")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize monitoring files: {e}")
+            # Return early with error if we can't set up monitoring
+            return SingleContainerResult(
+                success=False,
+                exit_code=-1,
+                duration_seconds=time.time() - start_time,
+                error_message=f"Monitoring initialization error: {str(e)}"
+            )
 
         # Derive timeout behavior. Allow disabling timeout via config/env
         no_timeout_env = str(os.getenv("UAGENT_OPENHANDS_NO_TIMEOUT", "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -655,21 +720,33 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
 
                     # Append to combined log with timestamp
-                    with open(live_combined, 'a', encoding='utf-8') as f:
-                        f.write(f"[{timestamp}] {log_str}")
-                        f.flush()
+                    if live_combined is not None:
+                        try:
+                            with open(live_combined, 'a', encoding='utf-8') as f:
+                                f.write(f"[{timestamp}] {log_str}")
+                                f.flush()
+                        except Exception as e:
+                            logger.warning(f"Failed to write to combined log: {e}")
 
                     # Separate stdout/stderr (Docker doesn't distinguish in combined stream)
                     if any(keyword in log_str.lower() for keyword in ['error', 'exception', 'traceback', 'stderr']):
                         full_stderr += log_str
-                        with open(live_stderr, 'a', encoding='utf-8') as f:
-                            f.write(f"[{timestamp}] {log_str}")
-                            f.flush()
+                        if live_stderr is not None:
+                            try:
+                                with open(live_stderr, 'a', encoding='utf-8') as f:
+                                    f.write(f"[{timestamp}] {log_str}")
+                                    f.flush()
+                            except Exception as e:
+                                logger.warning(f"Failed to write to stderr log: {e}")
                     else:
                         full_stdout += log_str
-                        with open(live_stdout, 'a', encoding='utf-8') as f:
-                            f.write(f"[{timestamp}] {log_str}")
-                            f.flush()
+                        if live_stdout is not None:
+                            try:
+                                with open(live_stdout, 'a', encoding='utf-8') as f:
+                                    f.write(f"[{timestamp}] {log_str}")
+                                    f.flush()
+                            except Exception as e:
+                                logger.warning(f"Failed to write to stdout log: {e}")
 
             except Exception as e:
                 logger.error(f"Log streaming error: {e}")
@@ -696,8 +773,11 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
                 "status": "completed",
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
             }
-            with open(container_status, 'w') as f:
-                json.dump(status_info, f, indent=2)
+            try:
+                with open(container_status, 'w') as f:
+                    json.dump(status_info, f, indent=2)
+            except Exception as e:
+                logger.warning(f"Failed to write container status file: {e}")
 
             # Give log streaming a moment to finish
             time.sleep(2)
@@ -759,8 +839,14 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
                 "status": "error",
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
             }
-            with open(container_status, 'w') as f:
-                json.dump(status_info, f, indent=2)
+            if container_status is not None:
+                try:
+                    with open(container_status, 'w') as f:
+                        json.dump(status_info, f, indent=2)
+                except Exception as status_e:
+                    logger.warning(f"Failed to write error status file: {status_e}")
+            else:
+                logger.warning("Cannot write error status file: container_status not initialized")
 
             # Try to clean up and unregister from manager
             container_manager = get_container_manager()
@@ -831,7 +917,12 @@ docker logs {container_id} -f
 *This file is updated in real-time during execution*
 """
 
-        summary_file.write_text(summary_content)
+        try:
+            monitoring_dir.mkdir(parents=True, exist_ok=True)
+            summary_file.write_text(summary_content, encoding='utf-8')
+        except Exception as e:
+            logger.warning(f"Failed to create monitoring summary: {e}")
+            # Don't fail the entire operation just because monitoring creation failed
 
     def _update_monitoring_summary(self, monitoring_dir: Path, result: SingleContainerResult) -> None:
         """Update monitoring summary with final results"""
@@ -857,9 +948,14 @@ docker logs {container_id} -f
 ```
 """
 
-        # Append to existing summary
-        with open(summary_file, 'a') as f:
-            f.write(final_summary)
+        # Ensure monitoring directory exists and append to summary
+        try:
+            monitoring_dir.mkdir(parents=True, exist_ok=True)
+            with open(summary_file, 'a', encoding='utf-8') as f:
+                f.write(final_summary)
+        except Exception as e:
+            logger.warning(f"Failed to update monitoring summary: {e}")
+            # Don't fail the entire operation just because monitoring update failed
 
     async def run_async(self, cfg: SingleContainerConfig) -> SingleContainerResult:
         """Async wrapper for run() method"""
