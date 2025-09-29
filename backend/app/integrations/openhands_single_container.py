@@ -223,31 +223,6 @@ This file is MANDATORY for completion.
         # Prepare workspace with proper permissions
         self._prepare_workspace_with_permissions(cfg)
 
-        # Resolve and validate runtime image upfront for clearer errors
-        from .images import get_openhands_image
-        runtime_image = get_openhands_image()
-        try:
-            try:
-                self.docker_client.images.get(runtime_image)
-                logger.info(f"Found runtime image locally: {runtime_image}")
-            except docker.errors.ImageNotFound:
-                logger.info(f"Runtime image not found locally, pulling: {runtime_image}")
-                self.docker_client.images.pull(runtime_image)
-                logger.info(f"Successfully pulled runtime image: {runtime_image}")
-        except Exception as img_exc:
-            duration = time.time() - start_time
-            msg = (
-                f"Runtime image unavailable: {runtime_image}. "
-                "Set UAGENT_OPENHANDS_IMAGE to a valid, accessible image (e.g., a local tag) or ensure it is pushed to your registry."
-            )
-            logger.error(f"Image validation failed: {img_exc}")
-            return SingleContainerResult(
-                success=False,
-                exit_code=-1,
-                duration_seconds=duration,
-                error_message=msg,
-            )
-
         # Register experiment with experiment manager
         experiment_manager = get_experiment_manager()
         if experiment_manager and hasattr(cfg, 'session_name') and cfg.session_name != "exp":
@@ -469,6 +444,11 @@ EOF
             cat /tmp/openhands_config.toml
             echo "=== End config file ==="
 
+            # Install Playwright browsers if not already installed
+            export PLAYWRIGHT_BROWSERS_PATH=/tmp/openhands_home/.cache/ms-playwright
+            export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=false
+            /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/python -m playwright install chromium --with-deps || echo "Playwright install failed, continuing..."
+
             # Create environment override to force security_risk parameter
             export OPENHANDS_FORCE_SECURITY_RISK=LOW
             export OH_FORCE_SECURITY_RISK=LOW
@@ -543,9 +523,8 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
         container_dirs = self._prepare_container_directories(cfg)
 
         # Container configuration with live monitoring and correct user permissions
-        # Use centralized image reference to avoid duplication
         container_config = {
-            "image": runtime_image,
+            "image": "docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik",
             "command": cmd,
             "environment": env,
             "volumes": {
@@ -736,9 +715,8 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
                 # Still unregister even if removal failed
                 container_manager.unregister_container(container.id)
 
-            # Determine success primarily from final.json; do not require exit_code == 0
-            # Many flows can emit a valid final.json even if the process returns a non-zero code
-            success = bool(final_json and final_json.get("success", False))
+            # Determine success
+            success = exit_code == 0 and final_json is not None and final_json.get("success", False)
 
             # Complete experiment with experiment manager
             experiment_manager = get_experiment_manager()
@@ -746,10 +724,7 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
                 session_id = cfg.session_name
                 if experiment_manager.is_experiment_active(session_id):
                     try:
-                        error_message = None if success else (
-                            (f"Exit code {exit_code}" if exit_code is not None else "No exit code")
-                            + ("" if final_json else ", no final.json found")
-                        )
+                        error_message = None if success else f"Exit code {exit_code}" + ("" if final_json else ", no final.json found")
 
                         arxiv_path = asyncio.run(experiment_manager.complete_experiment(
                             session_id=session_id,

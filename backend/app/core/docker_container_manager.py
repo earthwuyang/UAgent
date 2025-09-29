@@ -111,17 +111,11 @@ class DockerContainerManager:
 
         try:
             # Find all containers with OpenHands-related images
-            from ..integrations.images import get_openhands_image
-            image_hint = get_openhands_image()
-            base_repo = image_hint.split(":")[0] if ":" in image_hint else image_hint
             openhands_filters = [
                 "docker.all-hands.dev/all-hands-ai/runtime:",
                 "all-hands-ai/runtime:",
                 "openhands-runtime:",
                 "openhands:",
-                base_repo,
-                "uagent:",
-                "uagent",
             ]
 
             all_containers = self.docker_client.containers.list(all=True)
