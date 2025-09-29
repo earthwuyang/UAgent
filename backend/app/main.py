@@ -310,6 +310,7 @@ async def root():
 # Import and include routers after app creation to avoid circular imports
 from .routers import (
     openhands as openhands_router,
+    openhands_direct,
     research,
     science,
     smart_router as router_endpoints,
@@ -321,6 +322,7 @@ app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(science.router, prefix="/api/science", tags=["science"])
 app.include_router(router_endpoints.router, prefix="/api/router", tags=["smart_router"])
 app.include_router(openhands_router.router, prefix="/api/openhands", tags=["openhands"])
+app.include_router(openhands_direct.router, prefix="/api/openhands", tags=["openhands"])
 app.include_router(experiments.router, prefix="/api/experiments", tags=["experiments"])
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 

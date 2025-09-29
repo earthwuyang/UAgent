@@ -231,6 +231,13 @@ class ExperimentManager:
         # Remove from active experiments
         del self.active_experiments[session_id]
 
+        # Ensure any OpenHands containers are stopped/removed after experiment ends
+        try:
+            from .docker_container_manager import get_container_manager
+            get_container_manager().cleanup_openhands_containers()
+        except Exception as exc:
+            logger.warning(f"Container cleanup after experiment {session_id} failed: {exc}")
+
         return experiment.arxiv_path
 
     async def _create_experiment_metadata(self, experiment: ExperimentInfo):
@@ -311,6 +318,13 @@ class ExperimentManager:
 
         # Clear active experiments
         self.active_experiments.clear()
+
+        # Stop and remove any OpenHands containers when preserving on interrupt
+        try:
+            from .docker_container_manager import get_container_manager
+            get_container_manager().cleanup_openhands_containers()
+        except Exception as exc:
+            logger.warning(f"Container cleanup during preservation failed: {exc}")
         logger.info(f"Successfully preserved {preserved_count} experiments")
 
     async def _preserve_and_exit(self, status: ExperimentStatus = ExperimentStatus.INTERRUPTED):
@@ -444,4 +458,10 @@ async def shutdown_experiment_manager():
     global _experiment_manager
     if _experiment_manager:
         await _experiment_manager.preserve_all_experiments()
+        # Also ensure containers are stopped on shutdown
+        try:
+            from .docker_container_manager import get_container_manager
+            get_container_manager().cleanup_openhands_containers()
+        except Exception as exc:
+            logger.warning(f"Container cleanup on experiment manager shutdown failed: {exc}")
         _experiment_manager = None
