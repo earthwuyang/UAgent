@@ -127,13 +127,14 @@ This file is mandatory for the experiment to be considered complete.
         # Get Docker configuration
         docker_config = docker_transition_manager.get_docker_config()
 
+        from .images import get_openhands_image
         env = {
             # OpenHands backend configuration
             "FRONTEND_PORT": "3001",  # Not used in backend-only mode
             "BACKEND_PORT": str(cfg.backend_port),
             "SANDBOX_RUNTIME_CONTAINER_IMAGE": docker_config.get(
                 "SANDBOX_BASE_CONTAINER_IMAGE",
-                "docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik"
+                get_openhands_image(),
             ),
             "RUNTIME": "docker",
             "WORKSPACE_BASE": "/workspace",

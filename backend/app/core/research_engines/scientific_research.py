@@ -3184,11 +3184,33 @@ Return JSON only.
             if experiment_manager and session_id and experiment_manager.is_experiment_active(session_id):
                 try:
                     # Determine if experiment was successful
-                    success = (
-                        result.confidence_score > 0.7 and
-                        result.final_conclusions and
-                        len(result.final_conclusions) > 0 and
-                        not any("error" in conclusion.lower() for conclusion in result.final_conclusions)
+                    # Criterion:
+                    # - Any execution completed successfully, OR
+                    # - Confidence meets configured threshold AND conclusions don't indicate errors
+                    try:
+                        import os
+                        threshold = float(os.getenv("UAGENT_SCIENCE_COMPLETE_THRESHOLD", os.getenv("CONFIDENCE_THRESHOLD", "0.8")))
+                    except Exception:
+                        threshold = 0.8
+
+                    has_successful_exec = any(
+                        exec_record.status == ExperimentStatus.COMPLETED for exec_record in result.executions
+                    ) or any(
+                        (getattr(res, "status", None) == ExperimentStatus.COMPLETED) and bool((getattr(res, "data", {}) or {}).get("success", True))
+                        for res in result.results
+                    )
+
+                    has_error_conclusion = any(
+                        isinstance(conclusion, str) and ("error" in conclusion.lower())
+                        for conclusion in (result.final_conclusions or [])
+                    )
+
+                    success = bool(
+                        has_successful_exec or (
+                            (result.confidence_score or 0.0) >= threshold
+                            and bool(result.final_conclusions)
+                            and not has_error_conclusion
+                        )
                     )
 
                     # Create final result summary

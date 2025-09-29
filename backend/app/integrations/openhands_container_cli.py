@@ -152,9 +152,33 @@ Create the experiments/{cfg.session_name}/results/ directory if it doesn't exist
             "--no-auto-continue"
         ]
 
-        # Container configuration
+        # Resolve and validate runtime image upfront
+        from .images import get_openhands_image
+        runtime_image = get_openhands_image()
+        try:
+            try:
+                self.docker_client.images.get(runtime_image)
+                logger.info(f"Found runtime image locally: {runtime_image}")
+            except docker.errors.ImageNotFound:
+                logger.info(f"Runtime image not found locally, pulling: {runtime_image}")
+                self.docker_client.images.pull(runtime_image)
+                logger.info(f"Successfully pulled runtime image: {runtime_image}")
+        except Exception as img_exc:
+            duration = time.time() - start_time
+            msg = (
+                f"Runtime image unavailable: {runtime_image}. "
+                "Set UAGENT_OPENHANDS_IMAGE to a valid, accessible image (e.g., a local tag) or ensure it is pushed to your registry."
+            )
+            logger.error(f"Image validation failed: {img_exc}")
+            return ContainerCLIResult(
+                success=False,
+                exit_code=-1,
+                duration_seconds=duration,
+                error_message=msg,
+            )
+
         container_config = {
-            "image": "docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik",
+            "image": runtime_image,
             "command": cmd,
             "environment": env,
             "volumes": {

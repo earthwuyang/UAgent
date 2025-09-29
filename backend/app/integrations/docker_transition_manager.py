@@ -82,12 +82,13 @@ class DockerTransitionManager:
         }
 
         # Use standard Docker runtime with pre-built images
+        from .images import get_openhands_image
         config.update({
             # Use pre-built images instead of rebuilding
             "SANDBOX_FORCE_REBUILD_RUNTIME": "false",
 
-            # Use original 0.57 image with Poetry environment
-            "SANDBOX_BASE_CONTAINER_IMAGE": "docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik",
+            # Centralized runtime image (can be overridden by env)
+            "SANDBOX_BASE_CONTAINER_IMAGE": get_openhands_image(),
 
             # UAgent: Use base image directly without custom building
             "SANDBOX_USE_BASE_IMAGE_DIRECTLY": "true",
