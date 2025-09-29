@@ -29,8 +29,8 @@ router = APIRouter()
 class DirectRunRequest(BaseModel):
     goal: str = Field(..., description="Full OpenHands task/goal text")
     session_name: Optional[str] = Field(None, description="Session name for experiment directory")
-    max_steps: Optional[int] = Field(200, description="Max OpenHands steps/iterations")
-    max_minutes: Optional[int] = Field(60, description="Max wall clock time in minutes")
+    max_steps: Optional[int] = Field(None, description="Max OpenHands steps/iterations (env fallback)")
+    max_minutes: Optional[int] = Field(None, description="Max wall clock time in minutes; <=0 disables timeout (env fallback)")
     workspace_root: Optional[str] = Field(None, description="Override workspace root directory")
 
 
@@ -65,12 +65,16 @@ async def openhands_direct_run(request: DirectRunRequest) -> DirectRunResponse:
     session_name = request.session_name or f"exp_{uuid.uuid4().hex[:8]}"
     session_dir = workspace
 
+    # Resolve defaults from environment if not provided
+    env_max_steps = int(os.getenv("UAGENT_OPENHANDS_MAX_STEPS", "999999999"))
+    env_max_minutes = int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "0"))  # 0 -> no timeout
+
     cfg = SingleContainerConfig(
         goal=request.goal,
         workspace=session_dir,
         session_name=session_name,
-        max_steps=int(request.max_steps or 200),
-        max_minutes=int(request.max_minutes or 60),
+        max_steps=int(request.max_steps) if request.max_steps is not None else env_max_steps,
+        max_minutes=int(request.max_minutes) if request.max_minutes is not None else env_max_minutes,
         llm_model=os.getenv("LLM_MODEL"),
         llm_api_key=os.getenv("LLM_API_KEY"),
         llm_base_url=os.getenv("LLM_BASE_URL"),
@@ -94,4 +98,3 @@ async def openhands_direct_run(request: DirectRunRequest) -> DirectRunResponse:
         workspace=str(session_dir),
         session_name=session_name,
     )
-

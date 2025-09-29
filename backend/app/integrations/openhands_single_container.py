@@ -657,7 +657,11 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
         live_stderr.write_text("")
         live_combined.write_text("")
 
-        timeout_seconds = cfg.max_minutes * 60
+        # Derive timeout behavior. Allow disabling timeout via config/env
+        no_timeout_env = str(os.getenv("UAGENT_OPENHANDS_NO_TIMEOUT", "")).strip().lower() in {"1", "true", "yes", "on"}
+        no_timeout_cfg = (cfg.max_minutes is None) or (isinstance(cfg.max_minutes, int) and cfg.max_minutes <= 0)
+        no_timeout = bool(no_timeout_env or no_timeout_cfg)
+        timeout_seconds = (cfg.max_minutes or 0) * 60
         full_stdout = ""
         full_stderr = ""
 
@@ -697,8 +701,12 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
 
         # Monitor container status
         try:
-            # Wait for container to complete or timeout
-            exit_code = container.wait(timeout=timeout_seconds)['StatusCode']
+            # Wait for container to complete; if no_timeout, wait indefinitely
+            if no_timeout:
+                wait_resp = container.wait()
+            else:
+                wait_resp = container.wait(timeout=timeout_seconds)
+            exit_code = wait_resp['StatusCode']
             duration = time.time() - start_time
 
             # Update status file

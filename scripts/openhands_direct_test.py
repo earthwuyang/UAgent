@@ -73,8 +73,10 @@ def main() -> None:
     parser.add_argument("--goal", default=None, help="Goal text (mutually exclusive with --goal-file)")
     parser.add_argument("--goal-file", default='goal.txt', help="Path to goal text file")
     parser.add_argument("--session", default=None, help="Session name (default: exp_<random>)")
-    parser.add_argument("--max-steps", type=int, default=200, help="Max steps (default: %(default)s)")
-    parser.add_argument("--max-minutes", type=int, default=60, help="Max minutes (default: %(default)s)")
+    env_steps = int(os.getenv("UAGENT_OPENHANDS_MAX_STEPS", "999999999"))
+    env_minutes = int(os.getenv("UAGENT_OPENHANDS_MAX_MINUTES", "0"))  # 0 -> no timeout
+    parser.add_argument("--max-steps", type=int, default=env_steps, help="Max steps (default: env UAGENT_OPENHANDS_MAX_STEPS or %(default)s)")
+    parser.add_argument("--max-minutes", type=int, default=env_minutes, help="Max minutes; <=0 disables timeout (default: env UAGENT_OPENHANDS_MAX_MINUTES or %(default)s)")
     parser.add_argument("--workspace-root", default=None, help="Override workspace root used by backend")
     parser.add_argument("--tail", action="store_true", default=True, help="Tail live_combined.log while run executes")
 
@@ -152,4 +154,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
