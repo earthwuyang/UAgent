@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ...debate import DebateManager, DebateConfig, DebaterConfig
+from ..llm_client import get_max_tokens_from_env
 
 
 class RASDebateStepHandler:
@@ -30,7 +31,7 @@ class RASDebateStepHandler:
             num_rounds=int(raw_cfg.get("num_rounds", 2)),
             groups=int(raw_cfg.get("groups", 1)),
             rubric=str(raw_cfg.get("rubric", "")),
-            max_tokens=int(raw_cfg.get("max_tokens", os.getenv("MAX_TOKENS", "20000"))),
+            max_tokens=int(raw_cfg.get("max_tokens") or get_max_tokens_from_env()),
             temperature=float(raw_cfg.get("temperature", 0.6)),
         )
         debaters = [

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from ..llm_client import LLMClient
+from ..llm_client import LLMClient, get_max_tokens_from_env
 from ..openhands import OpenHandsClient, CodeGenerationRequest
 from ..websocket_manager import progress_tracker
 from ..experiment_manager import get_experiment_manager
@@ -232,7 +232,7 @@ class HypothesisGenerator:
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
         self.max_json_retries = 3
-        self.max_generation_tokens = int(os.getenv("HYPOTHESIS_MAX_TOKENS", "20000"))
+        self.max_generation_tokens = int(os.getenv("HYPOTHESIS_MAX_TOKENS") or get_max_tokens_from_env())
 
     async def generate_hypotheses(
         self,
@@ -511,7 +511,7 @@ class ExperimentDesigner:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.logger = logging.getLogger(__name__)
-        self.max_generation_tokens = int(os.getenv("EXPERIMENT_DESIGN_MAX_TOKENS", "20000"))
+        self.max_generation_tokens = int(os.getenv("EXPERIMENT_DESIGN_MAX_TOKENS") or get_max_tokens_from_env())
         self.max_json_retries = 3
 
     @staticmethod
@@ -1175,21 +1175,101 @@ Variables: {json.dumps(design.variables)}
 Controls: {json.dumps(design.controls)}
 Data Collection Plan: {json.dumps(design.data_collection_plan)}
 
-CRITICAL ANTI-SIMULATION CONSTRAINTS:
-- DO NOT use dummy simulation, mock simulation, or fake any experimental operations
-- NO simulated, estimated, or placeholder data allowed
-- MUST perform real measurements and collect actual data
+═══════════════════════════════════════════════════════════════════════════════
+ENVIRONMENT CAPABILITIES & CONSTRAINTS
+═══════════════════════════════════════════════════════════════════════════════
 
-Requirements:
-1. Collect REAL experimental data (no simulation or random data)
-2. Perform the analysis according to the methodology
-3. Save final results to results/final.json with:
-   - success: boolean
-   - data: dict with raw measurements
-   - analysis: dict with statistical analysis
-   - conclusions: list of conclusion strings
-   - measurements: list of numeric values
-4. Handle errors gracefully and report them in the final.json"""
+✓ AVAILABLE BUILD TOOLS:
+  - gcc, g++, cmake, autoconf, automake (full compilation toolchain)
+  - git, wget, curl (source code download)
+  - Python 3.12 with numpy, pandas, scipy, scikit-learn, matplotlib
+  - Common development libraries (SSL, readline, SQLite, etc.)
+
+✗ LIMITATIONS:
+  - Cannot install system packages via apt/yum/dnf
+  - Cannot modify system-wide installed software
+  - Must work within /workspace directory
+  - No root privileges for system changes
+
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL STRATEGY: BUILD FROM SOURCE LOCALLY
+═══════════════════════════════════════════════════════════════════════════════
+
+If your experiment requires software that:
+  - Is not pre-installed system-wide
+  - Needs source code modifications (e.g., kernel changes, API extensions)
+  - Requires custom compilation flags or patches
+
+Then DOWNLOAD and BUILD it locally:
+
+1. Clone the source repository:
+   git clone https://github.com/org/project.git
+   cd project
+
+2. Configure with local install prefix:
+   ./configure --prefix=/workspace/local
+   # OR
+   cmake -DCMAKE_INSTALL_PREFIX=/workspace/local
+
+3. Build and install locally:
+   make -j$(nproc)
+   make install
+
+4. Modify source code as needed:
+   - Edit source files in the cloned repository
+   - Rebuild after changes: make clean && make -j$(nproc)
+
+5. Use the locally-built version:
+   export PATH=/workspace/local/bin:$PATH
+   export LD_LIBRARY_PATH=/workspace/local/lib:$LD_LIBRARY_PATH
+
+EXAMPLES:
+  - PostgreSQL: git clone https://github.com/postgres/postgres.git
+  - DuckDB: git clone https://github.com/duckdb/duckdb.git
+  - Redis: git clone https://github.com/redis/redis.git
+  - Any OSS project with public source code
+
+═══════════════════════════════════════════════════════════════════════════════
+ANTI-SIMULATION REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
+
+- DO NOT use dummy simulation, mock simulation, or fake experimental operations
+- DO NOT generate random/synthetic data without clear justification
+- MUST collect real measurements from actual software execution
+- If you use estimation/simulation, DOCUMENT WHY and HOW in analysis section
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
+
+Save results to: experiments/{design.id}/results/final.json
+
+Required structure:
+{{
+    "success": true/false,
+    "data": {{
+        "raw_measurements": [...],
+        "experimental_conditions": {{...}},
+        "files_generated": [...]
+    }},
+    "analysis": {{
+        "approach": "How you collected data (e.g., 'Built PostgreSQL from source, modified query planner')",
+        "methodology": "Detailed experimental procedure",
+        "build_artifacts": ["List of software built from source"],
+        "modifications_made": ["Source code changes applied"],
+        "limitations": ["Any constraints or simplifications"]
+    }},
+    "conclusions": ["Key findings from experiment"],
+    "measurements": [numeric results],
+    "reproducibility": {{
+        "source_repositories": ["URLs of cloned repos"],
+        "build_commands": ["Commands used to build"],
+        "can_reproduce": true/false,
+        "reproduction_steps": ["Exact steps to reproduce"]
+    }}
+}}
+
+═══════════════════════════════════════════════════════════════════════════════"""
 
                     if prior_errors:
                         container_goal += f"\n\nPrevious errors to fix:\n{json.dumps(prior_errors[-3:], indent=2)}"
@@ -2004,7 +2084,7 @@ class ScientificResearchEngine:
         prompt_used = self._format_idea_prompt(question, max_ideas)
         response = await self.llm_client.generate(
             prompt_used,
-            max_tokens=int(os.getenv("MAX_TOKENS", "20000")),  # Use environment variable for max tokens
+            max_tokens=get_max_tokens_from_env(),  # Use environment variable for max tokens
             temperature=self.config.get("idea_generation_temperature", 0.6),
         )
         return response, prompt_used, False
@@ -2595,7 +2675,7 @@ Return JSON only.
 
         response = await self.llm_client.generate(
             evaluation_prompt,
-            max_tokens=int(os.getenv("MAX_TOKENS", "20000")),  # Use environment variable for max tokens
+            max_tokens=get_max_tokens_from_env(),  # Use environment variable for max tokens
             temperature=self.config.get("idea_evaluation_temperature", 0.3),
         )
 
@@ -3742,7 +3822,7 @@ if GEPAOptimizer is not None:
             response = asyncio.run(
                 self.llm_client.generate(
                     prompt_text,
-                    max_tokens=int(os.getenv("MAX_TOKENS", "20000")),  # Use environment variable for max tokens
+                    max_tokens=get_max_tokens_from_env(),  # Use environment variable for max tokens
                     temperature=self.temperature,
                 )
             )

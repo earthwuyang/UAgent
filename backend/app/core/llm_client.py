@@ -13,6 +13,29 @@ from typing import AsyncIterator
 
 from ..utils.json_utils import JsonParseError, safe_json_loads
 
+
+def get_max_tokens_from_env() -> int:
+    """
+    Get MAX_TOKENS from environment variable.
+    Raises RuntimeError if not set, to prevent silent fallbacks to wrong values.
+    """
+    max_tokens_str = os.getenv("MAX_TOKENS")
+    if max_tokens_str is None:
+        raise RuntimeError(
+            "MAX_TOKENS environment variable is not set in .env file. "
+            "Please set MAX_TOKENS to match your LLM model's limit (e.g., 8192 for Kimi)."
+        )
+    try:
+        max_tokens = int(max_tokens_str)
+        if max_tokens <= 0:
+            raise ValueError("MAX_TOKENS must be positive")
+        return max_tokens
+    except ValueError as e:
+        raise RuntimeError(
+            f"Invalid MAX_TOKENS value '{max_tokens_str}': {e}. "
+            "MAX_TOKENS must be a positive integer."
+        )
+
 try:
     import anthropic
     ANTHROPIC_AVAILABLE = True
@@ -91,7 +114,7 @@ class AnthropicClient(LLMClient):
 
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=int(os.getenv("MAX_TOKENS", "20000")),
+                max_tokens=get_max_tokens_from_env(),
                 temperature=0.1,
                 messages=[{
                     "role": "user",
@@ -131,7 +154,7 @@ class AnthropicClient(LLMClient):
             Generated text
         """
         if max_tokens is None:
-            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
+            max_tokens = get_max_tokens_from_env()
         try:
             response = await self.client.messages.create(
                 model=self.model,
@@ -193,7 +216,7 @@ class OpenAIClient(LLMClient):
                     "content": full_prompt
                 }],
                 temperature=0.1,
-                max_tokens=int(os.getenv("MAX_TOKENS", "20000"))
+                max_tokens=get_max_tokens_from_env()
             )
 
             content = response.choices[0].message.content
@@ -227,7 +250,7 @@ class OpenAIClient(LLMClient):
             Generated text
         """
         if max_tokens is None:
-            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
+            max_tokens = get_max_tokens_from_env()
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -356,7 +379,7 @@ class DashScopeClient(LLMClient):
             model=self.model,
             prompt=prompt,
             temperature=0.1,
-            max_tokens=int(os.getenv("MAX_TOKENS", "20000")),
+            max_tokens=get_max_tokens_from_env(),
             top_p=0.1,
         )
 
@@ -377,7 +400,7 @@ class DashScopeClient(LLMClient):
             Generated text
         """
         if max_tokens is None:
-            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
+            max_tokens = get_max_tokens_from_env()
         try:
             # Use async generation with retry + rate limiting
             await DashScopeClient._acquire_rate_slot()
@@ -447,7 +470,7 @@ class DashScopeClient(LLMClient):
                         model=self.model,
                         prompt=prompt,
                         temperature=kwargs.get("temperature", 0.7),
-                        max_tokens=kwargs.get("max_tokens", int(os.getenv("MAX_TOKENS", "20000"))),
+                        max_tokens=kwargs.get("max_tokens", get_max_tokens_from_env()),
                         top_p=kwargs.get("top_p", 0.8),
                         stream=True,  # Enable streaming
                     )
@@ -565,7 +588,7 @@ class LiteLLMClient(LLMClient):
         return payload
 
     async def classify(self, request: str, prompt: str) -> Dict[str, Any]:
-        env_tokens = int(os.getenv("LLM_CLASSIFICATION_MAX_TOKENS", "8192"))
+        env_tokens = int(os.getenv("LLM_CLASSIFICATION_MAX_TOKENS") or get_max_tokens_from_env())
         classification_tokens = max(1, min(env_tokens, 8192))
         full_prompt = (
             f"{prompt}\n\nUser request: {request}\n\n"
@@ -601,7 +624,7 @@ class LiteLLMClient(LLMClient):
 
     async def generate(self, prompt: str, max_tokens: int = None, **kwargs) -> str:
         if max_tokens is None:
-            max_tokens = int(os.getenv("MAX_TOKENS", "20000"))
+            max_tokens = get_max_tokens_from_env()
         messages = [{"role": "user", "content": prompt}]
         options = self._build_request(
             messages=messages,
@@ -666,7 +689,7 @@ class LiteLLMClient(LLMClient):
         options = self._build_request(
             messages=messages,
             temperature=kwargs.get("temperature", 0.7),
-            max_tokens=kwargs.get("max_tokens", int(os.getenv("MAX_TOKENS", "20000"))),
+            max_tokens=kwargs.get("max_tokens", get_max_tokens_from_env()),
             stream=True,
         )
         try:

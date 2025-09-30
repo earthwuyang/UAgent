@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
-from ..llm_client import LLMClient
+from ..llm_client import LLMClient, get_max_tokens_from_env
 from ..websocket_manager import progress_tracker
 
 
@@ -299,7 +299,7 @@ Avoid prose outside the JSON block.
 """
 
         try:
-            plan_response = await self.llm_client.generate(plan_prompt, max_tokens=int(os.getenv("MAX_TOKENS", "20000")), temperature=0.4)  # Use environment variable for max tokens
+            plan_response = await self.llm_client.generate(plan_prompt, max_tokens=get_max_tokens_from_env(), temperature=0.4)  # Use environment variable for max tokens
         except Exception as exc:  # pragma: no cover - network issue fallback
             self.logger.warning("Plan generation failed, falling back to default: %s", exc)
             plan_response = ""
@@ -480,7 +480,7 @@ Respond with STRICT JSON of the form:
 """
 
         try:
-            reflection_response = await self.llm_client.generate(reflection_prompt, max_tokens=int(os.getenv("MAX_TOKENS", "20000")), temperature=0.5)  # Use environment variable for max tokens
+            reflection_response = await self.llm_client.generate(reflection_prompt, max_tokens=get_max_tokens_from_env(), temperature=0.5)  # Use environment variable for max tokens
             reflection_data = self._safe_parse_json(reflection_response)
         except Exception as exc:  # pragma: no cover - best effort fallback
             self.logger.warning("Reflection generation failed: %s", exc)
@@ -809,7 +809,7 @@ Respond with STRICT JSON of the form:
         """
 
         try:
-            response = await self.llm_client.generate(synthesis_prompt, max_tokens=int(os.getenv("MAX_TOKENS", "20000")), temperature=0.4)  # Use environment variable for max tokens
+            response = await self.llm_client.generate(synthesis_prompt, max_tokens=get_max_tokens_from_env(), temperature=0.4)  # Use environment variable for max tokens
 
             # Try to parse as JSON, fallback to structured format if needed
             try:
