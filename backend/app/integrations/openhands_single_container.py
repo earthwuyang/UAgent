@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,131 @@ from ..core.experiment_manager import get_experiment_manager
 from ..core.docker_container_manager import get_container_manager
 
 logger = logging.getLogger(__name__)
+
+# Global flag to track if image check has been performed
+_IMAGE_CHECK_PERFORMED = False
+_IMAGE_CHECK_LOCK = asyncio.Lock()
+
+
+async def ensure_docker_image_exists(image_name: str) -> bool:
+    """
+    Check if Docker image exists locally or remotely.
+    If not found, build it automatically.
+
+    Returns:
+        True if image is available, False if build failed
+    """
+    global _IMAGE_CHECK_PERFORMED
+
+    # Only check once per application lifetime
+    async with _IMAGE_CHECK_LOCK:
+        if _IMAGE_CHECK_PERFORMED:
+            return True
+
+        logger.info(f"Checking Docker image: {image_name}")
+
+        # Check if image exists locally
+        try:
+            result = subprocess.run(
+                ["docker", "images", "-q", image_name],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                logger.info(f"✅ Image found locally: {image_name}")
+                _IMAGE_CHECK_PERFORMED = True
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to check local images: {e}")
+
+        logger.warning(f"⚠️  Image not found locally: {image_name}")
+
+        # Check if image exists remotely
+        logger.info(f"Checking Docker Hub for: {image_name}")
+        try:
+            result = subprocess.run(
+                ["docker", "manifest", "inspect", image_name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30
+            )
+            if result.returncode == 0:
+                logger.info(f"✅ Image found on Docker Hub: {image_name}")
+                logger.info(f"Pulling image (this may take a few minutes)...")
+
+                pull_result = subprocess.run(
+                    ["docker", "pull", image_name],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if pull_result.returncode == 0:
+                    logger.info(f"✅ Successfully pulled: {image_name}")
+                    _IMAGE_CHECK_PERFORMED = True
+                    return True
+                else:
+                    logger.warning(f"⚠️  Failed to pull image: {pull_result.stderr}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout checking Docker Hub")
+        except Exception as e:
+            logger.warning(f"Failed to check Docker Hub: {e}")
+
+        # Image not found - build it locally
+        logger.warning(f"⚠️  Image not found on Docker Hub: {image_name}")
+        logger.info(f"Building image locally from source (this may take 10-15 minutes)...")
+
+        # Find project root and Dockerfile
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        dockerfile = project_root / "docker" / "research-runtime.Dockerfile"
+
+        if not dockerfile.exists():
+            logger.error(f"❌ Dockerfile not found at {dockerfile}")
+            return False
+
+        logger.info(f"Building from: {dockerfile}")
+        logger.info(f"{'='*70}")
+        logger.info(f"Docker build starting - this will take ~10-15 minutes")
+        logger.info(f"{'='*70}")
+
+        # Build the image
+        build_cmd = [
+            "docker", "build",
+            "-t", image_name,
+            "-f", str(dockerfile),
+            str(project_root)
+        ]
+
+        try:
+            # Run build with real-time output to logger
+            process = subprocess.Popen(
+                build_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(project_root)
+            )
+
+            # Stream output to logger
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    logger.info(f"[docker build] {line.rstrip()}")
+
+            process.wait()
+
+            if process.returncode == 0:
+                logger.info(f"✅ Successfully built: {image_name}")
+                _IMAGE_CHECK_PERFORMED = True
+                return True
+            else:
+                logger.error(f"❌ Docker build failed with exit code {process.returncode}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Failed to build image: {e}")
+            return False
 
 
 @dataclass
@@ -958,7 +1084,22 @@ docker logs {container_id} -f
             # Don't fail the entire operation just because monitoring update failed
 
     async def run_async(self, cfg: SingleContainerConfig) -> SingleContainerResult:
-        """Async wrapper for run() method"""
+        """Async wrapper for run() method with automatic image check"""
+
+        # Check and ensure Docker image exists before running
+        image_name = os.getenv("UAGENT_OPENHANDS_IMAGE")
+        if not image_name:
+            raise RuntimeError("UAGENT_OPENHANDS_IMAGE not set in .env")
+
+        # Ensure image exists (check once per app lifetime)
+        image_available = await ensure_docker_image_exists(image_name)
+        if not image_available:
+            raise RuntimeError(
+                f"Docker image {image_name} not available and build failed. "
+                "Please check logs for details."
+            )
+
+        # Run the actual experiment
         import asyncio
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.run, cfg)
