@@ -1650,7 +1650,7 @@ Then DOWNLOAD and BUILD it locally:
    git clone https://github.com/org/project.git
    cd project
 
-2. Configure with local install prefix:
+2. Configure with local install prefix (optional):
    ./configure --prefix=/workspace/local
    # OR
    cmake -DCMAKE_INSTALL_PREFIX=/workspace/local
