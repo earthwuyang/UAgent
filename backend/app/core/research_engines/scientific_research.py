@@ -807,6 +807,15 @@ class ExperimentDesigner:
                 ]
 
         # Create sequential plan
+        # Ensure shared_setup is a string (LLM might return list or dict)
+        shared_setup_raw = plan_dict.get("shared_setup", "# Common setup for all experiments")
+        if isinstance(shared_setup_raw, list):
+            shared_setup = "\n".join(str(item) for item in shared_setup_raw)
+        elif isinstance(shared_setup_raw, dict):
+            shared_setup = json.dumps(shared_setup_raw, indent=2)
+        else:
+            shared_setup = str(shared_setup_raw)
+
         plan = SequentialExperimentPlan(
             id=f"seqplan_{uuid.uuid4().hex[:8]}",
             hypothesis_id=hypothesis.id,
@@ -814,7 +823,7 @@ class ExperimentDesigner:
             experiments=experiments,
             overall_objective=plan_dict.get("overall_objective", f"Sequential testing of {hypothesis.statement}"),
             experiment_dependencies=experiment_dependencies,
-            shared_setup=plan_dict.get("shared_setup", "# Common setup for all experiments"),
+            shared_setup=shared_setup,
             expected_total_duration=plan_dict.get("expected_total_duration", f"{num_experiments * 2} hours"),
         )
 
