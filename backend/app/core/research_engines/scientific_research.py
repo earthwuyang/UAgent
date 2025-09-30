@@ -121,6 +121,19 @@ class ExperimentDesign:
 
 
 @dataclass
+class SequentialExperimentPlan:
+    """Complete plan for sequential experiments that build on each other"""
+    id: str
+    hypothesis_id: str
+    num_experiments: int
+    experiments: List[ExperimentDesign]  # Ordered list of experiments
+    overall_objective: str
+    experiment_dependencies: Dict[str, List[str]]  # Which experiments depend on which
+    shared_setup: str  # Common setup code for all experiments
+    expected_total_duration: str
+
+
+@dataclass
 class ExperimentExecution:
     """Experiment execution tracking"""
     id: str
@@ -194,6 +207,7 @@ class ResearchIdea:
     code_analysis: Optional[CodeResearchResult] = None
     hypotheses: List[ResearchHypothesis] = field(default_factory=list)
     experiments: List[ExperimentDesign] = field(default_factory=list)
+    sequential_plans: List[SequentialExperimentPlan] = field(default_factory=list)  # NEW: Sequential experiment plans
     executions: List[ExperimentExecution] = field(default_factory=list)
     results: List[ExperimentResult] = field(default_factory=list)
     evaluation: Optional[IdeaEvaluation] = None
@@ -641,6 +655,175 @@ class ExperimentDesigner:
 
         return design
 
+    async def design_sequential_experiments(
+        self,
+        hypothesis: ResearchHypothesis,
+        num_experiments: int,
+        resources: Optional[Dict[str, Any]] = None,
+    ) -> SequentialExperimentPlan:
+        """
+        Design a complete sequential experimental plan where experiments build on each other.
+
+        This is the FIX for the critical bug where experiments were executed independently.
+        Instead of designing experiments one-by-one, we design ALL experiments together as
+        a cohesive research plan where each experiment can build on previous results.
+        """
+
+        base_prompt = f"""
+        Design a COMPLETE SEQUENTIAL experimental plan with {num_experiments} experiments to test the following hypothesis.
+        These experiments will be executed ONE AFTER ANOTHER in the SAME computational environment,
+        so later experiments CAN and SHOULD build upon the code, data, and results from earlier experiments.
+
+        Hypothesis: {hypothesis.statement}
+        Reasoning: {hypothesis.reasoning}
+        Variables: {hypothesis.variables}
+        Success Criteria: {hypothesis.success_criteria}
+        Available Resources: {resources or "Standard computational resources"}
+
+        Design {num_experiments} sequential experiments where:
+        - Experiment 1 establishes the baseline and creates initial datasets/code
+        - Experiment 2 builds on Experiment 1's results (refines, extends, or validates)
+        - Experiment 3+ continues the progression (if num_experiments > 2)
+
+        Provide the sequential plan in JSON format with:
+        1. "overall_objective": Overall goal of the experimental sequence
+        2. "shared_setup": Common setup code/dependencies for ALL experiments
+        3. "expected_total_duration": Estimated total time for all experiments
+        4. "experiments": Array of {num_experiments} experiment designs, each with:
+           - "name": Descriptive experiment name
+           - "description": What this experiment does and HOW it builds on previous experiments
+           - "methodology": Step-by-step methodology (reference previous experiment outputs where applicable)
+           - "variables": Detailed variable definitions
+           - "controls": Control conditions
+           - "data_collection_plan": Data collection strategy (can reuse data from previous experiments)
+           - "analysis_plan": Statistical analysis plan
+           - "expected_duration": Estimated duration for THIS experiment
+           - "resource_requirements": Computational requirements
+           - "code_requirements": Programming requirements
+           - "dependencies": External dependencies
+           - "depends_on_experiments": List of experiment indices this builds on (e.g., [0] for experiment 2, [0, 1] for experiment 3)
+
+        CRITICAL: Make sure later experiments explicitly reference and use results from earlier experiments.
+        For example, Experiment 2 should analyze or extend the dataset created in Experiment 1.
+
+        Respond with a raw JSON object only (no markdown fences, no commentary, no code blocks).
+        """.rstrip()
+
+        prompt = base_prompt + "\n\nReturn ONLY a valid JSON object."
+        plan_dict: Optional[Dict[str, Any]] = None
+        last_response: Optional[str] = None
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, self.max_json_retries + 1):
+            # Cap max_tokens to model limit (65536) even for multiple experiments
+            sequential_max_tokens = min(self.max_generation_tokens * 2, 65536)
+            response = await self.llm_client.generate(
+                prompt,
+                max_tokens=sequential_max_tokens,
+                temperature=0.3 if attempt > 1 else 0.4,
+            )
+            raw = str(response or "").strip()
+            last_response = raw
+
+            if not raw:
+                self.logger.warning("Sequential plan generation returned empty response on attempt %s", attempt)
+                last_error = RuntimeError("Empty response from LLM")
+                continue
+
+            try:
+                sanitized = sanitize_json_strings(raw)
+                parsed = safe_json_loads(sanitized)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        f"Sequential plan must be a JSON object; got {type(parsed).__name__}"
+                    )
+                plan_dict = parsed
+                break
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "Failed to parse sequential plan JSON on attempt %s: %s. Raw response: %s",
+                    attempt,
+                    exc,
+                    (raw[:1500] + "...") if len(raw) > 1500 else raw,
+                )
+                if attempt < self.max_json_retries:
+                    prompt = (
+                        base_prompt
+                        + "\n\nIMPORTANT: Your previous answer was not valid JSON and raised the following parsing error\n"
+                        f"{exc}.\n"
+                        "Return ONLY a valid JSON object (no backticks, no extra commentary) following the schema above."
+                    )
+
+        if plan_dict is None:
+            preview = (last_response or "").replace("\n", " ").strip()
+            if len(preview) > 500:
+                preview = preview[:497] + "..."
+            self.logger.error("Sequential plan design failed after retries: %s | raw=%s", last_error or "unknown", preview or "<empty>")
+            raise RuntimeError(f"Sequential plan returned invalid JSON after retries: {last_error}")
+
+        # Parse experiments array
+        experiments_data = plan_dict.get("experiments", [])
+        if not isinstance(experiments_data, list) or len(experiments_data) != num_experiments:
+            self.logger.warning(
+                f"Expected {num_experiments} experiments in plan, got {len(experiments_data) if isinstance(experiments_data, list) else 'non-list'}"
+            )
+            # Pad or truncate to expected count
+            if isinstance(experiments_data, list):
+                if len(experiments_data) < num_experiments:
+                    experiments_data.extend([{}] * (num_experiments - len(experiments_data)))
+                elif len(experiments_data) > num_experiments:
+                    experiments_data = experiments_data[:num_experiments]
+            else:
+                experiments_data = [{}] * num_experiments
+
+        # Convert to ExperimentDesign objects
+        experiments = []
+        experiment_dependencies = {}
+        for i, exp_data in enumerate(experiments_data):
+            exp_id = f"exp_{uuid.uuid4().hex[:8]}"
+            design = ExperimentDesign(
+                id=exp_id,
+                hypothesis_id=hypothesis.id,
+                name=exp_data.get("name", f"Experiment {i+1} for {hypothesis.id}"),
+                description=exp_data.get("description", f"Sequential experiment {i+1}"),
+                methodology=exp_data.get("methodology", "Standard experimental methodology"),
+                variables=exp_data.get("variables", hypothesis.variables),
+                controls=exp_data.get("controls", []),
+                data_collection_plan=exp_data.get("data_collection_plan", {}),
+                analysis_plan=exp_data.get("analysis_plan", "Statistical analysis of results"),
+                expected_duration=exp_data.get("expected_duration", "1-2 hours"),
+                resource_requirements=exp_data.get("resource_requirements", {}),
+                code_requirements=exp_data.get("code_requirements", []),
+                dependencies=exp_data.get("dependencies", []),
+            )
+            experiments.append(design)
+
+            # Track dependencies
+            depends_on = exp_data.get("depends_on_experiments", [])
+            if depends_on:
+                experiment_dependencies[exp_id] = [
+                    experiments[dep_idx].id for dep_idx in depends_on if 0 <= dep_idx < len(experiments)
+                ]
+
+        # Create sequential plan
+        plan = SequentialExperimentPlan(
+            id=f"seqplan_{uuid.uuid4().hex[:8]}",
+            hypothesis_id=hypothesis.id,
+            num_experiments=num_experiments,
+            experiments=experiments,
+            overall_objective=plan_dict.get("overall_objective", f"Sequential testing of {hypothesis.statement}"),
+            experiment_dependencies=experiment_dependencies,
+            shared_setup=plan_dict.get("shared_setup", "# Common setup for all experiments"),
+            expected_total_duration=plan_dict.get("expected_total_duration", f"{num_experiments * 2} hours"),
+        )
+
+        self.logger.info(
+            f"Designed sequential plan '{plan.overall_objective}' with {num_experiments} experiments"
+        )
+
+        return plan
+
 
 class ExperimentExecutor:
     """Execute experiments and collect results"""
@@ -967,6 +1150,273 @@ class ExperimentExecutor:
             execution.output_data.setdefault("prior_errors", prior_errors[-5:])
         return execution
 
+    async def execute_sequential_experiments(
+        self,
+        plan: SequentialExperimentPlan,
+        session_context: OpenHandsSessionContext,
+        prior_errors: Optional[List[str]] = None,
+        attempt_number: int = 1,
+        attempt_context: Optional[Dict[str, Any]] = None,
+    ) -> List[ExperimentExecution]:
+        """
+        Execute ALL experiments in the plan sequentially in a SINGLE OpenHands session.
+
+        This is the FIX for the critical bug where experiments were executed independently.
+        All experiments share the same workspace and container, so later experiments
+        can access code, data, and results from earlier experiments.
+
+        Args:
+            plan: Sequential experimental plan with all experiment designs
+            session_context: OpenHands session to use for ALL experiments
+            prior_errors: Errors from previous attempt (if retrying)
+            attempt_number: Current attempt number
+            attempt_context: Progress tracking context
+
+        Returns:
+            List of all experiment executions in order
+        """
+        executions = []
+        prior_errors = list(prior_errors or [])
+        attempt_context = attempt_context or {}
+
+        self.logger.info(
+            f"Starting sequential execution of {plan.num_experiments} experiments in plan '{plan.overall_objective}'"
+        )
+        self.logger.info(
+            f"Using single OpenHands session {session_context.session_id} (workspace={session_context.workspace_id})"
+        )
+
+        # Phase 0: Shared setup (once for all experiments)
+        try:
+            workspace_id = session_context.workspace_id
+            workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
+            if not workspace_path:
+                await self.openhands_client.ensure_session(
+                    research_type="scientific_research",
+                    session_id=session_context.session_id,
+                    config=session_context.resource_requirements,
+                )
+                workspace_path = self.openhands_client.workspace_manager.get_workspace_path(workspace_id)
+
+            if not workspace_path:
+                raise RuntimeError(f"Workspace not found for OpenHands session {session_context.session_id}")
+
+            # Create shared directory structure
+            base_dir = f"sequential_experiments/{plan.id}"
+            await self.openhands_client.workspace_manager.write_file(workspace_id, f"{base_dir}/.gitkeep", "")
+            await self.openhands_client.workspace_manager.write_file(workspace_id, f"{base_dir}/shared/.gitkeep", "")
+
+            # Write shared setup script
+            if plan.shared_setup:
+                await self.openhands_client.workspace_manager.write_file(
+                    workspace_id,
+                    f"{base_dir}/shared/setup.sh",
+                    plan.shared_setup,
+                    overwrite=True,
+                )
+
+            # Write plan metadata
+            plan_metadata = {
+                "id": plan.id,
+                "hypothesis_id": plan.hypothesis_id,
+                "overall_objective": plan.overall_objective,
+                "num_experiments": plan.num_experiments,
+                "experiment_ids": [exp.id for exp in plan.experiments],
+                "experiment_names": [exp.name for exp in plan.experiments],
+            }
+            await self.openhands_client.workspace_manager.write_file(
+                workspace_id,
+                f"{base_dir}/plan.json",
+                json.dumps(plan_metadata, indent=2),
+                overwrite=True,
+            )
+
+            self.logger.info(f"Shared setup complete for sequential plan {plan.id}")
+
+        except Exception as e:
+            self.logger.error(f"Shared setup failed: {e}")
+            # Return empty list if shared setup fails
+            return []
+
+        # Execute each experiment sequentially in the SAME session
+        previous_results = {}  # Store results from previous experiments
+
+        for exp_index, design in enumerate(plan.experiments):
+            self.logger.info(
+                f"Executing experiment {exp_index + 1}/{plan.num_experiments}: {design.name}"
+            )
+
+            # Create execution record
+            execution = ExperimentExecution(
+                id=f"exec_{uuid.uuid4().hex[:8]}",
+                design_id=design.id,
+                status=ExperimentStatus.IN_PROGRESS,
+                start_time=datetime.now(),
+                workspace_id=session_context.workspace_id,
+                session_id=session_context.session_id,
+            )
+
+            try:
+                # Phase 1: Setup experiment-specific environment
+                execution.logs.append(
+                    f"Experiment {exp_index + 1}/{plan.num_experiments} (attempt {attempt_number}): "
+                    f"setting up environment for {design.name}"
+                )
+                if prior_errors:
+                    execution.logs.append(f"Previous errors to address: {prior_errors[-3:]}")
+
+                # Add context from previous experiments
+                if previous_results:
+                    execution.logs.append(
+                        f"Available results from previous experiments: {list(previous_results.keys())}"
+                    )
+
+                execution.progress = 0.1
+
+                # Setup experiment-specific directory (within the sequential plan directory)
+                exp_dir = f"{base_dir}/experiment_{exp_index + 1}_{design.id}"
+                await self.openhands_client.workspace_manager.write_file(workspace_id, f"{exp_dir}/.gitkeep", "")
+                await self.openhands_client.workspace_manager.write_file(workspace_id, f"{exp_dir}/data/.gitkeep", "")
+                await self.openhands_client.workspace_manager.write_file(workspace_id, f"{exp_dir}/results/.gitkeep", "")
+
+                # Write design metadata
+                design_payload = {
+                    "id": design.id,
+                    "name": design.name,
+                    "description": design.description,
+                    "methodology": design.methodology,
+                    "variables": design.variables,
+                    "sequence_index": exp_index,
+                    "total_experiments": plan.num_experiments,
+                    "previous_experiment_results": previous_results,  # Pass previous results
+                }
+                await self.openhands_client.workspace_manager.write_file(
+                    workspace_id,
+                    f"{exp_dir}/design.json",
+                    json.dumps(design_payload, indent=2),
+                    overwrite=True,
+                )
+
+                execution.logs.append(
+                    f"Environment setup complete: {workspace_path / exp_dir}"
+                )
+                execution.progress = 0.3
+
+                # Phase 2: Data collection (with context from previous experiments)
+                execution.logs.append(
+                    f"Experiment {exp_index + 1}: collecting experimental data"
+                )
+
+                # Enhance attempt_context with previous results
+                enhanced_attempt_context = dict(attempt_context or {})
+                enhanced_attempt_context["previous_results"] = previous_results
+                enhanced_attempt_context["experiment_index"] = exp_index
+                enhanced_attempt_context["total_experiments"] = plan.num_experiments
+
+                data_result = await self._collect_experimental_data(
+                    design,
+                    execution,
+                    session_context,
+                    prior_errors,
+                    attempt_context=enhanced_attempt_context,
+                )
+                execution.output_data.update(data_result or {})
+
+                success_flag = False
+                if data_result:
+                    if "success" in data_result:
+                        success_flag = bool(data_result["success"])
+                    elif data_result.get("measurements"):
+                        success_flag = True
+
+                if not success_flag:
+                    execution.progress = 1.0
+                    execution.status = ExperimentStatus.FAILED
+                    error_message = (
+                        data_result.get("error")
+                        if isinstance(data_result, dict)
+                        else "Data collection failed"
+                    )
+                    if error_message:
+                        execution.errors.append(str(error_message))
+                        prior_errors.append(f"Experiment {exp_index + 1} ({design.name}): {error_message}")
+                    execution.logs.append("Data collection failed; skipping analysis phase")
+                    execution.end_time = datetime.now()
+                    executions.append(execution)
+                    # Continue to next experiment even if this one failed
+                    continue
+
+                execution.progress = 0.7
+
+                # Phase 3: Analysis
+                execution.logs.append("Analyzing collected data")
+                analysis_result = await self._analyze_experimental_data(design, execution.output_data)
+                execution.intermediate_results = analysis_result
+
+                # Store results for next experiment
+                previous_results[f"experiment_{exp_index + 1}"] = {
+                    "design_id": design.id,
+                    "name": design.name,
+                    "output_data": execution.output_data,
+                    "analysis": analysis_result,
+                    "workspace_path": str(workspace_path / exp_dir),
+                }
+
+                execution.progress = 1.0
+                execution.status = ExperimentStatus.COMPLETED
+                execution.end_time = datetime.now()
+                executions.append(execution)
+
+                self.logger.info(
+                    f"Experiment {exp_index + 1}/{plan.num_experiments} completed: {execution.id}"
+                )
+
+            except Exception as e:
+                execution.status = ExperimentStatus.FAILED
+                execution.errors.append(str(e))
+                execution.end_time = datetime.now()
+                execution.logs.append(f"Experiment execution failed: {str(e)}")
+                if prior_errors:
+                    execution.logs.append(f"Prior errors: {prior_errors[-3:]}")
+
+                prior_errors.append(f"Experiment {exp_index + 1} ({design.name}): {str(e)}")
+                executions.append(execution)
+
+                self.logger.exception(
+                    "Experiment %d/%d failed: %s (%s)",
+                    exp_index + 1,
+                    plan.num_experiments,
+                    design.id,
+                    design.name,
+                )
+
+                # Continue to next experiment even if this one failed
+                continue
+
+        # Write final summary
+        try:
+            summary = {
+                "plan_id": plan.id,
+                "total_experiments": plan.num_experiments,
+                "completed": sum(1 for ex in executions if ex.status == ExperimentStatus.COMPLETED),
+                "failed": sum(1 for ex in executions if ex.status == ExperimentStatus.FAILED),
+                "execution_ids": [ex.id for ex in executions],
+            }
+            await self.openhands_client.workspace_manager.write_file(
+                workspace_id,
+                f"{base_dir}/summary.json",
+                json.dumps(summary, indent=2),
+                overwrite=True,
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to write summary: {e}")
+
+        self.logger.info(
+            f"Sequential execution complete: {summary['completed']}/{plan.num_experiments} experiments succeeded"
+        )
+
+        return executions
+
     async def _setup_experiment_environment(
         self,
         design: ExperimentDesign,
@@ -1184,12 +1634,6 @@ ENVIRONMENT CAPABILITIES & CONSTRAINTS
   - git, wget, curl (source code download)
   - Python 3.12 with numpy, pandas, scipy, scikit-learn, matplotlib
   - Common development libraries (SSL, readline, SQLite, etc.)
-
-✗ LIMITATIONS:
-  - Cannot install system packages via apt/yum/dnf
-  - Cannot modify system-wide installed software
-  - Must work within /workspace directory
-  - No root privileges for system changes
 
 ═══════════════════════════════════════════════════════════════════════════════
 CRITICAL STRATEGY: BUILD FROM SOURCE LOCALLY
@@ -2388,47 +2832,59 @@ class ScientificResearchEngine:
 
             iteration_results: List[ExperimentResult] = []
 
+            # ========== FIX FOR SEQUENTIAL EXPERIMENT BUG ==========
+            # OLD (BROKEN): Designed and executed experiments one-by-one in separate containers
+            # NEW (FIXED): Design ALL experiments together, execute in SINGLE container
             for hypothesis in pending_hypotheses:
-                self.logger.info("Running %d experiments per hypothesis (EXPERIMENTS_PER_HYPOTHESIS)", self.experiments_per_hypothesis)
-                for exp_round in range(1, self.experiments_per_hypothesis + 1):
-                    design = await self.experiment_designer.design_experiment(hypothesis)
-                    idea.experiments.append(design)
+                self.logger.info(
+                    "Designing sequential plan with %d experiments for hypothesis (EXPERIMENTS_PER_HYPOTHESIS)",
+                    self.experiments_per_hypothesis
+                )
 
-                    if session_id and idea.node_id:
-                        await self._log_progress(
-                            session_id,
-                            phase=f"{idea.id}_design_{design.id}_round_{exp_round}",
-                            progress=iteration_progress + per_iteration_increment * 0.2,
-                            message=f"Designed experiment (round {exp_round}): {design.name}",
-                            metadata={
-                                "parent_id": idea.node_id,
-                                "node_type": "step",
-                                "title": design.name,
-                                "methodology": design.methodology,
-                                "round": exp_round,
-                            },
-                            parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
-                        )
+                # NEW: Design ALL experiments together as a sequential plan
+                sequential_plan = await self.experiment_designer.design_sequential_experiments(
+                    hypothesis=hypothesis,
+                    num_experiments=self.experiments_per_hypothesis,
+                )
+                idea.sequential_plans.append(sequential_plan)
+                idea.experiments.extend(sequential_plan.experiments)  # Also store in experiments list for compatibility
 
-
-                    final_execution, execution_history = await self._execute_experiment_with_retries(
-                        idea,
-                        hypothesis,
-                        design,
+                if session_id and idea.node_id:
+                    await self._log_progress(
                         session_id,
-                        iteration_progress,
-                        per_iteration_increment,
-                        openhands_context,
-                        iteration,
-                        exp_round,
+                        phase=f"{idea.id}_sequential_plan_{sequential_plan.id}",
+                        progress=iteration_progress + per_iteration_increment * 0.2,
+                        message=f"Designed sequential plan: {sequential_plan.overall_objective}",
+                        metadata={
+                            "parent_id": idea.node_id,
+                            "node_type": "step",
+                            "title": sequential_plan.overall_objective,
+                            "num_experiments": sequential_plan.num_experiments,
+                            "experiment_names": [exp.name for exp in sequential_plan.experiments],
+                        },
+                        parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
                     )
 
-                    # Goal plan logging for executions is disabled (legacy CodeAct plan removed)
+                # NEW: Execute ALL experiments in the sequential plan in ONE session with retries
+                all_executions = await self._execute_sequential_plan_with_retries(
+                    idea=idea,
+                    hypothesis=hypothesis,
+                    plan=sequential_plan,
+                    session_id=session_id,
+                    iteration_progress=iteration_progress,
+                    per_iteration_increment=per_iteration_increment,
+                    session_context=openhands_context,
+                    iteration_number=iteration,
+                )
 
-                    idea.executions.extend(execution_history)
+                idea.executions.extend(all_executions)
 
-                    if final_execution.status == ExperimentStatus.COMPLETED:
-                        experiment_result = await self._analyze_experiment_result(hypothesis, design, final_execution)
+                # Process results from ALL experiments
+                for exp_index, execution in enumerate(all_executions):
+                    design = sequential_plan.experiments[exp_index]
+
+                    if execution.status == ExperimentStatus.COMPLETED:
+                        experiment_result = await self._analyze_experiment_result(hypothesis, design, execution)
                         idea.results.append(experiment_result)
                         iteration_results.append(experiment_result)
                         await self._update_hypothesis_status(hypothesis, experiment_result)
@@ -2438,32 +2894,40 @@ class ScientificResearchEngine:
                                 session_id,
                                 phase=f"{idea.id}_result_{experiment_result.execution_id}",
                                 progress=iteration_progress + per_iteration_increment * 0.65,
-                                message=f"Result for {design.name}",
+                                message=f"Result for {design.name} (Exp {exp_index + 1}/{sequential_plan.num_experiments})",
                                 metadata={
                                     "parent_id": idea.node_id,
                                     "node_type": "result",
                                     "conclusions": experiment_result.conclusions[:2],
                                     "confidence_score": experiment_result.confidence_score,
+                                    "experiment_index": exp_index + 1,
+                                    "total_experiments": sequential_plan.num_experiments,
                                 },
                                 parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
                             )
-                        break
                     else:
-                        hypothesis.evidence.append("Experiment execution failed after retries")
+                        hypothesis.evidence.append(f"Experiment {exp_index + 1} ({design.name}) failed")
                         if session_id and idea.node_id:
                             await self._log_progress(
                                 session_id,
-                                phase=f"{idea.id}_result_{final_execution.id}",
+                                phase=f"{idea.id}_result_{execution.id}",
                                 progress=iteration_progress + per_iteration_increment * 0.65,
-                                message=f"Experiment {design.name} failed after retries",
+                                message=f"Experiment {design.name} failed (Exp {exp_index + 1}/{sequential_plan.num_experiments})",
                                 metadata={
                                     "parent_id": idea.node_id,
                                     "node_type": "result",
-                                    "status": final_execution.status.value,
-                                    "errors": final_execution.errors[:1] if final_execution.errors else [],
+                                    "status": execution.status.value,
+                                    "errors": execution.errors[:1] if execution.errors else [],
+                                    "experiment_index": exp_index + 1,
+                                    "total_experiments": sequential_plan.num_experiments,
                                 },
                                 parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
                             )
+
+                # Break after processing one hypothesis (matching old behavior)
+                if iteration_results:
+                    break
+            # ========== END FIX FOR SEQUENTIAL EXPERIMENT BUG ==========
 
             current_confidence = self._calculate_overall_confidence(idea.results)
             max_confidence = max(max_confidence, current_confidence)
@@ -2568,6 +3032,126 @@ class ScientificResearchEngine:
                 prior_errors.extend(execution.errors)
 
         return execution_history[-1], execution_history
+
+    async def _execute_sequential_plan_with_retries(
+        self,
+        idea: ResearchIdea,
+        hypothesis: ResearchHypothesis,
+        plan: SequentialExperimentPlan,
+        session_id: Optional[str],
+        iteration_progress: float,
+        per_iteration_increment: float,
+        session_context: Optional[OpenHandsSessionContext],
+        iteration_number: int,
+    ) -> List[ExperimentExecution]:
+        """
+        Execute a sequential experimental plan with retries.
+
+        This is the FIX for the critical bug - executes ALL experiments in ONE session.
+        """
+
+        prior_errors: List[str] = []
+        all_executions: List[ExperimentExecution] = []
+        attempt_base_progress = iteration_progress + per_iteration_increment * 0.4
+        parent_phase = f"idea_{idea.id}_experiments_iter_{iteration_number}"
+
+        for attempt in range(1, self.max_attempts_per_experiment + 1):
+            attempt_progress = attempt_base_progress + per_iteration_increment * min(0.15, 0.05 * attempt)
+            attempt_phase = f"{idea.id}_sequential_execution_attempt_{attempt}"
+            attempt_node_id: Optional[str] = None
+
+            if session_id and idea.node_id:
+                attempt_node_id = await self._log_progress(
+                    session_id,
+                    phase=attempt_phase,
+                    progress=attempt_progress,
+                    message=f"Attempt {attempt} for sequential plan (starting): {plan.overall_objective}",
+                    metadata={
+                        "parent_id": idea.node_id,
+                        "node_type": "step",
+                        "attempt": attempt,
+                        "num_experiments": plan.num_experiments,
+                        "status": "starting",
+                    },
+                    parent_phase=parent_phase,
+                ) or attempt_node_id
+
+            # Execute ALL experiments in the plan sequentially in ONE session
+            executions = await self.experiment_executor.execute_sequential_experiments(
+                plan=plan,
+                session_context=session_context,
+                prior_errors=prior_errors,
+                attempt_number=attempt,
+                attempt_context={
+                    "parent_node_id": attempt_node_id,
+                    "parent_phase": attempt_phase,
+                    "progress_anchor": attempt_progress,
+                    "progress_increment": per_iteration_increment,
+                    "phase_prefix": f"{attempt_phase}_collect",
+                },
+            )
+
+            if session_id and idea.node_id and attempt_node_id:
+                completed = sum(1 for ex in executions if ex.status == ExperimentStatus.COMPLETED)
+                failed = sum(1 for ex in executions if ex.status == ExperimentStatus.FAILED)
+                await self._log_progress(
+                    session_id,
+                    phase=attempt_phase,
+                    progress=attempt_progress,
+                    message=f"Attempt {attempt} for sequential plan ({completed}/{plan.num_experiments} succeeded)",
+                    metadata={
+                        "node_id": attempt_node_id,
+                        "parent_id": idea.node_id,
+                        "node_type": "step",
+                        "attempt": attempt,
+                        "num_experiments": plan.num_experiments,
+                        "completed": completed,
+                        "failed": failed,
+                        "status": "completed" if completed == plan.num_experiments else "partial",
+                    },
+                    parent_phase=parent_phase,
+                )
+
+            # Check if all experiments succeeded
+            all_succeeded = all(ex.status == ExperimentStatus.COMPLETED for ex in executions)
+
+            if all_succeeded:
+                self.logger.info(
+                    f"Sequential plan succeeded on attempt {attempt}: {completed}/{plan.num_experiments} experiments completed"
+                )
+                # Archive successful workspaces if configured
+                for execution in executions:
+                    if execution.status == ExperimentStatus.COMPLETED and session_context:
+                        await self._archive_successful_execution(
+                            execution,
+                            plan.experiments[executions.index(execution)],
+                            iteration_number,
+                            attempt,
+                            session_context,
+                        )
+                return executions
+
+            # Collect errors from failed experiments
+            for exp_index, execution in enumerate(executions):
+                if execution.errors:
+                    prior_errors.extend([
+                        f"Experiment {exp_index + 1} ({plan.experiments[exp_index].name}): {err}"
+                        for err in execution.errors
+                    ])
+
+            # Keep track of all executions for this attempt
+            all_executions = executions
+
+            if attempt < self.max_attempts_per_experiment:
+                self.logger.warning(
+                    f"Sequential plan attempt {attempt} had failures, retrying... ({completed}/{plan.num_experiments} succeeded)"
+                )
+
+        # Return the last attempt's executions even if not all succeeded
+        self.logger.error(
+            f"Sequential plan failed after {self.max_attempts_per_experiment} attempts"
+        )
+        return all_executions
 
     async def _archive_successful_execution(
         self,
