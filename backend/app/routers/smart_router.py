@@ -311,13 +311,21 @@ async def route_and_execute(request: RouterRequest):
             if hasattr(engine, 'openhands_client') and engine.openhands_client:
                 engine.openhands_client = enable_openhands_streaming(engine.openhands_client, session_id)
 
+            # Extract technical requirements before conducting research
+            technical_requirements = None
+            if hasattr(engine, 'requirement_extractor'):
+                logger.info("Extracting technical requirements for scientific research")
+                technical_requirements = await engine.requirement_extractor.extract_requirements(request.user_request)
+                logger.info(f"Extracted technical requirements: {technical_requirements.to_dict()}")
+
             try:
                 execution_result = await engine.conduct_research(
                     request.user_request,
                     include_literature_review=params.get("include_literature_review", True),
                     include_code_analysis=params.get("include_code_analysis", True),
                     enable_iteration=params.get("enable_iteration", True),
-                    session_id=session_id
+                    session_id=session_id,
+                    technical_requirements=technical_requirements
                 )
             finally:
                 engine.llm_client = original_llm_client

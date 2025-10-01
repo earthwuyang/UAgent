@@ -181,6 +181,29 @@ class IdeaEvaluation:
 
 
 @dataclass
+class TechnicalRequirements:
+    """Domain-specific technical requirements extracted from user request"""
+    source_code_modifications: List[str] = field(default_factory=list)
+    programming_languages: List[str] = field(default_factory=list)
+    execution_engines: List[str] = field(default_factory=list)
+    integration_requirements: List[str] = field(default_factory=list)
+    data_collection_requirements: List[str] = field(default_factory=list)
+    prohibited_shortcuts: List[str] = field(default_factory=list)
+    technical_guidance_needed: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source_code_modifications": self.source_code_modifications,
+            "programming_languages": self.programming_languages,
+            "execution_engines": self.execution_engines,
+            "integration_requirements": self.integration_requirements,
+            "data_collection_requirements": self.data_collection_requirements,
+            "prohibited_shortcuts": self.prohibited_shortcuts,
+            "technical_guidance_needed": self.technical_guidance_needed,
+        }
+
+
+@dataclass
 class OpenHandsSessionContext:
     """Metadata for an acquired OpenHands runtime session."""
 
@@ -189,6 +212,7 @@ class OpenHandsSessionContext:
     research_session_id: str
     idea_id: str
     resource_requirements: Dict[str, Any] = field(default_factory=dict)
+    technical_requirements: Optional[TechnicalRequirements] = None
 
 
 @dataclass
@@ -235,8 +259,660 @@ class ScientificResearchResult:
     debates: List[Dict[str, Any]] = field(default_factory=list)
     recommendations: List[str] = field(default_factory=list)
     ideas: List[ResearchIdea] = field(default_factory=list)
+    technical_requirements: Optional[TechnicalRequirements] = None
     idea_evaluations: Dict[str, IdeaEvaluation] = field(default_factory=dict)
     selected_idea_id: Optional[str] = None
+
+
+class RequirementExtractor:
+    """Extract domain-specific technical requirements from research questions"""
+
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
+        self.logger = logging.getLogger(__name__)
+        self.max_generation_tokens = get_max_tokens_from_env()
+
+    async def extract_requirements(
+        self,
+        research_question: str
+    ) -> TechnicalRequirements:
+        """Extract structured technical requirements from research question"""
+
+        extraction_prompt = f"""
+Analyze this research question and extract SPECIFIC technical requirements:
+
+{research_question}
+
+Extract and return in JSON format with these exact keys:
+1. "source_code_modifications": Which codebases/files must be modified (e.g., ["PostgreSQL source code", "pg_duckdb extension"])
+2. "programming_languages": Which languages must be used (e.g., ["C language", "Python"])
+3. "execution_engines": Which engines must be compared or used (e.g., ["PostgreSQL", "DuckDB"])
+4. "integration_requirements": How components must be integrated (e.g., ["embed ML model into database source code", "no external APIs"])
+5. "data_collection_requirements": What data must be collected (e.g., ["dual-execution data on both engines", "real query execution times"])
+6. "prohibited_shortcuts": What approaches are explicitly forbidden (e.g., ["no REST APIs", "no synthetic data", "no simulation", "no mock implementations"])
+7. "technical_guidance_needed": What complex tasks need implementation guidance (e.g., ["embed sklearn model in C", "modify PostgreSQL planner", "dual-engine execution"])
+
+Be SPECIFIC and LITERAL - extract exact technical requirements from the user's wording.
+If the user says "modify postgres source code", include that exact phrase.
+If the user says "embed model in C language", include that exact requirement.
+
+Return ONLY a valid JSON object with these keys.
+"""
+
+        response = await self.llm_client.generate(
+            extraction_prompt,
+            max_tokens=self.max_generation_tokens,
+            temperature=0.1  # Low temperature for consistency
+        )
+
+        try:
+            sanitized = sanitize_json_strings(str(response))
+            req_dict = safe_json_loads(sanitized)
+        except JsonParseError as exc:
+            self.logger.error(f"Failed to parse requirements: {exc}")
+            # Return empty requirements on parse failure
+            req_dict = {}
+
+        return TechnicalRequirements(
+            source_code_modifications=req_dict.get("source_code_modifications", []),
+            programming_languages=req_dict.get("programming_languages", []),
+            execution_engines=req_dict.get("execution_engines", []),
+            integration_requirements=req_dict.get("integration_requirements", []),
+            data_collection_requirements=req_dict.get("data_collection_requirements", []),
+            prohibited_shortcuts=req_dict.get("prohibited_shortcuts", []),
+            technical_guidance_needed=req_dict.get("technical_guidance_needed", []),
+        )
+
+
+class RequirementValidator:
+    """Validate experiment designs and results against technical requirements"""
+
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+
+    async def validate_experiment_plan(
+        self,
+        plan: SequentialExperimentPlan,
+        requirements: TechnicalRequirements
+    ) -> Tuple[bool, List[str]]:
+        """Validate experiment plan meets technical requirements before execution"""
+
+        validation_errors = []
+
+        # Validate each experiment in the plan
+        for exp_idx, experiment in enumerate(plan.experiments, start=1):
+            methodology_text = str(experiment.methodology).lower()
+            description_text = str(experiment.description).lower()
+            full_text = methodology_text + " " + description_text
+
+            # Check for prohibited shortcuts
+            for prohibition in requirements.prohibited_shortcuts:
+                prohibition_words = prohibition.lower().split()
+                # Check if ANY key words from prohibition appear in methodology
+                if any(word in full_text for word in prohibition_words if len(word) > 3):
+                    validation_errors.append(
+                        f"❌ Experiment {exp_idx} '{experiment.name}' may violate prohibition: {prohibition}"
+                    )
+
+            # Check for required execution engines
+            if len(requirements.execution_engines) > 1:
+                engines_mentioned = set()
+                for engine in requirements.execution_engines:
+                    if engine.lower() in full_text:
+                        engines_mentioned.add(engine)
+
+                if len(engines_mentioned) < len(requirements.execution_engines):
+                    missing = set(requirements.execution_engines) - engines_mentioned
+                    validation_errors.append(
+                        f"❌ Experiment {exp_idx} '{experiment.name}' missing required engines: {missing}"
+                    )
+
+            # Check for source code modification requirements
+            if requirements.source_code_modifications:
+                modification_indicators = [
+                    "modify source", "modify code", "edit source", "change source",
+                    "modify postgres", "modify pg_duckdb", "edit c code",
+                    "change postgres", "patch source"
+                ]
+                has_modification = any(indicator in full_text for indicator in modification_indicators)
+
+                if not has_modification:
+                    validation_errors.append(
+                        f"❌ Experiment {exp_idx} '{experiment.name}' does not modify source code as required: {requirements.source_code_modifications}"
+                    )
+
+            # Check for programming language requirements
+            if requirements.programming_languages:
+                for lang in requirements.programming_languages:
+                    if lang.lower() not in full_text:
+                        validation_errors.append(
+                            f"⚠️  Experiment {exp_idx} '{experiment.name}' does not mention required language: {lang}"
+                        )
+
+        # Validate shared setup
+        shared_setup_text = str(plan.shared_setup).lower()
+        for prohibition in requirements.prohibited_shortcuts:
+            prohibition_words = prohibition.lower().split()
+            if any(word in shared_setup_text for word in prohibition_words if len(word) > 3):
+                validation_errors.append(
+                    f"❌ Shared setup violates prohibition: {prohibition}"
+                )
+
+        is_valid = len(validation_errors) == 0
+        if not is_valid:
+            self.logger.warning(f"Experiment plan validation failed with {len(validation_errors)} errors")
+            for error in validation_errors:
+                self.logger.warning(error)
+
+        return is_valid, validation_errors
+
+    async def validate_execution_results(
+        self,
+        execution: ExperimentExecution,
+        requirements: TechnicalRequirements
+    ) -> Tuple[bool, List[str]]:
+        """Validate execution results meet technical requirements after execution"""
+
+        validation_errors = []
+
+        # Check output_data for compliance
+        final_data = execution.output_data
+        if not final_data:
+            validation_errors.append("❌ No output data found in execution results")
+            return False, validation_errors
+
+        # Check for README.md file
+        files_generated = final_data.get("data", {}).get("files_generated", [])
+        if not files_generated:
+            # Try alternative locations
+            for key in ["step_1", "step_2", "step_3"]:
+                step_data = final_data.get("data", {}).get(key, {})
+                if isinstance(step_data, dict):
+                    files_generated.extend(step_data.get("output_files", []))
+
+        readme_files = [f for f in files_generated if "README.md" in f or "readme.md" in f]
+        if not readme_files:
+            validation_errors.append(
+                "❌ MISSING REQUIRED README.md - Experiment must generate detailed reproduction guide"
+            )
+
+        # Check for prohibited shortcuts in results
+        full_text = json.dumps(final_data).lower()
+        for prohibition in requirements.prohibited_shortcuts:
+            prohibition_words = prohibition.lower().split()
+            if any(word in full_text for word in prohibition_words if len(word) > 3):
+                validation_errors.append(
+                    f"❌ Execution results contain prohibited approach: {prohibition}"
+                )
+
+        # Check analysis section for source code modifications
+        analysis = final_data.get("analysis", {})
+        source_mods = analysis.get("source_code_modifications", [])
+
+        if requirements.source_code_modifications and not source_mods:
+            validation_errors.append(
+                f"❌ No source code modifications found in results, but required: {requirements.source_code_modifications}"
+            )
+
+        # Check for dual-engine execution if required
+        if len(requirements.execution_engines) > 1:
+            engines_in_results = set()
+            for engine in requirements.execution_engines:
+                if engine.lower() in full_text:
+                    engines_in_results.add(engine)
+
+            if len(engines_in_results) < len(requirements.execution_engines):
+                missing = set(requirements.execution_engines) - engines_in_results
+                validation_errors.append(
+                    f"❌ Results missing data from required engines: {missing}"
+                )
+
+        is_valid = len(validation_errors) == 0
+        if not is_valid:
+            self.logger.warning(f"Execution validation failed with {len(validation_errors)} errors")
+            for error in validation_errors:
+                self.logger.warning(error)
+
+        return is_valid, validation_errors
+
+
+class TechnicalGuideProvider:
+    """Provide specific technical guidance for complex implementation tasks"""
+
+    GUIDES = {
+        "embed sklearn model in c": """
+═══════════════════════════════════════════════════════════════
+TECHNICAL GUIDE: Embedding scikit-learn ML Models in PostgreSQL C Code
+═══════════════════════════════════════════════════════════════
+
+Option 1: Use sklearn-porter (Recommended for simple models)
+-------------------------------------------------------------
+1. Install: pip install sklearn-porter
+2. Export model:
+   from sklearn_porter import Porter
+   porter = Porter(model, language='c')
+   output = porter.export()
+   # Saves model as C code
+
+Option 2: Use m2cgen (Supports more model types)
+-------------------------------------------------------------
+1. Install: pip install m2cgen
+2. Export model:
+   import m2cgen as m2c
+   code = m2c.export_to_c(model)
+   # Generates C prediction function
+
+Option 3: Manual serialization with PMML
+-------------------------------------------------------------
+1. Export to PMML: sklearn2pmml
+2. Use C PMML parser library
+3. Load model at PostgreSQL startup
+
+PostgreSQL C Extension Integration:
+-------------------------------------------------------------
+Create extension directory: postgresql/contrib/ml_router/
+
+File: contrib/ml_router/ml_router.c
+```c
+#include "postgres.h"
+#include "fmgr.h"
+#include "optimizer/planner.h"
+#include "nodes/nodes.h"
+
+PG_MODULE_MAGIC;
+
+// Model prediction function (generated by sklearn-porter/m2cgen)
+static double predict_score(double *features, int n_features) {
+    // Generated decision tree logic
+    if (features[0] > 0.5) {
+        if (features[1] < 0.3) {
+            return 1.0;  // Route to engine 1
+        }
+        return 0.0;  // Route to engine 2
+    }
+    return 0.0;
+}
+
+// PostgreSQL C function callable from SQL
+PG_FUNCTION_INFO_V1(ml_route_query);
+Datum
+ml_route_query(PG_FUNCTION_ARGS)
+{
+    // Extract features from current query
+    double features[10];
+    // ... feature extraction logic ...
+
+    double score = predict_score(features, 10);
+    PG_RETURN_FLOAT8(score);
+}
+```
+
+File: contrib/ml_router/Makefile
+```makefile
+MODULES = ml_router
+EXTENSION = ml_router
+DATA = ml_router--1.0.sql
+
+ifdef USE_PGXS
+PG_CONFIG = pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+include $(PGXS)
+else
+subdir = contrib/ml_router
+top_builddir = ../..
+include $(top_builddir)/src/Makefile.global
+include $(top_srcdir)/contrib/contrib-global.mk
+endif
+```
+
+Build and install:
+```bash
+cd postgresql/contrib/ml_router
+make
+make install
+```
+
+Test:
+```sql
+CREATE EXTENSION ml_router;
+SELECT ml_route_query();
+```
+""",
+
+        "dual-engine execution": """
+═══════════════════════════════════════════════════════════════
+TECHNICAL GUIDE: Dual-Engine Query Execution (PostgreSQL + DuckDB)
+═══════════════════════════════════════════════════════════════
+
+Method 1: Use pg_duckdb Extension (Recommended)
+-------------------------------------------------------------
+1. Clone and build pg_duckdb:
+   git clone https://github.com/duckdb/pg_duckdb
+   cd pg_duckdb
+   make
+   make install
+
+2. Enable in PostgreSQL:
+   CREATE EXTENSION pg_duckdb;
+
+3. Execute on both engines:
+   Python script:
+   ```python
+   import psycopg2
+   import time
+
+   conn = psycopg2.connect("dbname=test user=postgres")
+   cursor = conn.cursor()
+
+   query = "SELECT COUNT(*) FROM large_table WHERE value > 100"
+
+   # Execute on PostgreSQL
+   start = time.time()
+   cursor.execute(f"EXPLAIN ANALYZE {query}")
+   pg_plan = cursor.fetchall()
+   cursor.execute(query)
+   pg_result = cursor.fetchall()
+   pg_time = time.time() - start
+
+   # Execute on DuckDB via pg_duckdb
+   start = time.time()
+   cursor.execute(f"SELECT duckdb.execute(%s)", (query,))
+   duckdb_result = cursor.fetchall()
+   duckdb_time = time.time() - start
+
+   # Record training data
+   faster_engine = "duckdb" if duckdb_time < pg_time else "postgres"
+   features = extract_features(query, pg_plan)
+   training_data.append((features, faster_engine, pg_time, duckdb_time))
+   ```
+
+Method 2: Separate Connection Pools
+-------------------------------------------------------------
+1. Install DuckDB Python: pip install duckdb
+2. Maintain separate connections:
+   ```python
+   import psycopg2
+   import duckdb
+
+   pg_conn = psycopg2.connect("...")
+   duck_conn = duckdb.connect("database.duckdb")
+
+   # Execute on both
+   pg_cursor = pg_conn.cursor()
+   pg_cursor.execute(query)
+   pg_result = pg_cursor.fetchall()
+
+   duck_cursor = duck_conn.cursor()
+   duck_cursor.execute(query)
+   duck_result = duck_cursor.fetchall()
+   ```
+
+Feature Extraction from PostgreSQL Kernel:
+-------------------------------------------------------------
+Extract BEFORE query optimization:
+
+```python
+def extract_preopt_features(query, pg_cursor):
+    # Get query plan
+    pg_cursor.execute(f"EXPLAIN (FORMAT JSON, VERBOSE) {query}")
+    plan = pg_cursor.fetchone()[0][0]
+
+    features = {}
+
+    # Feature 1: Table sizes from pg_class
+    tables = extract_tables_from_plan(plan)
+    for table in tables:
+        pg_cursor.execute(f"SELECT reltuples, relpages FROM pg_class WHERE relname='{table}'")
+        row_count, page_count = pg_cursor.fetchone()
+        features[f"{table}_rows"] = row_count
+        features[f"{table}_pages"] = page_count
+
+    # Feature 2: Join count
+    features["join_count"] = count_joins_in_plan(plan)
+
+    # Feature 3: Filter complexity
+    features["filter_count"] = count_filters_in_plan(plan)
+
+    # Feature 4: Aggregation count
+    features["agg_count"] = count_aggregations_in_plan(plan)
+
+    return features
+```
+
+Data Collection Loop:
+-------------------------------------------------------------
+```python
+training_data = []
+for query in tpch_queries:
+    # Extract features
+    features = extract_preopt_features(query, pg_cursor)
+
+    # Execute on both engines
+    pg_time = execute_on_postgres(query, pg_cursor)
+    duck_time = execute_on_duckdb(query, duck_cursor)
+
+    # Label with faster engine
+    label = "postgres" if pg_time < duck_time else "duckdb"
+
+    training_data.append({
+        "features": features,
+        "label": label,
+        "pg_time": pg_time,
+        "duck_time": duck_time,
+    })
+
+# Train model
+X = [d["features"] for d in training_data]
+y = [d["label"] for d in training_data]
+model = RandomForestClassifier()
+model.fit(X, y)
+```
+""",
+
+        "modify postgresql planner": """
+═══════════════════════════════════════════════════════════════
+TECHNICAL GUIDE: Modifying PostgreSQL Query Planner for ML Routing
+═══════════════════════════════════════════════════════════════
+
+Key Files to Modify:
+-------------------------------------------------------------
+1. src/backend/optimizer/plan/planner.c - Main planner entry
+2. src/backend/tcop/postgres.c - Query execution loop
+3. src/include/optimizer/planner.h - Planner headers
+
+Step 1: Add Hook in Planner
+-------------------------------------------------------------
+File: src/backend/optimizer/plan/planner.c
+
+Find the planner() function (around line 280):
+
+```c
+PlannedStmt *
+planner(Query *parse, const char *query_string, int cursorOptions,
+        ParamListInfo boundParams)
+{
+    PlannedStmt *result;
+    PlannerGlobal *glob;
+    // ... existing code ...
+
+    // ADD ML ROUTING HOOK HERE (before standard_planner call)
+    if (ml_routing_enabled)
+    {
+        MLRoutingDecision decision = ml_route_query(parse, query_string);
+        if (decision.route_to_duckdb)
+        {
+            // Route to DuckDB via pg_duckdb
+            result = duckdb_execute_query(parse, query_string);
+            return result;
+        }
+    }
+
+    // Continue with standard PostgreSQL planning
+    result = standard_planner(parse, query_string, cursorOptions, boundParams);
+    return result;
+}
+```
+
+Step 2: Implement ML Routing Function
+-------------------------------------------------------------
+File: src/backend/optimizer/plan/ml_router.c (NEW FILE)
+
+```c
+#include "postgres.h"
+#include "optimizer/planner.h"
+#include "parser/parsetree.h"
+#include "catalog/pg_class.h"
+
+typedef struct MLRoutingDecision {
+    bool route_to_duckdb;
+    double confidence;
+} MLRoutingDecision;
+
+// Extract features from Query structure
+static double* extract_query_features(Query *parse) {
+    double *features = palloc(sizeof(double) * 10);
+
+    // Feature 1: Number of relations
+    features[0] = (double)list_length(parse->rtable);
+
+    // Feature 2: Number of joins
+    features[1] = (double)count_joins(parse);
+
+    // Feature 3: Aggregation presence
+    features[2] = parse->hasAggs ? 1.0 : 0.0;
+
+    // Feature 4: Subquery presence
+    features[3] = parse->hasSubLinks ? 1.0 : 0.0;
+
+    // Feature 5-10: Table sizes from pg_class
+    // ... query pg_class for reltuples ...
+
+    return features;
+}
+
+// ML model prediction (generated from sklearn)
+static double predict_duckdb_score(double *features) {
+    // Decision tree logic generated by sklearn-porter
+    if (features[0] > 2.5) {
+        if (features[1] > 0.5) {
+            return 0.8;  // High confidence for DuckDB
+        }
+        return 0.3;
+    }
+    return 0.1;  // Low confidence, use PostgreSQL
+}
+
+// Main routing function
+MLRoutingDecision ml_route_query(Query *parse, const char *query_string) {
+    MLRoutingDecision decision;
+    double *features = extract_query_features(parse);
+    double score = predict_duckdb_score(features);
+
+    decision.route_to_duckdb = (score > 0.5);
+    decision.confidence = score;
+
+    pfree(features);
+    return decision;
+}
+```
+
+Step 3: Add to PostgreSQL Build System
+-------------------------------------------------------------
+File: src/backend/optimizer/plan/Makefile
+
+Add ml_router.c to OBJS:
+```makefile
+OBJS = planner.o planmain.o createplan.o ml_router.o ...
+```
+
+Step 4: Rebuild and Test
+-------------------------------------------------------------
+```bash
+cd postgresql
+make clean
+make -j$(nproc)
+make install
+
+# Initialize new database
+initdb -D data_test
+pg_ctl -D data_test start
+
+# Test ML routing
+psql -d postgres -c "SET ml_routing_enabled = on;"
+psql -d postgres -c "SELECT * FROM test_table WHERE id > 100;"
+# Check logs for ML routing decision
+```
+
+Step 5: Add Configuration Parameters
+-------------------------------------------------------------
+File: src/backend/utils/misc/guc.c
+
+```c
+static bool ml_routing_enabled = false;
+
+{
+    {"ml_routing_enabled", PGC_USERSET, QUERY_TUNING_METHOD,
+        gettext_noop("Enables ML-based query routing to DuckDB."),
+        NULL
+    },
+    &ml_routing_enabled,
+    false,
+    NULL, NULL, NULL
+},
+```
+
+Now users can enable/disable:
+```sql
+SET ml_routing_enabled = on;
+```
+"""
+    }
+
+    def get_guide(self, task_key: str) -> str:
+        """Get technical guidance for a specific task"""
+        # Normalize task key
+        task_key_lower = task_key.lower().strip()
+
+        # Check for exact matches
+        if task_key_lower in self.GUIDES:
+            return self.GUIDES[task_key_lower]
+
+        # Check for partial matches
+        for guide_key, guide_content in self.GUIDES.items():
+            if task_key_lower in guide_key or guide_key in task_key_lower:
+                return guide_content
+
+        return f"# Technical Guide Requested: {task_key}\n\n(No specific guide available - implement using standard practices)"
+
+    def inject_guides_into_prompt(
+        self,
+        base_prompt: str,
+        requirements: TechnicalRequirements
+    ) -> str:
+        """Inject relevant technical guides into experiment prompt"""
+
+        if not requirements.technical_guidance_needed:
+            return base_prompt
+
+        guides_section = "\n\n═══════════════════════════════════════════════════════════════\n"
+        guides_section += "TECHNICAL IMPLEMENTATION GUIDANCE (HOW TO ACCOMPLISH TASKS)\n"
+        guides_section += "═══════════════════════════════════════════════════════════════\n"
+        guides_section += "\nThe following guides provide SPECIFIC implementation details for complex tasks.\n"
+        guides_section += "Follow these guides EXACTLY to accomplish the technical requirements.\n\n"
+
+        # Include all requested guides
+        for guidance_task in requirements.technical_guidance_needed:
+            guide_content = self.get_guide(guidance_task)
+            guides_section += guide_content + "\n\n"
+
+        # Insert guides before "FINAL DELIVERABLE" section
+        if "FINAL DELIVERABLE" in base_prompt:
+            return base_prompt.replace(
+                "═══════════════════════════════════════════════════════════════\nFINAL DELIVERABLE",
+                guides_section + "═══════════════════════════════════════════════════════════════\nFINAL DELIVERABLE"
+            )
+        else:
+            return base_prompt + "\n\n" + guides_section
 
 
 class HypothesisGenerator:
@@ -251,6 +927,7 @@ class HypothesisGenerator:
     async def generate_hypotheses(
         self,
         research_question: str,
+        technical_requirements: Optional[TechnicalRequirements] = None,
         literature_context: Optional[str] = None,
         code_context: Optional[str] = None
     ) -> List[ResearchHypothesis]:
@@ -262,17 +939,53 @@ class HypothesisGenerator:
         if code_context:
             context += f"Code Context: {code_context[:1000]}...\n"
 
+        # Build technical requirements section
+        requirements_text = ""
+        if technical_requirements:
+            requirements_text = f"""
+
+═══════════════════════════════════════════════════════════════
+CRITICAL TECHNICAL REQUIREMENTS (MUST BE INCORPORATED)
+═══════════════════════════════════════════════════════════════
+
+Your hypotheses MUST test these SPECIFIC technical requirements:
+
+Source Code Modifications Required:
+{chr(10).join(f"  ✅ MUST modify: {req}" for req in technical_requirements.source_code_modifications)}
+
+Programming Languages Required:
+{chr(10).join(f"  ✅ MUST use: {lang}" for lang in technical_requirements.programming_languages)}
+
+Execution Engines:
+{chr(10).join(f"  ✅ MUST execute on: {engine}" for engine in technical_requirements.execution_engines)}
+
+Integration Requirements:
+{chr(10).join(f"  ✅ MUST implement: {req}" for req in technical_requirements.integration_requirements)}
+
+Data Collection Requirements:
+{chr(10).join(f"  ✅ MUST collect: {req}" for req in technical_requirements.data_collection_requirements)}
+
+ABSOLUTELY PROHIBITED Shortcuts:
+{chr(10).join(f"  ❌ FORBIDDEN: {prohibition}" for prohibition in technical_requirements.prohibited_shortcuts)}
+
+Your hypotheses MUST test these specific technical requirements.
+Do NOT generate generic hypotheses that avoid these requirements.
+"""
+
         hypothesis_prompt = f"""
         Based on the research question and context, generate 3-5 testable hypotheses.
 
         {context}
+        {requirements_text}
 
         For each hypothesis, provide:
-        1. "statement": Clear, testable hypothesis statement
+        1. "statement": Clear, testable hypothesis statement that directly tests the technical requirements above
         2. "reasoning": Scientific reasoning behind the hypothesis
         3. "testable_predictions": List of specific predictions that can be tested
         4. "success_criteria": Quantitative criteria for validation
         5. "variables": Independent and dependent variables to measure
+
+        IMPORTANT: Each hypothesis MUST incorporate and test the technical requirements specified above.
 
         Respond with JSON array of hypothesis objects.
         """
@@ -659,6 +1372,8 @@ class ExperimentDesigner:
         self,
         hypothesis: ResearchHypothesis,
         num_experiments: int,
+        technical_requirements: Optional[TechnicalRequirements] = None,
+        technical_guide_provider: Optional[TechnicalGuideProvider] = None,
         resources: Optional[Dict[str, Any]] = None,
     ) -> SequentialExperimentPlan:
         """
@@ -668,6 +1383,42 @@ class ExperimentDesigner:
         Instead of designing experiments one-by-one, we design ALL experiments together as
         a cohesive research plan where each experiment can build on previous results.
         """
+
+        # Build technical requirements constraints
+        constraints_text = ""
+        if technical_requirements:
+            constraints_text = f"""
+
+═══════════════════════════════════════════════════════════════
+MANDATORY TECHNICAL REQUIREMENTS
+═══════════════════════════════════════════════════════════════
+
+ALL experiments MUST comply with these requirements:
+
+Source Code Modifications (YOU MUST MODIFY THESE IN YOUR EXPERIMENTS):
+{chr(10).join(f"  ✅ REQUIRED: {req}" for req in technical_requirements.source_code_modifications)}
+
+Programming Languages (YOU MUST USE THESE):
+{chr(10).join(f"  ✅ REQUIRED: {lang}" for lang in technical_requirements.programming_languages)}
+
+Execution Engines (YOU MUST RUN EXPERIMENTS ON ALL OF THESE):
+{chr(10).join(f"  ✅ REQUIRED: {engine}" for engine in technical_requirements.execution_engines)}
+
+Integration Requirements (YOU MUST IMPLEMENT THESE):
+{chr(10).join(f"  ✅ REQUIRED: {req}" for req in technical_requirements.integration_requirements)}
+
+Data Collection (YOU MUST COLLECT THIS SPECIFIC DATA):
+{chr(10).join(f"  ✅ REQUIRED: {req}" for req in technical_requirements.data_collection_requirements)}
+
+ABSOLUTELY PROHIBITED (YOU MUST NOT DO THESE):
+{chr(10).join(f"  ❌ FORBIDDEN: {prohibition}" for prohibition in technical_requirements.prohibited_shortcuts)}
+
+CRITICAL: If your experiment designs violate any of these requirements, they will be REJECTED.
+For example:
+- DO NOT use REST APIs if "no REST APIs" is in prohibited shortcuts
+- DO NOT use synthetic data if "no synthetic data" is in prohibited shortcuts
+- DO NOT skip source code modifications if source code modifications are required
+"""
 
         base_prompt = f"""
         Design a COMPLETE SEQUENTIAL experimental plan with {num_experiments} experiments to test the following hypothesis.
@@ -679,11 +1430,19 @@ class ExperimentDesigner:
         Variables: {hypothesis.variables}
         Success Criteria: {hypothesis.success_criteria}
         Available Resources: {resources or "Standard computational resources"}
+        {constraints_text}
 
         Design {num_experiments} sequential experiments where:
-        - Experiment 1 establishes the baseline and creates initial datasets/code
-        - Experiment 2 builds on Experiment 1's results (refines, extends, or validates)
-        - Experiment 3+ continues the progression (if num_experiments > 2)
+        - Experiment 1 modifies required source code and establishes baseline with required engines
+        - Experiment 2 collects required data types from all required engines
+        - Experiment 3 trains ML model and embeds it in required programming language
+        - Experiment 4+ tests the integrated system end-to-end
+
+        CRITICAL RULES:
+        1. Each experiment MUST explicitly address the technical requirements above
+        2. Use EXACT technologies specified (e.g., if "PostgreSQL vs DuckDB" required, must use both)
+        3. Do NOT use shortcuts that violate prohibited approaches
+        4. Build on previous experiments - reuse installations and code from earlier steps
 
         Provide the sequential plan in JSON format with:
         1. "overall_objective": Overall goal of the experimental sequence
@@ -708,6 +1467,13 @@ class ExperimentDesigner:
 
         Respond with a raw JSON object only (no markdown fences, no commentary, no code blocks).
         """.rstrip()
+
+        # Inject technical guides if available
+        if technical_guide_provider and technical_requirements:
+            base_prompt = technical_guide_provider.inject_guides_into_prompt(
+                base_prompt,
+                technical_requirements
+            )
 
         prompt = base_prompt + "\n\nReturn ONLY a valid JSON object."
         plan_dict: Optional[Dict[str, Any]] = None
@@ -1243,7 +2009,8 @@ Use this structure to keep artifacts organized:
 ═══════════════════════════════════════════════════════════════
 FINAL DELIVERABLE (REQUIRED)
 ═══════════════════════════════════════════════════════════════
-Save a comprehensive final.json in /workspace/experiments/{plan.id}/results/final.json with:
+
+1. Save a comprehensive final.json in /workspace/experiments/{plan.id}/results/final.json with:
 
 {{
   "success": true/false,
@@ -1282,11 +2049,195 @@ Save a comprehensive final.json in /workspace/experiments/{plan.id}/results/fina
     "can_reproduce": true/false,
     "source_repositories": ["URLs of source code used"],
     "build_commands": ["Commands used to build software"],
-    "reproduction_steps": ["Detailed steps to reproduce the entire experiment"]
+    "reproduction_steps": ["Detailed steps to reproduce the entire experiment"],
+    "files_generated": ["List ALL files created during experiment, including README.md"]
   }}
 }}
 
 IMPORTANT: The final.json MUST contain REAL data from actual execution, not synthetic/simulated data.
+
+
+2. Create a detailed README.md in /workspace/experiments/{plan.id}/README.md with COMPLETE reproduction instructions.
+
+The README.md MUST contain ALL of the following sections:
+
+# Experiment Reproduction Guide
+
+## Overview
+[Brief description of what this experiment does and what it proves]
+
+## Experiment ID
+- **Experiment ID**: {plan.id}
+- **Date**: [Execution date]
+- **Status**: [Success/Failed with details]
+
+## Prerequisites
+
+### System Requirements
+- Operating System: [e.g., Ubuntu 20.04]
+- RAM: [e.g., 16GB minimum]
+- Disk Space: [e.g., 50GB free]
+- CPU: [e.g., 4 cores minimum]
+
+### Software Dependencies
+List ALL software with EXACT versions:
+```bash
+- PostgreSQL 16+ (from source)
+- Python 3.9+
+- GCC 11+
+- [List everything you installed]
+```
+
+## Directory Structure
+Show ACTUAL directory structure created:
+```
+/workspace/experiments/{plan.id}/
+├── shared/              # [What's in here]
+├── step_1/             # [What's in here]
+├── step_2/             # [What's in here]
+├── results/            # [What's in here]
+└── README.md
+```
+
+## Step-by-Step Reproduction Instructions
+
+### Step 0: Environment Setup
+EXACT commands to set up environment:
+```bash
+# [Real commands you executed]
+```
+
+### Step 1: [Name]
+**Goal**: [What this does]
+
+**Commands** (EXACT commands executed):
+```bash
+# [Copy actual commands from history]
+```
+
+**Expected Output**:
+```
+[Real output from execution]
+```
+
+**Generated Files**:
+- [List actual files created]
+
+**Verification**:
+```bash
+# [Commands to verify success]
+```
+
+[Repeat for EACH step...]
+
+## Modified Source Code Files
+
+List ALL modified files with EXACT line numbers and changes:
+
+1. **File**: [Path]
+   - **Lines**: [Line numbers]
+   - **Purpose**: [Why modified]
+   - **Changes**:
+     ```c
+     // [Show actual code changes]
+     ```
+
+[Repeat for each file...]
+
+## Data Files Generated
+
+### Training Data
+- **Location**: [Path]
+- **Size**: [Actual size]
+- **Format**: [Format with column names]
+- **Sample**: [Real data sample]
+
+### Model Files
+- **Location**: [Path]
+- **Type**: [Model type]
+- **Size**: [Actual size]
+- **Accuracy**: [Real accuracy]
+
+## Running the Integrated System
+
+After all steps, how to run the complete system:
+```bash
+# [Exact commands to run integrated system]
+```
+
+**Expected Behavior**: [What should happen]
+
+## Verification and Testing
+
+### Verify Source Modifications
+```bash
+# [Commands to verify code was modified]
+```
+
+### Verify Data Collection
+```bash
+# [Commands to verify data was collected]
+```
+
+### Verify Model Embedding
+```bash
+# [Commands to verify model is embedded]
+```
+
+## Results Summary
+
+### Key Findings
+[From final.json conclusions]
+
+### Performance Metrics
+[From final.json measurements]
+
+## Troubleshooting
+
+### Issue 1: [Actual issue encountered]
+```
+Error: [Real error message]
+```
+**Solution**:
+```bash
+# [How you solved it]
+```
+
+[List ALL issues you encountered...]
+
+## Differences from Original Plan
+[Any deviations and why]
+
+## Limitations
+[From final.json analysis.limitations]
+
+## Future Improvements
+[Suggestions for improvements]
+
+## Contact and References
+
+### Source Repositories
+[All repos used with URLs]
+
+### Experiment Metadata
+- **Execution Date**: [Date]
+- **Total Duration**: [Time]
+
+---
+**Note**: This README contains ACTUAL commands and outputs from real execution, not examples.
+
+
+CRITICAL README.md REQUIREMENTS:
+
+1. ✅ README.md MUST be created at /workspace/experiments/{plan.id}/README.md
+2. ✅ Must contain EXACT commands actually executed (not generic examples)
+3. ✅ Must list ALL modified source code files with specific line numbers
+4. ✅ Must show REAL output/logs from execution (not placeholders)
+5. ✅ Must enable anyone to reproduce from scratch
+6. ✅ Must include verification commands for each step
+7. ✅ Must document all deviations from original plan
+8. ✅ Must include troubleshooting for issues encountered
+9. ✅ README.md is MANDATORY - experiments without it are INCOMPLETE
 """
 
         if prior_errors:
@@ -2261,6 +3212,11 @@ class ScientificResearchEngine:
         # Legacy GoalPlan bridge (CodeAct) removed; use V2-only utilities elsewhere
         self.goal_bridge = None
 
+        # NEW: Initialize requirement extraction and validation components
+        self.requirement_extractor = RequirementExtractor(llm_client)
+        self.requirement_validator = RequirementValidator()
+        self.technical_guide_provider = TechnicalGuideProvider()
+
         # Optional GEPA meta-optimizer (requires dspy/gepa packages)
         self.meta_optimizer = None
         self._gepa_enabled = self._to_bool(self._env_or_config("gepa_enabled", "GEPA_ENABLED", False))
@@ -2383,6 +3339,7 @@ class ScientificResearchEngine:
         research_session_id: Optional[str],
         idea_id: str,
         resource_requirements: Optional[Dict[str, Any]] = None,
+        technical_requirements: Optional[TechnicalRequirements] = None,
     ) -> Optional[OpenHandsSessionContext]:
         if not self.openhands_client:
             return None
@@ -2416,6 +3373,7 @@ class ScientificResearchEngine:
                 research_session_id=research_session_id or "global",
                 idea_id=idea_id,
                 resource_requirements=resource_requirements or {},
+                technical_requirements=technical_requirements,
             )
 
             async with self._openhands_session_lock:
@@ -2991,6 +3949,7 @@ class ScientificResearchEngine:
         progress_window: float,
         max_iterations: int,
         openhands_context: Optional[OpenHandsSessionContext],
+        technical_requirements: Optional[TechnicalRequirements] = None,
     ) -> Tuple[float, int]:
         iteration = 0
         max_confidence = 0.0
@@ -3039,9 +3998,57 @@ class ScientificResearchEngine:
                 sequential_plan = await self.experiment_designer.design_sequential_experiments(
                     hypothesis=hypothesis,
                     num_experiments=self.experiments_per_hypothesis,
+                    technical_requirements=technical_requirements,
+                    technical_guide_provider=self.technical_guide_provider,
                 )
                 idea.sequential_plans.append(sequential_plan)
                 idea.experiments.extend(sequential_plan.experiments)  # Also store in experiments list for compatibility
+
+                # VALIDATE PLAN BEFORE EXECUTION
+                if technical_requirements:
+                    is_valid, validation_errors = await self.requirement_validator.validate_experiment_plan(
+                        sequential_plan,
+                        technical_requirements
+                    )
+
+                    if not is_valid:
+                        self.logger.warning(f"Experiment plan validation failed with {len(validation_errors)} errors")
+                        for error in validation_errors:
+                            self.logger.warning(f"  - {error}")
+
+                        # Log validation failure
+                        if session_id and idea.node_id:
+                            await self._log_progress(
+                                session_id,
+                                phase=f"{idea.id}_validation_failed",
+                                progress=iteration_progress + per_iteration_increment * 0.15,
+                                message=f"Experiment plan validation failed - redesigning with stricter constraints",
+                                metadata={
+                                    "parent_id": idea.node_id,
+                                    "node_type": "error",
+                                    "validation_errors": validation_errors[:5],  # First 5 errors
+                                },
+                                parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                            )
+
+                        # Retry with validation errors as feedback
+                        self.logger.info("Retrying experiment design with validation feedback")
+                        sequential_plan = await self.experiment_designer.design_sequential_experiments(
+                            hypothesis=hypothesis,
+                            num_experiments=self.experiments_per_hypothesis,
+                            technical_requirements=technical_requirements,
+                            technical_guide_provider=self.technical_guide_provider,
+                            resources={"validation_feedback": validation_errors},
+                        )
+
+                        # Validate again
+                        is_valid, validation_errors = await self.requirement_validator.validate_experiment_plan(
+                            sequential_plan,
+                            technical_requirements
+                        )
+
+                        if not is_valid:
+                            self.logger.error("Experiment plan still invalid after redesign - proceeding with warnings")
 
                 if session_id and idea.node_id:
                     await self._log_progress(
@@ -3313,6 +4320,23 @@ class ScientificResearchEngine:
                 self.logger.info(
                     f"Sequential plan succeeded on attempt {attempt}: {completed}/{plan.num_experiments} experiments completed"
                 )
+
+                # POST-EXECUTION VALIDATION: Validate execution results against technical requirements
+                if hasattr(self, 'requirement_validator') and session_context and session_context.technical_requirements:
+                    self.logger.info("Performing post-execution validation against technical requirements")
+                    for execution in executions:
+                        is_valid, validation_errors = await self.requirement_validator.validate_execution_results(
+                            execution,
+                            session_context.technical_requirements
+                        )
+                        if not is_valid:
+                            self.logger.warning(f"Execution {execution.id} has {len(validation_errors)} requirement violations")
+                            execution.errors.extend(validation_errors)
+                            # Mark as failed if there are critical violations (marked with ❌)
+                            if any("❌" in error for error in validation_errors):
+                                execution.status = ExperimentStatus.FAILED
+                                self.logger.error(f"Execution {execution.id} marked as FAILED due to requirement violations")
+
                 # Archive successful workspaces if configured
                 for execution in executions:
                     if execution.status == ExperimentStatus.COMPLETED and session_context:
@@ -3340,6 +4364,22 @@ class ScientificResearchEngine:
                 self.logger.warning(
                     f"Sequential plan attempt {attempt} had failures, retrying... ({completed}/{plan.num_experiments} succeeded)"
                 )
+
+        # POST-EXECUTION VALIDATION: Validate final attempt results against technical requirements
+        if hasattr(self, 'requirement_validator') and session_context and session_context.technical_requirements:
+            self.logger.info("Performing post-execution validation on final attempt against technical requirements")
+            for execution in all_executions:
+                is_valid, validation_errors = await self.requirement_validator.validate_execution_results(
+                    execution,
+                    session_context.technical_requirements
+                )
+                if not is_valid:
+                    self.logger.warning(f"Execution {execution.id} has {len(validation_errors)} requirement violations")
+                    execution.errors.extend(validation_errors)
+                    # Mark as failed if there are critical violations (marked with ❌)
+                    if any("❌" in error for error in validation_errors):
+                        execution.status = ExperimentStatus.FAILED
+                        self.logger.error(f"Execution {execution.id} marked as FAILED due to requirement violations")
 
         # Return the last attempt's executions even if not all succeeded
         self.logger.error(
@@ -3561,6 +4601,7 @@ Return JSON only.
         include_literature: bool,
         include_code: bool,
         enable_iteration: bool,
+        technical_requirements: Optional[TechnicalRequirements] = None,
     ) -> ResearchIdea:
         async with semaphore:
             progress_window = 45.0 / max(1, total)
@@ -3572,6 +4613,7 @@ Return JSON only.
                     research_session_id=session_id,
                     idea_id=idea.id,
                     resource_requirements=self.default_openhands_resources,
+                    technical_requirements=technical_requirements,
                 )
             except Exception as exc:
                 self.logger.warning(
@@ -3598,6 +4640,7 @@ Return JSON only.
 
                 hypotheses = await self.hypothesis_generator.generate_hypotheses(
                     research_question,
+                    technical_requirements=technical_requirements,
                     literature_context=literature_context,
                     code_context=code_context,
                 )
@@ -3640,6 +4683,7 @@ Return JSON only.
                     progress_window * 0.45,
                     max_iterations,
                     openhands_context,
+                    technical_requirements,
                 )
 
                 idea.confidence_score = confidence
@@ -3661,7 +4705,8 @@ Return JSON only.
         include_literature_review: bool = True,
         include_code_analysis: bool = True,
         enable_iteration: bool = True,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        technical_requirements: Optional[TechnicalRequirements] = None
     ) -> ScientificResearchResult:
         """Conduct comprehensive scientific research
 
@@ -3678,15 +4723,23 @@ Return JSON only.
             include_literature_review: Whether to conduct literature review
             include_code_analysis: Whether to analyze existing code implementations
             enable_iteration: Whether to enable iterative refinement
+            session_id: Optional session ID for tracking
+            technical_requirements: Optional pre-extracted technical requirements
 
         Returns:
             Comprehensive scientific research result
         """
         include_code_analysis = False
         include_literature_review = False
-        
+
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
+
+        # Extract technical requirements if not provided
+        if technical_requirements is None:
+            self.logger.info("Extracting technical requirements from research question")
+            technical_requirements = await self.requirement_extractor.extract_requirements(research_question)
+            self.logger.info(f"Extracted requirements: {technical_requirements.to_dict()}")
 
         # Register experiment with experiment manager
         experiment_manager = get_experiment_manager()
@@ -3732,7 +4785,8 @@ Return JSON only.
             publication_draft="",
             iteration_count=0,
             recommendations=[],
-            debates=[]
+            debates=[],
+            technical_requirements=technical_requirements
         )
 
         enable_iteration = bool(enable_iteration and self.config.get("enable_iteration", True))
@@ -3758,6 +4812,7 @@ Return JSON only.
                         include_literature_review,
                         include_code_analysis,
                         enable_iteration,
+                        technical_requirements,
                     )
                     for idx, idea in enumerate(ideas)
                 ]
