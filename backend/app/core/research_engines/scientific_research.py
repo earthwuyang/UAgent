@@ -715,11 +715,11 @@ class ExperimentDesigner:
         last_error: Optional[Exception] = None
 
         for attempt in range(1, self.max_json_retries + 1):
-            # Cap max_tokens to model limit (65536) even for multiple experiments
-            sequential_max_tokens = min(self.max_generation_tokens * 2, 65536)
+            # Use max_generation_tokens directly - don't multiply to avoid exceeding model limits
+            # Different models have different max_tokens limits (8192 for some, 65536 for others)
             response = await self.llm_client.generate(
                 prompt,
-                max_tokens=sequential_max_tokens,
+                max_tokens=self.max_generation_tokens,
                 temperature=0.3 if attempt > 1 else 0.4,
             )
             raw = str(response or "").strip()
