@@ -2238,6 +2238,40 @@ CRITICAL README.md REQUIREMENTS:
 7. ✅ Must document all deviations from original plan
 8. ✅ Must include troubleshooting for issues encountered
 9. ✅ README.md is MANDATORY - experiments without it are INCOMPLETE
+
+
+═══════════════════════════════════════════════════════════════
+3. COMPLETION REQUIREMENT (MANDATORY - DO NOT SKIP)
+═══════════════════════════════════════════════════════════════
+
+After you have successfully saved BOTH final.json and README.md, you MUST call the finish action to signal completion:
+
+<function=finish>
+<parameter=outputs>
+{{
+  "final_json_path": "/workspace/experiments/{plan.id}/results/final.json",
+  "readme_path": "/workspace/experiments/{plan.id}/README.md",
+  "success": true,
+  "summary": "Brief 1-2 sentence summary of experiment results and key findings"
+}}
+</parameter>
+</function>
+
+CRITICAL: Calling the finish action is REQUIRED to mark the experiment as successfully completed.
+
+⚠️  WITHOUT calling finish, the experiment will be marked as FAILED even if final.json shows success=true.
+⚠️  The finish action is your way of telling the system "I am done, and here are the results".
+⚠️  Do NOT continue working after calling finish - the finish action terminates the experiment.
+
+WHEN TO CALL FINISH:
+✅ Call finish AFTER both final.json and README.md have been created
+✅ Call finish AFTER you have verified the files exist and contain correct data
+✅ Call finish even if you encountered some errors - include them in final.json
+
+WHEN NOT TO CALL FINISH:
+❌ Do NOT call finish if final.json creation failed
+❌ Do NOT call finish if README.md creation failed
+❌ Do NOT call finish if you are still working on the experiment
 """
 
         if prior_errors:
@@ -2356,12 +2390,96 @@ Adjust your approach based on these errors. Try alternative methods if the previ
             comprehensive_execution.output_data.update(data_result or {})
 
             # Check if execution was successful
+            self.logger.info("=" * 80)
+            self.logger.info("🔍 EXPERIMENT SUCCESS DETECTION - Starting analysis")
+            self.logger.info("=" * 80)
+
             success_flag = False
             if data_result:
+                self.logger.info(f"📊 data_result received: {bool(data_result)}")
+                self.logger.info(f"  - Has 'success' field: {'success' in data_result}")
+                self.logger.info(f"  - success value: {data_result.get('success')}")
+                self.logger.info(f"  - Has 'measurements': {bool(data_result.get('measurements'))}")
+                self.logger.info(f"  - Has 'error': {'error' in data_result}")
+
                 if "success" in data_result:
                     success_flag = bool(data_result["success"])
+                    self.logger.info(f"✅ Method 1: Detected success via data_result['success'] = {success_flag}")
                 elif data_result.get("measurements"):
                     success_flag = True
+                    self.logger.info("✅ Method 1: Detected success via data_result['measurements'] presence")
+            else:
+                self.logger.info("⚠️  data_result is empty/None - agent may not have called finish action")
+
+            # FALLBACK: If agent didn't return success, check filesystem for final.json
+            # This handles cases where agent creates final.json but doesn't call finish action
+            if not success_flag and workspace_path:
+                self.logger.info("-" * 80)
+                self.logger.info("🔍 Method 2: FALLBACK - Checking filesystem for final.json")
+                self.logger.info(f"  Workspace path: {workspace_path}")
+                self.logger.info(f"  Experiment plan ID: {plan.id}")
+
+                # Try multiple potential paths for final.json
+                potential_paths = [
+                    workspace_path / "results" / "final.json",
+                    workspace_path / "experiments" / plan.id / "results" / "final.json",
+                ]
+
+                # Also search for any final.json in experiments subdirectories
+                try:
+                    if (workspace_path / "experiments").exists():
+                        for exp_dir in (workspace_path / "experiments").iterdir():
+                            if exp_dir.is_dir():
+                                potential_paths.append(exp_dir / "results" / "final.json")
+                except Exception as e:
+                    self.logger.debug(f"Error scanning experiments directory: {e}")
+
+                self.logger.info(f"  Checking {len(potential_paths)} potential paths:")
+                for i, path in enumerate(potential_paths, 1):
+                    self.logger.info(f"    {i}. {path} (exists: {path.exists()})")
+
+                # Check each path for valid final.json
+                for final_json_path in potential_paths:
+                    if final_json_path.exists():
+                        try:
+                            self.logger.info(f"✅ Found final.json at: {final_json_path}")
+                            with open(final_json_path, "r") as f:
+                                final_json_content = json.load(f)
+
+                            # Check if final.json indicates success
+                            if final_json_content.get("success") is True:
+                                self.logger.info("✅ final.json shows success=true - marking experiment as successful (fallback detection)")
+                                success_flag = True
+
+                                # Update data_result with the parsed final.json
+                                if not data_result:
+                                    data_result = {}
+                                data_result.update(final_json_content)
+                                data_result["_success_detection_method"] = "filesystem_fallback"
+
+                                comprehensive_execution.output_data.update(data_result)
+                                comprehensive_execution.logs.append(
+                                    f"Success detected via filesystem fallback (final.json at {final_json_path})"
+                                )
+                                break
+                            else:
+                                self.logger.info(f"Found final.json at {final_json_path} but success={final_json_content.get('success')}")
+                        except json.JSONDecodeError as e:
+                            self.logger.warning(f"Failed to parse final.json at {final_json_path}: {e}")
+                        except Exception as e:
+                            self.logger.warning(f"Error reading final.json at {final_json_path}: {e}")
+
+                if not success_flag:
+                    self.logger.info("⚠️  No valid final.json with success=true found in any checked path")
+
+            # Final verdict
+            self.logger.info("=" * 80)
+            self.logger.info(f"🎯 FINAL VERDICT: Experiment {'SUCCEEDED' if success_flag else 'FAILED'}")
+            if data_result and "_success_detection_method" in data_result:
+                self.logger.info(f"  Detection method: {data_result['_success_detection_method']}")
+            elif success_flag and data_result:
+                self.logger.info("  Detection method: agent_finish_action")
+            self.logger.info("=" * 80)
 
             if not success_flag:
                 comprehensive_execution.status = ExperimentStatus.FAILED

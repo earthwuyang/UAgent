@@ -325,6 +325,17 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
             "OH_DISABLE_SECURITY": "true",
             "DEFAULT_ACTION_SECURITY_RISK": "LOW",
             "FORCE_ACTION_SECURITY_RISK": "LOW",
+
+            # Headless/non-interactive mode settings - prevent waiting for user input
+            "OPENHANDS_HEADLESS": os.getenv("OPENHANDS_HEADLESS", "true"),
+            "OPENHANDS_NON_INTERACTIVE": "true",
+            "OPENHANDS_AUTO_CONTINUE": "true",
+            "OPENHANDS_SKIP_USER_INPUT": "true",
+            "OPENHANDS_BATCH_MODE": "true",
+            "CLI_MODE": "false",
+            "INTERACTIVE": "false",
+            "NON_INTERACTIVE": "true",
+            "HEADLESS": "true",
         }
 
         # Simple LLM configuration - prioritize user config, then .env, then bashrc, then fallbacks
@@ -418,6 +429,12 @@ Create the directory experiments/{cfg.session_name}/results/ if needed. This fin
         env.setdefault("MAX_TOKENS", os.getenv("MAX_TOKENS", "4096"))
         # Some libraries check these OpenAI-style envs for defaults
         env.setdefault("OPENAI_MAX_TOKENS", os.getenv("OPENAI_MAX_TOKENS", env["MAX_TOKENS"]))
+
+        # Log headless mode configuration
+        headless_enabled = env.get("OPENHANDS_HEADLESS", "false").lower() == "true"
+        logger.info(f"OpenHands headless mode: {'ENABLED' if headless_enabled else 'DISABLED'}")
+        if headless_enabled:
+            logger.info("Agent will NOT wait for user input - auto-continuing on all prompts")
 
         # Create OpenHands config file to force CLI runtime (no Docker!)
         config_content = f"""[core]
