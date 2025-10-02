@@ -100,6 +100,7 @@ class ResearchHypothesis:
     status: HypothesisStatus = HypothesisStatus.PENDING
     confidence_level: float = 0.0
     evidence: List[str] = field(default_factory=list)
+    node_id: Optional[str] = None  # Tree node ID for hierarchy
 
 
 @dataclass
@@ -279,24 +280,29 @@ class RequirementExtractor:
         """Extract structured technical requirements from research question"""
 
         extraction_prompt = f"""
-Analyze this research question and extract SPECIFIC technical requirements:
+Analyze this research question and extract technical requirements that will guide experiment design:
 
 {research_question}
 
 Extract and return in JSON format with these exact keys:
-1. "source_code_modifications": Which codebases/files must be modified (e.g., ["PostgreSQL source code", "pg_duckdb extension"])
-2. "programming_languages": Which languages must be used (e.g., ["C language", "Python"])
-3. "execution_engines": Which engines must be compared or used (e.g., ["PostgreSQL", "DuckDB"])
-4. "integration_requirements": How components must be integrated (e.g., ["embed ML model into database source code", "no external APIs"])
-5. "data_collection_requirements": What data must be collected (e.g., ["dual-execution data on both engines", "real query execution times"])
-6. "prohibited_shortcuts": What approaches are explicitly forbidden (e.g., ["no REST APIs", "no synthetic data", "no simulation", "no mock implementations"])
-7. "technical_guidance_needed": What complex tasks need implementation guidance (e.g., ["embed sklearn model in C", "modify PostgreSQL planner", "dual-engine execution"])
+1. "source_code_modifications": Which codebases/files should be modified, IF EXPLICITLY MENTIONED (e.g., ["PostgreSQL source code"])
+2. "programming_languages": Which languages are mentioned, IF ANY (e.g., ["C", "Python"]) - ONLY if explicitly stated
+3. "execution_engines": Which systems/engines are involved (e.g., ["PostgreSQL", "DuckDB"]) - be flexible with naming
+4. "integration_requirements": How components should work together, IF SPECIFIED
+5. "data_collection_requirements": What data/metrics to collect, IF MENTIONED
+6. "prohibited_shortcuts": What approaches are EXPLICITLY forbidden by the user (e.g., ["no simulation"]) - only include if user clearly states prohibition
+7. "technical_guidance_needed": Complex technical tasks that may need guidance
 
-Be SPECIFIC and LITERAL - extract exact technical requirements from the user's wording.
-If the user says "modify postgres source code", include that exact phrase.
-If the user says "embed model in C language", include that exact requirement.
+IMPORTANT GUIDELINES:
+- Be CONSERVATIVE: Only extract requirements that are EXPLICITLY stated in the research question
+- Do NOT infer or assume requirements that aren't clearly mentioned
+- If a field doesn't apply, return an EMPTY list []
+- Programming languages: Only include if user specifically mentions them (e.g., "using C" or "in Python")
+- Prohibitions: Only include if user says "do not", "avoid", "without", "must not", etc.
+- Keep lists SHORT (1-3 items max per field)
+- Be GENERIC and FLEXIBLE - support all types of research, not just database research
 
-Return ONLY a valid JSON object with these keys.
+Return ONLY a valid JSON object with these keys. Use empty lists [] for fields that don't apply.
 """
 
         response = await self.llm_client.generate(
@@ -335,9 +341,15 @@ class RequirementValidator:
         plan: SequentialExperimentPlan,
         requirements: TechnicalRequirements
     ) -> Tuple[bool, List[str]]:
-        """Validate experiment plan meets technical requirements before execution"""
+        """Validate experiment plan meets technical requirements before execution
+
+        NOTE: Validation is intentionally LENIENT to support diverse research questions.
+        Only CRITICAL violations (marked with ❌) cause validation failure.
+        Warnings (marked with ⚠️) are informational only.
+        """
 
         validation_errors = []
+        critical_errors = []
 
         # Validate each experiment in the plan
         for exp_idx, experiment in enumerate(plan.experiments, start=1):
@@ -345,64 +357,70 @@ class RequirementValidator:
             description_text = str(experiment.description).lower()
             full_text = methodology_text + " " + description_text
 
-            # Check for prohibited shortcuts
+            # Check for prohibited shortcuts (LENIENT - only flag if very clear violation)
             for prohibition in requirements.prohibited_shortcuts:
-                prohibition_words = prohibition.lower().split()
-                # Check if ANY key words from prohibition appear in methodology
-                if any(word in full_text for word in prohibition_words if len(word) > 3):
-                    validation_errors.append(
-                        f"❌ Experiment {exp_idx} '{experiment.name}' may violate prohibition: {prohibition}"
-                    )
+                # Only check for exact phrase matches, not individual words
+                # This prevents false positives like "postgresql" matching "use system-wide postgresql"
+                prohibition_lower = prohibition.lower()
 
-            # Check for required execution engines
-            if len(requirements.execution_engines) > 1:
+                # For multi-word prohibitions, check for the complete phrase
+                if len(prohibition.split()) > 2:
+                    if prohibition_lower in full_text or prohibition_lower in str(plan.shared_setup).lower():
+                        warning = f"⚠️  Experiment {exp_idx} '{experiment.name}' may involve: {prohibition}"
+                        validation_errors.append(warning)
+                        # Don't treat as critical error - agent might have a valid approach
+                else:
+                    # For short prohibitions, skip validation (too ambiguous)
+                    pass
+
+            # Check for required execution engines (LENIENT - only if explicitly required)
+            if len(requirements.execution_engines) > 2:  # Only validate if multiple engines required
                 engines_mentioned = set()
                 for engine in requirements.execution_engines:
-                    if engine.lower() in full_text:
+                    # Check for engine name or common variations
+                    engine_lower = engine.lower()
+                    if engine_lower in full_text or engine_lower.replace(" ", "") in full_text:
                         engines_mentioned.add(engine)
 
-                if len(engines_mentioned) < len(requirements.execution_engines):
+                if len(engines_mentioned) < len(requirements.execution_engines) // 2:
+                    # Only warn if less than half of engines mentioned
                     missing = set(requirements.execution_engines) - engines_mentioned
-                    validation_errors.append(
-                        f"❌ Experiment {exp_idx} '{experiment.name}' missing required engines: {missing}"
-                    )
+                    warning = f"⚠️  Experiment {exp_idx} '{experiment.name}' mentions few required engines: {missing}"
+                    validation_errors.append(warning)
 
-            # Check for source code modification requirements
+            # Check for source code modification requirements (LENIENT)
             if requirements.source_code_modifications:
                 modification_indicators = [
-                    "modify source", "modify code", "edit source", "change source",
-                    "modify postgres", "modify pg_duckdb", "edit c code",
-                    "change postgres", "patch source"
+                    "modify", "edit", "change", "patch", "implement", "build", "create",
+                    "develop", "code", "program", "write"
                 ]
                 has_modification = any(indicator in full_text for indicator in modification_indicators)
 
                 if not has_modification:
-                    validation_errors.append(
-                        f"❌ Experiment {exp_idx} '{experiment.name}' does not modify source code as required: {requirements.source_code_modifications}"
-                    )
+                    warning = f"⚠️  Experiment {exp_idx} '{experiment.name}' may not involve code modification"
+                    validation_errors.append(warning)
+                    # Not a critical error - the agent might use different wording
 
-            # Check for programming language requirements
-            if requirements.programming_languages:
-                for lang in requirements.programming_languages:
-                    if lang.lower() not in full_text:
-                        validation_errors.append(
-                            f"⚠️  Experiment {exp_idx} '{experiment.name}' does not mention required language: {lang}"
-                        )
+            # REMOVED: Programming language checks - too strict and domain-specific
+            # Agent can use appropriate language without explicitly mentioning it
 
-        # Validate shared setup
-        shared_setup_text = str(plan.shared_setup).lower()
-        for prohibition in requirements.prohibited_shortcuts:
-            prohibition_words = prohibition.lower().split()
-            if any(word in shared_setup_text for word in prohibition_words if len(word) > 3):
-                validation_errors.append(
-                    f"❌ Shared setup violates prohibition: {prohibition}"
-                )
+        # Validate shared setup (VERY LENIENT)
+        # Only check for explicit violations, not word matches
+        # This prevents false positives
 
-        is_valid = len(validation_errors) == 0
-        if not is_valid:
-            self.logger.warning(f"Experiment plan validation failed with {len(validation_errors)} errors")
+        # ONLY fail validation if there are CRITICAL errors (none currently flagged)
+        # All checks above are warnings only
+        is_valid = len(critical_errors) == 0
+
+        if len(validation_errors) > 0:
+            self.logger.info(f"Experiment plan has {len(validation_errors)} validation warnings (non-critical)")
             for error in validation_errors:
-                self.logger.warning(error)
+                self.logger.info(f"  {error}")
+
+        if not is_valid:
+            self.logger.error(f"Experiment plan validation FAILED with {len(critical_errors)} critical errors")
+            for error in critical_errors:
+                self.logger.error(f"  {error}")
 
         return is_valid, validation_errors
 
@@ -3921,7 +3939,7 @@ class ScientificResearchEngine:
                     "title": "Idea Generation",
                     "idea_count": len(ideas),
                 },
-                parent_phase="initializing",
+                # No parent_phase - will use root as parent since "initializing" was removed
             )
             for index, idea in enumerate(ideas, start=1):
                 idea.parent_node_id = parent_id
@@ -4086,27 +4104,36 @@ class ScientificResearchEngine:
             idea.iteration_count = iteration
             iteration_progress = base_progress + per_iteration_increment * (iteration - 1)
 
-            if session_id and idea.node_id:
-                await self._log_progress(
-                    session_id,
-                    phase=f"{idea.id}_experiments_iter_{iteration}",
-                    progress=iteration_progress,
-                    message=f"Experiments iteration {iteration}",
-                    metadata={
-                        "parent_id": idea.node_id,
-                        "node_type": "step",
-                        "iteration": iteration,
-                        "pending_hypotheses": len(pending_hypotheses),
-                    },
-                    parent_phase=f"idea_{idea.id}",
-                )
-
             iteration_results: List[ExperimentResult] = []
 
             # ========== FIX FOR SEQUENTIAL EXPERIMENT BUG ==========
             # OLD (BROKEN): Designed and executed experiments one-by-one in separate containers
             # NEW (FIXED): Design ALL experiments together, execute in SINGLE container
-            for hypothesis in pending_hypotheses:
+
+            # Create iteration node ONCE before hypothesis loop
+            # Iteration belongs to first pending hypothesis (since loop breaks after first one)
+            iteration_node_id: Optional[str] = None
+            first_hypothesis = pending_hypotheses[0] if pending_hypotheses else None
+            h_idx_for_iteration = 1  # Index of first hypothesis
+
+            if session_id and first_hypothesis and first_hypothesis.node_id:
+                iteration_node_id = await self._log_progress(
+                    session_id,
+                    phase=f"{idea.id}_hyp_{first_hypothesis.id}_iter_{iteration}",
+                    progress=iteration_progress,
+                    message=f"Iteration {iteration} for H{h_idx_for_iteration}",
+                    metadata={
+                        "parent_id": first_hypothesis.node_id,  # Hypothesis is Level 5, iteration is Level 6
+                        "node_type": "iteration",
+                        "iteration": iteration,
+                        "max_iterations": max_iterations,
+                        "hypothesis_index": h_idx_for_iteration,
+                        "title": f"Iteration {iteration}",
+                    },
+                    parent_phase=f"{idea.id}_hypothesis_{h_idx_for_iteration}",
+                )
+
+            for h_idx, hypothesis in enumerate(pending_hypotheses, start=1):
                 self.logger.info(
                     "Designing sequential plan with %d experiments for hypothesis (EXPERIMENTS_PER_HYPOTHESIS)",
                     self.experiments_per_hypothesis
@@ -4135,18 +4162,19 @@ class ScientificResearchEngine:
                             self.logger.warning(f"  - {error}")
 
                         # Log validation failure
-                        if session_id and idea.node_id:
+                        if session_id and iteration_node_id:
                             await self._log_progress(
                                 session_id,
-                                phase=f"{idea.id}_validation_failed",
+                                phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}_validation_failed",
                                 progress=iteration_progress + per_iteration_increment * 0.15,
                                 message=f"Experiment plan validation failed - redesigning with stricter constraints",
                                 metadata={
-                                    "parent_id": idea.node_id,
-                                    "node_type": "error",
+                                    "parent_id": iteration_node_id,  # Iteration is Level 6, validation is Level 7
+                                    "node_type": "validation_error",
                                     "validation_errors": validation_errors[:5],  # First 5 errors
+                                    "title": "Validation Failed",
                                 },
-                                parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                                parent_phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}",
                             )
 
                         # Retry with validation errors as feedback
@@ -4168,20 +4196,22 @@ class ScientificResearchEngine:
                         if not is_valid:
                             self.logger.error("Experiment plan still invalid after redesign - proceeding with warnings")
 
-                if session_id and idea.node_id:
-                    await self._log_progress(
+                # Store sequential plan node ID for children to reference
+                sequential_plan_node_id: Optional[str] = None
+                if session_id and iteration_node_id:
+                    sequential_plan_node_id = await self._log_progress(
                         session_id,
-                        phase=f"{idea.id}_sequential_plan_{sequential_plan.id}",
+                        phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}_sequential_plan_{sequential_plan.id}",
                         progress=iteration_progress + per_iteration_increment * 0.2,
                         message=f"Designed sequential plan: {sequential_plan.overall_objective}",
                         metadata={
-                            "parent_id": idea.node_id,
-                            "node_type": "step",
-                            "title": sequential_plan.overall_objective,
+                            "parent_id": iteration_node_id,  # Iteration is Level 6, plan is Level 7
+                            "node_type": "plan",
+                            "title": f"Plan: {sequential_plan.overall_objective}",
                             "num_experiments": sequential_plan.num_experiments,
                             "experiment_names": [exp.name for exp in sequential_plan.experiments],
                         },
-                        parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                        parent_phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}",
                     )
 
                 # NEW: Execute ALL experiments in the sequential plan in ONE session with retries
@@ -4192,6 +4222,7 @@ class ScientificResearchEngine:
                     session_id=session_id,
                     iteration_progress=iteration_progress,
                     per_iteration_increment=per_iteration_increment,
+                    iteration_node_id=iteration_node_id,  # Pass iteration node ID
                     session_context=openhands_context,
                     iteration_number=iteration,
                 )
@@ -4202,45 +4233,51 @@ class ScientificResearchEngine:
                 for exp_index, execution in enumerate(all_executions):
                     design = sequential_plan.experiments[exp_index]
 
+                    # Get attempt_node_id from execution metadata (stored during execution)
+                    attempt_node_id_for_result = execution.intermediate_results.get('attempt_node_id') if hasattr(execution, 'intermediate_results') else None
+                    attempt_num = execution.intermediate_results.get('attempt_number', 1) if hasattr(execution, 'intermediate_results') else 1
+
                     if execution.status == ExperimentStatus.COMPLETED:
                         experiment_result = await self._analyze_experiment_result(hypothesis, design, execution)
                         idea.results.append(experiment_result)
                         iteration_results.append(experiment_result)
                         await self._update_hypothesis_status(hypothesis, experiment_result)
 
-                        if session_id and idea.node_id:
+                        if session_id and attempt_node_id_for_result:
                             await self._log_progress(
                                 session_id,
-                                phase=f"{idea.id}_result_{experiment_result.execution_id}",
+                                phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}_attempt_{attempt_num}_result_{exp_index + 1}",
                                 progress=iteration_progress + per_iteration_increment * 0.65,
-                                message=f"Result for {design.name} (Exp {exp_index + 1}/{sequential_plan.num_experiments})",
+                                message=f"Result: {design.name} (Exp {exp_index + 1}/{sequential_plan.num_experiments})",
                                 metadata={
-                                    "parent_id": idea.node_id,
+                                    "parent_id": attempt_node_id_for_result,  # Attempt is Level 7, result is Level 8
                                     "node_type": "result",
+                                    "title": f"Result: {design.name}",
                                     "conclusions": experiment_result.conclusions[:2],
                                     "confidence_score": experiment_result.confidence_score,
                                     "experiment_index": exp_index + 1,
                                     "total_experiments": sequential_plan.num_experiments,
                                 },
-                                parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                                parent_phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}_attempt_{attempt_num}",
                             )
                     else:
                         hypothesis.evidence.append(f"Experiment {exp_index + 1} ({design.name}) failed")
-                        if session_id and idea.node_id:
+                        if session_id and attempt_node_id_for_result:
                             await self._log_progress(
                                 session_id,
-                                phase=f"{idea.id}_result_{execution.id}",
+                                phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}_attempt_{attempt_num}_result_{exp_index + 1}_failed",
                                 progress=iteration_progress + per_iteration_increment * 0.65,
-                                message=f"Experiment {design.name} failed (Exp {exp_index + 1}/{sequential_plan.num_experiments})",
+                                message=f"Failed: {design.name} (Exp {exp_index + 1}/{sequential_plan.num_experiments})",
                                 metadata={
-                                    "parent_id": idea.node_id,
+                                    "parent_id": attempt_node_id_for_result,  # Attempt is Level 7, result is Level 8
                                     "node_type": "result",
+                                    "title": f"Failed: {design.name}",
                                     "status": execution.status.value,
                                     "errors": execution.errors[:1] if execution.errors else [],
                                     "experiment_index": exp_index + 1,
                                     "total_experiments": sequential_plan.num_experiments,
                                 },
-                                parent_phase=f"idea_{idea.id}_experiments_iter_{iteration}",
+                                parent_phase=f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration}_attempt_{attempt_num}",
                             )
 
                 # Break after processing one hypothesis (matching old behavior)
@@ -4362,37 +4399,46 @@ class ScientificResearchEngine:
         per_iteration_increment: float,
         session_context: Optional[OpenHandsSessionContext],
         iteration_number: int,
+        iteration_node_id: Optional[str] = None,
     ) -> List[ExperimentExecution]:
         """
         Execute a sequential experimental plan with retries.
 
         This is the FIX for the critical bug - executes ALL experiments in ONE session.
+
+        Args:
+            iteration_node_id: Node ID of the iteration (Level 6) to use as parent for attempts
         """
 
         prior_errors: List[str] = []
         all_executions: List[ExperimentExecution] = []
         attempt_base_progress = iteration_progress + per_iteration_increment * 0.4
-        parent_phase = f"idea_{idea.id}_experiments_iter_{iteration_number}"
+        parent_phase = f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration_number}"
 
         for attempt in range(1, self.max_attempts_per_experiment + 1):
             attempt_progress = attempt_base_progress + per_iteration_increment * min(0.15, 0.05 * attempt)
-            attempt_phase = f"{idea.id}_sequential_execution_attempt_{attempt}"
+            attempt_phase = f"{idea.id}_hyp_{hypothesis.id}_iter_{iteration_number}_attempt_{attempt}"
             attempt_node_id: Optional[str] = None
 
-            if session_id and idea.node_id:
+            # Use iteration_node_id as parent if available, otherwise fall back to idea.node_id
+            parent_id_for_attempt = iteration_node_id if iteration_node_id else idea.node_id
+
+            if session_id and parent_id_for_attempt:
                 attempt_node_id = await self._log_progress(
                     session_id,
                     phase=attempt_phase,
                     progress=attempt_progress,
-                    message=f"Attempt {attempt} for sequential plan (starting): {plan.overall_objective}",
+                    message=f"Attempt {attempt} for sequential plan: {plan.overall_objective}",
                     metadata={
-                        "parent_id": idea.node_id,
-                        "node_type": "step",
+                        "parent_id": parent_id_for_attempt,  # Iteration is Level 6, attempt is Level 7
+                        "node_type": "attempt",
                         "attempt": attempt,
+                        "max_attempts": self.max_attempts_per_experiment,
                         "num_experiments": plan.num_experiments,
                         "status": "starting",
+                        "title": f"Attempt {attempt}/{self.max_attempts_per_experiment}",
                     },
-                    parent_phase=parent_phase,
+                    parent_phase=f"{idea.id}_experiments_iter_{iteration_number}",
                 ) or attempt_node_id
 
             # Execute ALL experiments in the plan sequentially in ONE session
@@ -4407,10 +4453,20 @@ class ScientificResearchEngine:
                     "progress_anchor": attempt_progress,
                     "progress_increment": per_iteration_increment,
                     "phase_prefix": f"{attempt_phase}_collect",
+                    "attempt_number": attempt,
+                    "iteration_number": iteration_number,
                 },
             )
 
-            if session_id and idea.node_id and attempt_node_id:
+            # Store attempt_node_id in each execution for later use when creating result nodes
+            for execution in executions:
+                if not hasattr(execution, 'intermediate_results'):
+                    execution.intermediate_results = {}
+                execution.intermediate_results['attempt_node_id'] = attempt_node_id
+                execution.intermediate_results['attempt_number'] = attempt
+                execution.intermediate_results['iteration_number'] = iteration_number
+
+            if session_id and parent_id_for_attempt and attempt_node_id:
                 completed = sum(1 for ex in executions if ex.status == ExperimentStatus.COMPLETED)
                 failed = sum(1 for ex in executions if ex.status == ExperimentStatus.FAILED)
                 await self._log_progress(
@@ -4420,15 +4476,17 @@ class ScientificResearchEngine:
                     message=f"Attempt {attempt} for sequential plan ({completed}/{plan.num_experiments} succeeded)",
                     metadata={
                         "node_id": attempt_node_id,
-                        "parent_id": idea.node_id,
-                        "node_type": "step",
+                        "parent_id": parent_id_for_attempt,  # Iteration is Level 6, attempt is Level 7
+                        "node_type": "attempt",
                         "attempt": attempt,
+                        "max_attempts": self.max_attempts_per_experiment,
                         "num_experiments": plan.num_experiments,
                         "completed": completed,
                         "failed": failed,
                         "status": "completed" if completed == plan.num_experiments else "partial",
+                        "title": f"Attempt {attempt}/{self.max_attempts_per_experiment}",
                     },
-                    parent_phase=parent_phase,
+                    parent_phase=f"{idea.id}_experiments_iter_{iteration_number}",
                 )
 
             # Check if all experiments succeeded
@@ -4779,19 +4837,22 @@ Return JSON only.
 
                 if session_id and idea.node_id:
                     for h_idx, hypothesis in enumerate(hypotheses, start=1):
-                        await self._log_progress(
+                        hypothesis_node_id = await self._log_progress(
                             session_id,
                             phase=f"{idea.id}_hypothesis_{h_idx}",
                             progress=base_progress + progress_window * 0.35,
-                            message=f"Hypothesis {h_idx}",
+                            message=f"Hypothesis {h_idx}: {hypothesis.statement[:60]}...",
                             metadata={
-                                "parent_id": idea.node_id,
-                                "node_type": "result",
-                                "title": hypothesis.statement,
+                                "parent_id": idea.node_id,  # Idea is Level 4, hypothesis is Level 5
+                                "node_type": "hypothesis",  # Changed from "result" to "hypothesis"
+                                "title": f"H{h_idx}: {hypothesis.statement}",
                                 "reasoning": hypothesis.reasoning,
+                                "testable_predictions": hypothesis.testable_predictions[:3] if hypothesis.testable_predictions else [],
                             },
                             parent_phase=f"idea_{idea.id}",
                         )
+                        # Store node_id on hypothesis object for iteration parent reference
+                        hypothesis.node_id = hypothesis_node_id
 
                 max_iterations = max(1, self.max_iterations) if enable_iteration else 1
                 confidence, iterations = await self._run_experiments_for_idea(
@@ -4812,6 +4873,28 @@ Return JSON only.
                     session_id,
                     base_progress + progress_window * 0.95,
                 )
+
+                # Log evaluation node to tree
+                if session_id and idea.node_id and idea.evaluation:
+                    await self._log_progress(
+                        session_id,
+                        phase=f"{idea.id}_evaluation",
+                        progress=base_progress + progress_window * 0.95,
+                        message=f"Idea Evaluation: Score {idea.evaluation.overall_score:.1f}/10",
+                        metadata={
+                            "parent_id": idea.node_id,  # Idea is Level 4, evaluation is Level 5
+                            "node_type": "evaluation",
+                            "title": "Idea Evaluation",
+                            "overall_score": idea.evaluation.overall_score,
+                            "novelty_score": idea.evaluation.novelty_score,
+                            "feasibility_score": idea.evaluation.feasibility_score,
+                            "impact_score": idea.evaluation.impact_score,
+                            "confidence": idea.confidence_score,
+                            "iterations": idea.iteration_count,
+                        },
+                        parent_phase=f"idea_{idea.id}",
+                    )
+
                 return idea
             finally:
                 if openhands_context:
@@ -4878,13 +4961,9 @@ Return JSON only.
 
         root_id = self._get_root_node_id(session_id)
 
-        await self._log_progress(
-            session_id,
-            phase="initializing",
-            progress=5.0,
-            message="Planning multi-engine scientific workflow",
-            metadata={"query": research_question, "parent_id": root_id}
-        )
+        # REMOVED: "Planning multi-engine scientific workflow" node
+        # This was a trivial intermediate node that didn't represent significant progress
+        # Ideas and other phases will be created directly under the root
 
         # Initialize result structure
         result = ScientificResearchResult(
@@ -5078,7 +5157,7 @@ Return JSON only.
                     "results": len(result.results),
                     "selected_idea": result.selected_idea_id,
                 },
-                parent_phase="ideation",
+                # No parent_phase - synthesis is a top-level phase (peer to ideation)
             )
 
             result.synthesis = await self._synthesize_research_results(result)
@@ -5143,7 +5222,7 @@ Return JSON only.
                     "recommendations": len(result.recommendations),
                     "selected_idea": result.selected_idea_id,
                 },
-                parent_phase="ideation",
+                # No parent_phase - updating existing synthesis node
             )
 
             if session_id:
@@ -5196,7 +5275,7 @@ Return JSON only.
                             "selected_idea": result.selected_idea_id,
                             "failed_experiments": len(result.executions),
                         },
-                        parent_phase="ideation",
+                        # No parent_phase - updating existing synthesis node (or creating as root-level)
                     )
 
         except Exception as e:

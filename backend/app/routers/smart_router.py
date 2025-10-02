@@ -152,17 +152,20 @@ async def route_and_execute(request: RouterRequest):
             user_request=request.user_request
         )
 
+        # Use lowercase engine name consistently to avoid duplicate nodes
+        engine_name_lowercase = classification_result.primary_engine.lower()
+
         await progress_tracker.log_research_started(
             session_id=session_id,
             request=request.user_request,
-            engine=classification_result.primary_engine
+            engine=engine_name_lowercase  # Changed to lowercase for consistency
         )
 
         # Seed a minimal root node so late-joining clients can build a tree immediately
         try:
             await progress_tracker.log_research_progress(
                 session_id=session_id,
-                engine=classification_result.primary_engine.lower(),
+                engine=engine_name_lowercase,
                 phase="session_initialized",
                 progress=1.0,
                 message="Session initialized",
