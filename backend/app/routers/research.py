@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from ..core.app_state import get_app_state
 from ..core.research_engines.deep_research import ResearchResult as DeepResearchResult
 from ..core.research_engines.code_research import CodeResearchResult
-from ..core.research_engines.scientific_research import ScientificResearchResult
+from ..core.research_engines.scientific_research import ScientificResearchResult, TechnicalRequirements
 from ..core.websocket_manager import websocket_manager
 
 
@@ -47,6 +47,7 @@ class ScientificResearchRequest(ResearchRequest):
     enable_iteration: bool = Field(True, description="Enable iterative refinement")
     max_iterations: Optional[int] = Field(3, description="Maximum research iterations")
     confidence_threshold: Optional[float] = Field(0.8, description="Confidence threshold for completion")
+    technical_requirements: Optional[Dict[str, Any]] = Field(None, description="Pre-extracted technical requirements (optional)")
 
 
 class ResearchResponse(BaseModel):
@@ -241,11 +242,22 @@ async def conduct_scientific_research(request: ScientificResearchRequest, backgr
             scientific_engine.confidence_threshold = request.confidence_threshold
 
         # Execute scientific research
+        # Convert technical_requirements dict to TechnicalRequirements object if provided
+        technical_requirements = None
+        if request.technical_requirements:
+            try:
+                # Convert dict to TechnicalRequirements object
+                technical_requirements = TechnicalRequirements(**request.technical_requirements)
+                logger.info(f"Using provided technical requirements: {technical_requirements.to_dict()}")
+            except Exception as e:
+                logger.warning(f"Error converting technical requirements: {e}, will auto-extract")
+
         result = await scientific_engine.conduct_research(
             request.query,
             include_literature_review=request.include_literature_review,
             include_code_analysis=request.include_code_analysis,
-            enable_iteration=request.enable_iteration
+            enable_iteration=request.enable_iteration,
+            technical_requirements=technical_requirements
         )
 
         # Determine completion status from confidence threshold

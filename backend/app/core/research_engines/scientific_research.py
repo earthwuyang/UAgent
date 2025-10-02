@@ -284,25 +284,37 @@ Analyze this research question and extract technical requirements that will guid
 
 {research_question}
 
-Extract and return in JSON format with these exact keys:
-1. "source_code_modifications": Which codebases/files should be modified, IF EXPLICITLY MENTIONED (e.g., ["PostgreSQL source code"])
-2. "programming_languages": Which languages are mentioned, IF ANY (e.g., ["C", "Python"]) - ONLY if explicitly stated
-3. "execution_engines": Which systems/engines are involved (e.g., ["PostgreSQL", "DuckDB"]) - be flexible with naming
-4. "integration_requirements": How components should work together, IF SPECIFIED
-5. "data_collection_requirements": What data/metrics to collect, IF MENTIONED
-6. "prohibited_shortcuts": What approaches are EXPLICITLY forbidden by the user (e.g., ["no simulation"]) - only include if user clearly states prohibition
-7. "technical_guidance_needed": Complex technical tasks that may need guidance
+INTELLIGENT COMPREHENSION: This system should support diverse research but use contextual understanding when technical details are mentioned.
 
-IMPORTANT GUIDELINES:
-- Be CONSERVATIVE: Only extract requirements that are EXPLICITLY stated in the research question
-- Do NOT infer or assume requirements that aren't clearly mentioned
-- If a field doesn't apply, return an EMPTY list []
-- Programming languages: Only include if user specifically mentions them (e.g., "using C" or "in Python")
-- Prohibitions: Only include if user says "do not", "avoid", "without", "must not", etc.
-- Keep lists SHORT (1-3 items max per field)
-- Be GENERIC and FLEXIBLE - support all types of research, not just database research
+DATABASE SYSTEM RESEARCH (if applicable):
+- If user mentions PostgreSQL, MySQL, database kernels, query processing: Extract those as source codes
+- If pg_duckdb, multi-engine, dual-execution: Identify those as systems to integrate
+- If feature extraction, ML prediction, routing: Recognize these as technical components
 
-Return ONLY a valid JSON object with these keys. Use empty lists [] for fields that don't apply.
+GENERIC SYSTEMS RESEARCH (apply intelligent reasoning):
+1. "source_code_modifications": Which codebases/software should be modified (be flexible but specific)
+2. "programming_languages": Languages mentioned or implied by context
+3. "execution_engines": Systems/engines involved in the research
+4. "integration_requirements": Technical integration points
+5. "data_collection_requirements": Data/metrics that need collection
+6. "prohibited_shortcuts": Approaches to avoid
+7. "technical_guidance_needed": Complex technical tasks requiring guidance
+
+EXTRACTION LOGIC:
+- Be CONSERVATIVE but REASONABLE: Extract CLEAR technical mentions but avoid hallucination
+- Multi-component systems: If user mentions multiple systems working together, extract them
+- ML/AI research: If training, models, predictions mentioned, extract these requirements
+- Performance studies: If benchmarking, comparison mentioned, extract data collection needs
+- SOURCE CODE WORK: Always flag for "modify", "source", "kernel", "patch" type mentions
+
+EXAMPLES:
+- "PostgreSQL ML routing" → source_code: ["PostgreSQL"], engines: ["PostgreSQL"], integration: ["ML integration"]
+- "Compare Redis vs Memcached" → engines: ["Redis", "Memcached"], data_collection: ["benchmarking data"]
+- "build ML model" → languages: ["Python"], integration: ["ML model deployment"]
+
+RESEARCH QUESTION: {research_question}
+
+Return VALID JSON with these exact keys. Use empty lists [] only for truly unmentioned aspects.
 """
 
         response = await self.llm_client.generate(
@@ -4930,8 +4942,8 @@ Return JSON only.
         Returns:
             Comprehensive scientific research result
         """
-        # include_code_analysis = False
-        # include_literature_review = False
+        include_code_analysis = False
+        include_literature_review = False
 
         research_id = f"research_{uuid.uuid4().hex[:8]}"
         self.logger.info(f"Starting scientific research: {research_question}")
