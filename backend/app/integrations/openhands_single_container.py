@@ -651,6 +651,11 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
         # Primary location
         final_json_path = cfg.workspace / "experiments" / cfg.session_name / "results" / "final.json"
 
+        logger.info(f"Looking for final.json at: {final_json_path}")
+        logger.info(f"cfg.workspace: {cfg.workspace}")
+        logger.info(f"cfg.session_name: {cfg.session_name}")
+        logger.info(f"File exists: {final_json_path.exists()}")
+
         if final_json_path.exists():
             try:
                 with open(final_json_path, 'r') as f:
@@ -802,8 +807,19 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             # Give log streaming a moment to finish
             time.sleep(2)
 
-            # Parse artifacts
-            final_json = self._parse_artifacts(cfg)
+            # Parse artifacts with retry for filesystem sync
+            # Files created in container may take a moment to appear on host
+            final_json = None
+            for attempt in range(3):
+                final_json = self._parse_artifacts(cfg)
+                if final_json is not None:
+                    break
+                if attempt < 2:
+                    logger.info(f"final.json not found, waiting for filesystem sync (attempt {attempt + 1}/3)...")
+                    time.sleep(2)  # Wait for filesystem sync
+
+            if final_json is None:
+                logger.warning("final.json not found after 3 attempts and 6 seconds of waiting")
 
             # Clean up container and unregister from manager
             container_manager = get_container_manager()
