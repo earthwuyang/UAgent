@@ -1520,7 +1520,8 @@ class ExperimentExecutor:
                     "Experiment execution requires an OpenHands session and cannot proceed without one"
                 )
 
-            success_flag = False
+                success_flag = False
+                llm_assessment_reason: Optional[str] = None
             if data_result:
                 if "success" in data_result:
                     success_flag = bool(data_result["success"])
@@ -1968,6 +1969,7 @@ Adjust your approach based on these errors. Try alternative methods if the previ
         """
         prior_errors = list(prior_errors or [])
         attempt_context = attempt_context or {}
+        max_resume_attempts = max(1, int(self.config.get("max_resume_attempts", 3)))
 
         self.logger.info(
             f"🚀 NEW APPROACH: Sending ALL {plan.num_experiments} experiments in ONE comprehensive prompt"
@@ -1978,6 +1980,23 @@ Adjust your approach based on these errors. Try alternative methods if the previ
 
         # Build comprehensive prompt with ALL experiment steps
         comprehensive_prompt = self._build_comprehensive_experiment_prompt(plan, prior_errors)
+        if attempt_number > 1 and prior_errors:
+            recent_feedback = prior_errors[-5:]
+            guidance_lines = []
+            for entry in recent_feedback:
+                for line in str(entry).splitlines():
+                    stripped = line.strip()
+                    if stripped:
+                        guidance_lines.append(f"- {stripped}")
+            if guidance_lines:
+                guidance_section = (
+                    "\n\n═══════════════════════════════════════════════════════════════\n"
+                    "RESUME GUIDANCE (Address ALL unresolved blockers before finishing)\n"
+                    "═══════════════════════════════════════════════════════════════\n"
+                    f"Attempt {attempt_number}/{max_resume_attempts}\n"
+                    + "\n".join(guidance_lines)
+                )
+                comprehensive_prompt = f"{comprehensive_prompt}{guidance_section}"
 
         # Ensure workspace and session exist
         workspace_id = session_context.workspace_id
@@ -2006,7 +2025,9 @@ Adjust your approach based on these errors. Try alternative methods if the previ
             overwrite=True,
         )
 
-        self.logger.info(f"📝 Comprehensive prompt written to {exp_base_dir}/EXPERIMENT_INSTRUCTIONS.md")
+        self.logger.info(
+            f"📝 Comprehensive prompt written (attempt {attempt_number}/{max_resume_attempts}) to {exp_base_dir}/EXPERIMENT_INSTRUCTIONS.md"
+        )
 
         # Create ONE execution record for the entire sequence
         comprehensive_execution = ExperimentExecution(
@@ -2019,7 +2040,7 @@ Adjust your approach based on these errors. Try alternative methods if the previ
         )
 
         comprehensive_execution.logs.append(
-            f"Executing comprehensive experimental plan with {plan.num_experiments} sequential steps"
+            f"Executing comprehensive experimental plan with {plan.num_experiments} sequential steps (attempt {attempt_number}/{max_resume_attempts})"
         )
         comprehensive_execution.logs.append(f"Overall objective: {plan.overall_objective}")
 
@@ -2048,6 +2069,7 @@ Adjust your approach based on these errors. Try alternative methods if the previ
             self.logger.info("=" * 80)
 
             success_flag = False
+            llm_assessment_reason: Optional[str] = None
             if data_result:
                 self.logger.info(f"📊 data_result received: {bool(data_result)}")
                 self.logger.info(f"  - Has 'success' field: {'success' in data_result}")
@@ -2125,6 +2147,39 @@ Adjust your approach based on these errors. Try alternative methods if the previ
                 if not success_flag:
                     self.logger.info("⚠️  No valid final.json with success=true found in any checked path")
 
+            if data_result and isinstance(data_result, dict) and (
+                data_result.get("analysis") or data_result.get("conclusions") or data_result.get("data")
+            ):
+                llm_success, llm_reason = await self._assess_final_json_success(data_result)
+                if llm_success is not None:
+                    if success_flag != bool(llm_success):
+                        self.logger.info("🤖 LLM assessment overrides success flag: %s -> %s", success_flag, llm_success)
+                    else:
+                        self.logger.info("🤖 LLM assessment confirms success flag: %s", llm_success)
+                    success_flag = bool(llm_success)
+                    llm_assessment_reason = llm_reason
+                    previous_method = data_result.get("_success_detection_method")
+                    if previous_method:
+                        data_result["_success_detection_method"] = f"{previous_method};llm_assessment"
+                    else:
+                        data_result["_success_detection_method"] = "llm_assessment"
+                    if llm_reason:
+                        data_result["_llm_assessment_reason"] = llm_reason
+                        comprehensive_execution.errors.append(f"LLM assessment rejection: {llm_reason}")
+                    comprehensive_execution.logs.append(
+                        f"LLM assessment: success={success_flag} reason={llm_reason or 'N/A'}"
+                    )
+                    if not success_flag and isinstance(data_result.get('analysis'), dict):
+                        limitations = data_result['analysis'].get('limitations') or []
+                        if isinstance(limitations, (list, tuple)):
+                            for limitation in limitations:
+                                comprehensive_execution.errors.append(
+                                    f"Limitation blocking success: {limitation}"
+                                )
+
+            if isinstance(data_result, dict):
+                data_result["success"] = bool(success_flag)
+
             # Final verdict
             self.logger.info("=" * 80)
             self.logger.info(f"🎯 FINAL VERDICT: Experiment {'SUCCEEDED' if success_flag else 'FAILED'}")
@@ -2136,17 +2191,47 @@ Adjust your approach based on these errors. Try alternative methods if the previ
 
             if not success_flag:
                 comprehensive_execution.status = ExperimentStatus.FAILED
-                error_message = (
-                    data_result.get("error")
-                    if isinstance(data_result, dict)
-                    else "Comprehensive experiment execution failed"
-                )
+                error_message = None
+                if isinstance(data_result, dict):
+                    error_message = data_result.get("error")
+                    if not error_message and data_result.get("_llm_assessment_reason"):
+                        error_message = f"LLM assessment: {data_result['_llm_assessment_reason']}"
+                if not error_message:
+                    error_message = "Comprehensive experiment execution failed"
                 if error_message:
                     comprehensive_execution.errors.append(str(error_message))
                 comprehensive_execution.logs.append("Comprehensive execution failed")
                 comprehensive_execution.end_time = datetime.now()
 
                 self.logger.error(f"❌ Comprehensive experiment execution failed: {error_message}")
+
+                if attempt_number < max_resume_attempts:
+                    resume_feedback = self._summarize_resume_feedback(
+                        data_result or {},
+                        llm_assessment_reason,
+                    )
+                    if not resume_feedback and error_message:
+                        resume_feedback = f"Error: {error_message}"
+                    updated_prior_errors = list(prior_errors)
+                    if resume_feedback:
+                        updated_prior_errors.append(resume_feedback)
+                    # Keep recent guidance small
+                    updated_prior_errors = [err for err in updated_prior_errors if err][-10:]
+                    comprehensive_execution.logs.append(
+                        "Requesting OpenHands to resume work with updated guidance"
+                    )
+                    self.logger.info(
+                        "🔁 Resuming comprehensive experiment (attempt %d/%d)",
+                        attempt_number + 1,
+                        max_resume_attempts,
+                    )
+                    return await self.execute_sequential_experiments(
+                        plan,
+                        session_context,
+                        prior_errors=updated_prior_errors,
+                        attempt_number=attempt_number + 1,
+                        attempt_context=attempt_context,
+                    )
 
                 # Return individual executions for each step (marked as failed)
                 executions = []
@@ -3770,6 +3855,104 @@ class ScientificResearchEngine:
             variables=variables,
         )
 
+
+
+
+    async def _assess_final_json_success(
+        self,
+        final_json: Dict[str, Any],
+    ) -> Tuple[Optional[bool], Optional[str]]:
+        """Ask the LLM to judge whether a final.json truly reflects success."""
+
+        if not self.llm_client:
+            return None, None
+
+        try:
+            final_json_text = json.dumps(final_json, indent=2)
+            if len(final_json_text) > 6000:
+                final_json_text = final_json_text[:6000] + "\n... (truncated)"
+
+            prompt = f"""
+You are auditing an experiment report. Decide if the experiment genuinely succeeded.
+Success requires that the stated goals were achieved (e.g., instrumentation worked AND the system compiled and ran end-to-end). If critical steps failed or key limitations prevent the goal, mark it unsuccessful.
+
+Return STRICT JSON with keys:
+- "success": true or false
+- "reason": short explanation (<=50 words)
+
+final_json:
+```json
+{final_json_text}
+```
+""".strip()
+
+            response = await self.llm_client.generate(
+                prompt,
+                max_tokens=512,
+                temperature=0.0,
+            )
+
+            if not response:
+                return None, None
+
+            parsed = safe_json_loads(sanitize_json_strings(str(response)))
+            success_value = parsed.get("success")
+            if isinstance(success_value, str):
+                success_value = success_value.strip().lower()
+                if success_value in {"true", "success", "yes", "1"}:
+                    success_bool = True
+                elif success_value in {"false", "fail", "failure", "no", "0"}:
+                    success_bool = False
+                else:
+                    success_bool = None
+            else:
+                success_bool = bool(success_value) if success_value is not None else None
+
+            reason = parsed.get("reason")
+            if reason is not None:
+                reason = str(reason)
+
+            return success_bool, reason
+        except Exception as exc:
+            self.logger.warning("LLM final.json assessment failed: %s", exc)
+            return None, None
+
+
+    def _summarize_resume_feedback(
+        self,
+        data_result: Dict[str, Any],
+        llm_reason: Optional[str],
+    ) -> Optional[str]:
+        """Summarize unresolved blockers to feed back into the next attempt prompt."""
+
+        lines: List[str] = []
+
+        if llm_reason:
+            lines.append(f"LLM: {llm_reason}")
+
+        primary_error = data_result.get("error")
+        if isinstance(primary_error, str) and primary_error.strip():
+            lines.append(f"Error: {primary_error.strip()}")
+
+        errors = data_result.get("errors")
+        if isinstance(errors, (list, tuple)):
+            for err in errors:
+                if err:
+                    lines.append(f"Error: {str(err).strip()}")
+
+        analysis = data_result.get("analysis")
+        if isinstance(analysis, dict):
+            limitations = analysis.get("limitations")
+            if isinstance(limitations, (list, tuple)):
+                for limitation in limitations:
+                    if limitation:
+                        lines.append(f"Limitation: {str(limitation).strip()}")
+
+        if not lines:
+            return None
+
+        header = "Resolve these blockers before finishing:" if len(lines) > 1 else "Outstanding blocker:"
+        return "\n".join([header, *lines])
 
 
     async def _run_experiments_for_idea(
