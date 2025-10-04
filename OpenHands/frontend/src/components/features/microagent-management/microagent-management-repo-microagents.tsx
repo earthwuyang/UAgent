@@ -8,7 +8,7 @@ import { useRepositoryMicroagents } from "#/hooks/query/use-repository-microagen
 import { useMicroagentManagementConversations } from "#/hooks/query/use-microagent-management-conversations";
 import { GitRepository } from "#/types/git";
 import { RootState } from "#/store";
-import { setSelectedMicroagentItem } from "#/state/microagent-management-slice";
+import { setSelectedMicroagentItem } from "#/state/microagent-management-store";
 import { cn } from "#/utils/utils";
 import { I18nKey } from "#/i18n/declaration";
 

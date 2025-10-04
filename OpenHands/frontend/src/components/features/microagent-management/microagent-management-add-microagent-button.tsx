@@ -4,7 +4,7 @@ import { I18nKey } from "#/i18n/declaration";
 import {
   setAddMicroagentModalVisible,
   setSelectedRepository,
-} from "#/state/microagent-management-slice";
+} from "#/state/microagent-management-store";
 import { RootState } from "#/store";
 import { GitRepository } from "#/types/git";
 
@@ -25,8 +25,8 @@ export function MicroagentManagementAddMicroagentButton({
 
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    dispatch(setAddMicroagentModalVisible(!addMicroagentModalVisible));
-    dispatch(setSelectedRepository(repository));
+    setAddMicroagentModalVisible(!addMicroagentModalVisible);
+    setSelectedRepository(repository);
   };
 
   return (

@@ -56,6 +56,22 @@ class OpenHandsSingleContainer:
     def __init__(self):
         self.docker_client = docker.from_env()
 
+    def _find_existing_container(self, session_name: str):
+        """Find existing container for this session to enable resume functionality"""
+        try:
+            # Look for containers with matching session label
+            containers = self.docker_client.containers.list(
+                all=True,
+                filters={"label": f"openhands_session={session_name}"}
+            )
+            if containers:
+                logger.info(f"Found {len(containers)} existing container(s) for session {session_name}")
+                return containers[0]  # Return the first (should only be one)
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to find existing container for session {session_name}: {e}")
+            return None
+
     def _prepare_workspace(self, cfg: SingleContainerConfig) -> None:
         """Prepare workspace with UAgent contract"""
         cfg.workspace.mkdir(parents=True, exist_ok=True)
@@ -234,8 +250,13 @@ This file is MANDATORY for completion.
             except Exception as e:
                 logger.warning(f"Failed to register OpenHands experiment: {e}")
 
-        # Enhanced goal with explicit final.json requirement
-        enhanced_goal = f"""{cfg.goal}
+        # Enhanced goal with explicit final.json requirement and workspace persistence
+        enhanced_goal = f"""⚠️ CRITICAL - WORK IN /workspace FOR PERSISTENCE:
+ALL your work (git clones, builds, files) MUST be in /workspace directory.
+Files in /workspace persist across retries. If this task times out and restarts, your previous work in /workspace will still be there.
+ALWAYS check if work already exists before redoing it (e.g., "ls /workspace/duckdb_source" before git clone).
+
+{cfg.goal}
 
 CRITICAL FINAL STEP: When you complete this task, you MUST create a file at experiments/{cfg.session_name}/results/final.json with this exact structure:
 {{
@@ -571,22 +592,87 @@ print('Available runtimes: docker, local, cli, remote, kubernetes')
             "user": container_dirs["user"],  # Use prepared user mapping
             "network_mode": "host",  # Use host networking for API connectivity
             "detach": True,  # Changed to detach so we can monitor
-            "remove": False,  # Keep container for debugging
+            "remove": False,  # Keep container for debugging to enable resume
             "stdout": True,
             "stderr": True,
+            "labels": {
+                "openhands_session": cfg.session_name,
+                "uagent_experiment": "true",
+                "uagent_workspace": str(cfg.workspace.resolve())
+            },
         }
 
         logger.info(f"Running OpenHands in single container for {cfg.max_minutes} minutes")
         logger.info(f"Task: {cfg.goal}")
 
         try:
-            # Start container in detached mode
-            try:
-                container = self.docker_client.containers.run(**container_config)
+            # Check for existing container to enable TRUE resume functionality
+            existing_container = self._find_existing_container(cfg.session_name)
+
+            if existing_container and existing_container.status == 'running':
+                # REUSE the running container! Send new task to it instead of recreating
+                logger.info(f"🔄 REUSING existing running container {existing_container.id}")
+                logger.info("Sending new task to existing OpenHands session...")
+
+                # The container is already running OpenHands CLI
+                # We need to send a new user message to continue the session
+                # This is done by executing a command inside the running container
+                try:
+                    # Create a new task file that the agent can read
+                    resume_task_path = monitoring_dir / "resume_task.txt"
+                    resume_task_path.write_text(f"""
+╔══════════════════════════════════════════════════════════════════╗
+║  RESUME TASK - Continue from previous work                       ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Previous task timed out or failed. Continue working on it.
+
+IMPORTANT:
+- Check /workspace for existing work (source code, builds, etc.)
+- DO NOT start from scratch - use what's already there
+- Continue from where the previous attempt left off
+
+New Goal (may include error feedback):
+{cfg.goal}
+
+Previous work should be in /workspace. Check it first!
+""")
+
+                    logger.info(f"Resume task written to {resume_task_path}")
+                    logger.info("⚠️  NOTE: Current OpenHands CLI mode doesn't support runtime task injection")
+                    logger.info("Falling back to container replacement with workspace preservation")
+
+                    # For now, we still need to replace the container
+                    # TODO: Switch to OpenHands server mode for true session continuation
+                    existing_container.stop(timeout=10)
+                    existing_container.remove()
+                    container = None  # Will create new below
+
+                except Exception as reuse_error:
+                    logger.error(f"Failed to reuse container: {reuse_error}")
+                    # Fall through to create new container
+
+            elif existing_container:
+                # Container exists but is stopped/exited - remove it
+                logger.info(f"Found stopped container {existing_container.id}, removing it")
+                try:
+                    existing_container.remove()
+                except Exception as remove_error:
+                    logger.warning(f"Failed to remove old container: {remove_error}")
+
+            # Create new container if we don't have one
+            if 'container' not in locals() or container is None:
+                try:
+                    logger.info(f"Creating new container for session {cfg.session_name}")
+                    container = self.docker_client.containers.run(**container_config)
+                    container_id = container.id
+                    logger.info(f"Container created: {container_id}")
+                except Exception as e:
+                    logger.error(f"container run error: {e}")
+                    raise  # Re-raise the exception to be handled by outer try/catch
+            else:
+                # Using existing container
                 container_id = container.id
-            except Exception as e:
-                logger.error(f"container run error: {e}")
-                raise  # Re-raise the exception to be handled by outer try/catch
 
 
             # Register container with the global container manager for cleanup

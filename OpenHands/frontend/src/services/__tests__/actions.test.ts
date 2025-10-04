@@ -3,7 +3,7 @@ import { handleStatusMessage } from "../actions";
 import { StatusMessage } from "#/types/message";
 import { queryClient } from "#/query-client-config";
 import store from "#/store";
-import { setCurStatusMessage } from "#/state/status-slice";
+import { setCurStatusMessage } from "#/state/status-store";
 import { trackError } from "#/utils/error-handler";
 
 // Mock dependencies
@@ -19,7 +19,7 @@ vi.mock("#/store", () => ({
   },
 }));
 
-vi.mock("#/state/status-slice", () => ({
+vi.mock("#/state/status-store", () => ({
   setCurStatusMessage: vi.fn(),
 }));
 

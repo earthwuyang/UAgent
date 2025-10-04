@@ -24,4 +24,9 @@ const useMetricsStore = create<MetricsStore>((set) => ({
   setMetrics: (metrics) => set(metrics),
 }));
 
+// Compatibility exports for direct calling
+export const setMetrics = (metrics: MetricsState) => {
+  useMetricsStore.getState().setMetrics(metrics);
+};
+
 export default useMetricsStore;

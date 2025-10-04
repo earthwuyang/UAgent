@@ -2,7 +2,7 @@ import { useSelector, useDispatch } from "react-redux";
 import { RootState } from "#/store";
 import { UploadedFile } from "./uploaded-file";
 import { UploadedImage } from "./uploaded-image";
-import { removeFile, removeImage } from "#/state/conversation-slice";
+import { removeFile, removeImage } from "#/state/conversation-store";
 
 export function UploadedFiles() {
   const dispatch = useDispatch();
@@ -16,11 +16,11 @@ export function UploadedFiles() {
   );
 
   const handleRemoveFile = (index: number) => {
-    dispatch(removeFile(index));
+    removeFile(index);
   };
 
   const handleRemoveImage = (index: number) => {
-    dispatch(removeImage(index));
+    removeImage(index);
   };
 
   // Don't render anything if there are no files, images, or loading items

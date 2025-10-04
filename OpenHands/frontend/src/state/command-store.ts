@@ -24,3 +24,16 @@ export const useCommandStore = create<CommandState>((set) => ({
     })),
   clearTerminal: () => set({ commands: [] }),
 }));
+
+// Compatibility exports for Redux-style usage
+export const appendInput = (content: string) => {
+  useCommandStore.getState().appendInput(content);
+};
+
+export const appendOutput = (content: string) => {
+  useCommandStore.getState().appendOutput(content);
+};
+
+export const clearTerminal = () => {
+  useCommandStore.getState().clearTerminal();
+};

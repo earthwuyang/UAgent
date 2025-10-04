@@ -74,3 +74,45 @@ export const useMicroagentManagementStore = create<MicroagentManagementStore>(
       set({ selectedMicroagentItem: item }),
   }),
 );
+
+// Compatibility exports for direct calling
+export const setAddMicroagentModalVisible = (visible: boolean) => {
+  useMicroagentManagementStore.getState().setAddMicroagentModalVisible(visible);
+};
+
+export const setUpdateMicroagentModalVisible = (visible: boolean) => {
+  useMicroagentManagementStore
+    .getState()
+    .setUpdateMicroagentModalVisible(visible);
+};
+
+export const setLearnThisRepoModalVisible = (visible: boolean) => {
+  useMicroagentManagementStore.getState().setLearnThisRepoModalVisible(visible);
+};
+
+export const setMicroagentSelectedRepository = (
+  repository: GitRepository | null,
+) => {
+  useMicroagentManagementStore.getState().setSelectedRepository(repository);
+};
+
+// Backward compatibility alias
+export const setSelectedRepository = setMicroagentSelectedRepository;
+
+export const setPersonalRepositories = (repositories: GitRepository[]) => {
+  useMicroagentManagementStore.getState().setPersonalRepositories(repositories);
+};
+
+export const setOrganizationRepositories = (repositories: GitRepository[]) => {
+  useMicroagentManagementStore
+    .getState()
+    .setOrganizationRepositories(repositories);
+};
+
+export const setRepositories = (repositories: GitRepository[]) => {
+  useMicroagentManagementStore.getState().setRepositories(repositories);
+};
+
+export const setSelectedMicroagentItem = (item: IMicroagentItem | null) => {
+  useMicroagentManagementStore.getState().setSelectedMicroagentItem(item);
+};

@@ -83,3 +83,46 @@ export const useInitialQueryStore = create<InitialQueryStore>((set) => ({
 
   reset: () => set(() => initialState),
 }));
+
+// Compatibility exports for direct calling
+export const addFile = (file: string) => {
+  useInitialQueryStore.getState().addFile(file);
+};
+
+export const removeFile = (index: number) => {
+  useInitialQueryStore.getState().removeFile(index);
+};
+
+export const clearFiles = () => {
+  useInitialQueryStore.getState().clearFiles();
+};
+
+export const setInitialPrompt = (prompt: string) => {
+  useInitialQueryStore.getState().setInitialPrompt(prompt);
+};
+
+export const clearInitialPrompt = () => {
+  useInitialQueryStore.getState().clearInitialPrompt();
+};
+
+export const setInitialQuerySelectedRepository = (
+  repository: GitRepository | null,
+) => {
+  useInitialQueryStore.getState().setSelectedRepository(repository);
+};
+
+export const clearInitialQuerySelectedRepository = () => {
+  useInitialQueryStore.getState().clearSelectedRepository();
+};
+
+export const setSelectedRepositoryProvider = (provider: Provider | null) => {
+  useInitialQueryStore.getState().setSelectedRepositoryProvider(provider);
+};
+
+export const setReplayJson = (replayJson: string | null) => {
+  useInitialQueryStore.getState().setReplayJson(replayJson);
+};
+
+export const resetInitialQueryStore = () => {
+  useInitialQueryStore.getState().reset();
+};

@@ -4,7 +4,7 @@ import { RootState } from "#/store";
 import { BrandButton } from "../settings/brand-button";
 import { getProviderName, constructMicroagentUrl } from "#/utils/utils";
 import { I18nKey } from "#/i18n/declaration";
-import { setUpdateMicroagentModalVisible } from "#/state/microagent-management-slice";
+import { setUpdateMicroagentModalVisible } from "#/state/microagent-management-store";
 
 export function MicroagentManagementViewMicroagentHeader() {
   const { t } = useTranslation();
@@ -32,7 +32,7 @@ export function MicroagentManagementViewMicroagentHeader() {
   );
 
   const handleLearnSomethingNew = () => {
-    dispatch(setUpdateMicroagentModalVisible(true));
+    setUpdateMicroagentModalVisible(true);
   };
 
   return (

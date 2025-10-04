@@ -215,3 +215,90 @@ export const useConversationStore = create<ConversationStore>()(
     },
   ),
 );
+
+// Compatibility exports for direct calling
+export const setIsRightPanelShown = (isRightPanelShown: boolean) => {
+  useConversationStore.getState().setIsRightPanelShown(isRightPanelShown);
+};
+
+export const setSelectedTab = (selectedTab: ConversationTab | null) => {
+  useConversationStore.getState().setSelectedTab(selectedTab);
+};
+
+export const setShouldShownAgentLoading = (
+  shouldShownAgentLoading: boolean,
+) => {
+  useConversationStore.getState().setShouldShownAgentLoading(
+    shouldShownAgentLoading,
+  );
+};
+
+export const setShouldHideSuggestions = (shouldHideSuggestions: boolean) => {
+  useConversationStore.getState().setShouldHideSuggestions(
+    shouldHideSuggestions,
+  );
+};
+
+export const addImages = (images: File[]) => {
+  useConversationStore.getState().addImages(images);
+};
+
+export const addFiles = (files: File[]) => {
+  useConversationStore.getState().addFiles(files);
+};
+
+export const removeImage = (index: number) => {
+  useConversationStore.getState().removeImage(index);
+};
+
+export const removeFile = (index: number) => {
+  useConversationStore.getState().removeFile(index);
+};
+
+export const clearImages = () => {
+  useConversationStore.getState().clearImages();
+};
+
+export const clearFiles = () => {
+  useConversationStore.getState().clearFiles();
+};
+
+export const clearAllFiles = () => {
+  useConversationStore.getState().clearAllFiles();
+};
+
+export const addFileLoading = (fileName: string) => {
+  useConversationStore.getState().addFileLoading(fileName);
+};
+
+export const removeFileLoading = (fileName: string) => {
+  useConversationStore.getState().removeFileLoading(fileName);
+};
+
+export const addImageLoading = (imageName: string) => {
+  useConversationStore.getState().addImageLoading(imageName);
+};
+
+export const removeImageLoading = (imageName: string) => {
+  useConversationStore.getState().removeImageLoading(imageName);
+};
+
+export const clearAllLoading = () => {
+  useConversationStore.getState().clearAllLoading();
+};
+
+export const setMessageToSend = (text: string) => {
+  useConversationStore.getState().setMessageToSend(text);
+};
+
+export const setSubmittedMessage = (message: string | null) => {
+  useConversationStore.getState().setSubmittedMessage(message);
+};
+
+export const resetConversationState = () => {
+  useConversationStore.getState().resetConversationState();
+};
+
+export const setHasRightPanelToggled = (hasRightPanelToggled: boolean) => {
+  useConversationStore.getState().setHasRightPanelToggled(hasRightPanelToggled);
+};

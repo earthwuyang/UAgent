@@ -11,7 +11,7 @@ import {
   getCreatePRPrompt,
   getCreateNewBranchPrompt,
 } from "#/utils/utils";
-import { setMessageToSend } from "#/state/conversation-slice";
+import { setMessageToSend } from "#/state/conversation-store";
 
 import ArrowUpIcon from "#/icons/u-arrow-up.svg?react";
 import ArrowDownIcon from "#/icons/u-arrow-down.svg?react";
@@ -34,22 +34,22 @@ export function GitToolsSubmenu({ onClose }: GitToolsSubmenuProps) {
   const currentGitProvider = conversation?.git_provider as Provider;
 
   const onGitPull = () => {
-    dispatch(setMessageToSend(getGitPullPrompt()));
+    setMessageToSend(getGitPullPrompt());
     onClose();
   };
 
   const onGitPush = () => {
-    dispatch(setMessageToSend(getGitPushPrompt(currentGitProvider)));
+    setMessageToSend(getGitPushPrompt(currentGitProvider));
     onClose();
   };
 
   const onCreatePR = () => {
-    dispatch(setMessageToSend(getCreatePRPrompt(currentGitProvider)));
+    setMessageToSend(getCreatePRPrompt(currentGitProvider));
     onClose();
   };
 
   const onCreateNewBranch = () => {
-    dispatch(setMessageToSend(getCreateNewBranchPrompt()));
+    setMessageToSend(getCreateNewBranchPrompt());
     onClose();
   };
 

@@ -1,0 +1,76 @@
+╔════════════════════════════════════════════════════════════════╗
+║                                                                ║
+║   UAgent + OpenHands - Quick Start                            ║
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+
+✅ FIXED! Frontend build is now optional.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📌 THE EASIEST WAY TO START:
+
+    cd /home/wuy/AI/UAgent/OpenHands
+    ./start.sh
+
+   This will start the Research API (no UI needed).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 WHAT'S AVAILABLE:
+
+   ✅ Research API:  http://localhost:3000/api/research
+   ✅ WebSocket:     ws://localhost:3000/api/research/ws
+   ✅ Health Check:  http://localhost:3000/api/research/health
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🧪 TEST IT WORKS:
+
+   curl http://localhost:3000/api/research/health
+
+   Expected: {"status":"healthy",...}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 OTHER STARTUP OPTIONS:
+
+   Backend Only (fastest):
+     ./start_backend_only.sh
+
+   With Frontend UI (requires build):
+     SERVE_FRONTEND=true ./start.sh
+
+   Full checks + auto-build:
+     ./start_openhands_research.sh
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🏗️  TO BUILD FRONTEND (optional):
+
+   cd frontend
+   npm install
+   npm run build
+   cd ..
+   SERVE_FRONTEND=true ./start.sh
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 DOCUMENTATION:
+
+   • SIMPLE_START_GUIDE.md  - Start here!
+   • HOW_TO_START.md        - Detailed guide
+   • STARTUP_GUIDE.md       - Comprehensive reference
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✨ SUMMARY:
+
+   The system now works WITHOUT building the frontend!
+
+   Just run: ./start.sh
+
+   Frontend is optional - only needed for Web UI.
+   API and WebSocket work without it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

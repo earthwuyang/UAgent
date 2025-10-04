@@ -28,7 +28,13 @@ export const useActiveHost = () => {
       queryKey: [conversationId, "hosts", host],
       queryFn: async () => {
         try {
-          await axios.get(host);
+          // Use fetch with mode: 'no-cors' to avoid CORS errors in console
+          // We only care if the server is reachable, not the response
+          const response = await fetch(host, {
+            method: 'HEAD',
+            mode: 'no-cors',
+            cache: 'no-cache'
+          });
           return host;
         } catch (e) {
           return "";

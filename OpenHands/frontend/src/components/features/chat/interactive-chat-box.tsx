@@ -15,7 +15,7 @@ import {
   removeFileLoading,
   addImageLoading,
   removeImageLoading,
-} from "#/state/conversation-slice";
+} from "#/state/conversation-store";
 import { processFiles, processImages } from "#/utils/file-processing";
 
 interface InteractiveChatBoxProps {
@@ -58,16 +58,16 @@ export function InteractiveChatBox({
 
   // Helper function to show loading indicators for files
   const showLoadingIndicators = (validFiles: File[], validImages: File[]) => {
-    validFiles.forEach((file) => dispatch(addFileLoading(file.name)));
-    validImages.forEach((image) => dispatch(addImageLoading(image.name)));
+    validFiles.forEach((file) => addFileLoading(file.name));
+    validImages.forEach((image) => addImageLoading(image.name));
   };
 
   // Helper function to handle successful file processing results
   const handleSuccessfulFiles = (fileResults: { successful: File[] }) => {
     if (fileResults.successful.length > 0) {
-      dispatch(addFiles(fileResults.successful));
+      addFiles(fileResults.successful);
       fileResults.successful.forEach((file) =>
-        dispatch(removeFileLoading(file.name)),
+        removeFileLoading(file.name),
       );
     }
   };
@@ -75,9 +75,9 @@ export function InteractiveChatBox({
   // Helper function to handle successful image processing results
   const handleSuccessfulImages = (imageResults: { successful: File[] }) => {
     if (imageResults.successful.length > 0) {
-      dispatch(addImages(imageResults.successful));
+      addImages(imageResults.successful);
       imageResults.successful.forEach((image) =>
-        dispatch(removeImageLoading(image.name)),
+        removeImageLoading(image.name),
       );
     }
   };
@@ -88,14 +88,14 @@ export function InteractiveChatBox({
     imageResults: { failed: { file: File; error: Error }[] },
   ) => {
     fileResults.failed.forEach(({ file, error }) => {
-      dispatch(removeFileLoading(file.name));
+      removeFileLoading(file.name);
       displayErrorToast(
         `Failed to process file ${file.name}: ${error.message}`,
       );
     });
 
     imageResults.failed.forEach(({ file, error }) => {
-      dispatch(removeImageLoading(file.name));
+      removeImageLoading(file.name);
       displayErrorToast(
         `Failed to process image ${file.name}: ${error.message}`,
       );
@@ -104,8 +104,8 @@ export function InteractiveChatBox({
 
   // Helper function to clear loading states on error
   const clearLoadingStates = (validFiles: File[], validImages: File[]) => {
-    validFiles.forEach((file) => dispatch(removeFileLoading(file.name)));
-    validImages.forEach((image) => dispatch(removeImageLoading(image.name)));
+    validFiles.forEach((file) => removeFileLoading(file.name));
+    validImages.forEach((image) => removeImageLoading(image.name));
   };
 
   const handleUpload = async (selectedFiles: File[]) => {
@@ -140,7 +140,7 @@ export function InteractiveChatBox({
 
   const handleSubmit = (message: string) => {
     onSubmit(message, images, files);
-    dispatch(clearAllFiles());
+    clearAllFiles();
   };
 
   const handleSuggestionsClick = (suggestion: string) => {

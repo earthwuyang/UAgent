@@ -8,7 +8,7 @@ import {
   initialState as browserInitialState,
   setUrl,
   setScreenshotSrc,
-} from "#/state/browser-slice";
+} from "#/stores/browser-store";
 
 export function BrowserPanel() {
   const { url, screenshotSrc } = useSelector(
@@ -18,8 +18,8 @@ export function BrowserPanel() {
   const dispatch = useDispatch();
 
   useEffect(() => {
-    dispatch(setUrl(browserInitialState.url));
-    dispatch(setScreenshotSrc(browserInitialState.screenshotSrc));
+    setUrl(browserInitialState.url);
+    setScreenshotSrc(browserInitialState.screenshotSrc);
   }, [conversationId]);
 
   const imgSrc =

@@ -4,7 +4,7 @@ import { useAutoResize } from "#/hooks/use-auto-resize";
 import {
   IMessageToSend,
   setShouldHideSuggestions,
-} from "#/state/conversation-slice";
+} from "#/state/conversation-store";
 import { CHAT_INPUT } from "#/utils/constants";
 
 /**
@@ -48,7 +48,7 @@ export const useGripResize = (
     (height: number) => {
       // Hide suggestions when input height exceeds the threshold
       const shouldHideChatSuggestions = height > CHAT_INPUT.HEIGHT_THRESHOLD;
-      dispatch(setShouldHideSuggestions(shouldHideChatSuggestions));
+      setShouldHideSuggestions(shouldHideChatSuggestions);
     },
     [dispatch],
   );

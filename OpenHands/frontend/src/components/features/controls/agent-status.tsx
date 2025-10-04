@@ -11,7 +11,7 @@ import ClockIcon from "#/icons/u-clock-three.svg?react";
 import { ChatResumeAgentButton } from "../chat/chat-play-button";
 import { cn } from "#/utils/utils";
 import { AgentLoading } from "./agent-loading";
-import { setShouldShownAgentLoading } from "#/state/conversation-slice";
+import { setShouldShownAgentLoading } from "#/state/conversation-store";
 import CircleErrorIcon from "#/icons/circle-error.svg?react";
 
 export interface AgentStatusProps {
@@ -57,7 +57,7 @@ export function AgentStatus({
 
   // Update global state when agent loading condition changes
   useEffect(() => {
-    dispatch(setShouldShownAgentLoading(shouldShownAgentLoading));
+    setShouldShownAgentLoading(shouldShownAgentLoading);
   }, [shouldShownAgentLoading, dispatch]);
 
   return (

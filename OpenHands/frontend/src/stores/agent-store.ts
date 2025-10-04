@@ -19,3 +19,12 @@ export const useAgentStore = create<AgentStore>((set) => ({
   setCurrentAgentState: (state: AgentState) => set({ curAgentState: state }),
   reset: () => set(initialState),
 }));
+
+// Compatibility exports for direct calling
+export const setCurrentAgentState = (state: AgentState) => {
+  useAgentStore.getState().setCurrentAgentState(state);
+};
+
+export const resetAgentStore = () => {
+  useAgentStore.getState().reset();
+};

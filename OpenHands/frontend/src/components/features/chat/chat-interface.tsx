@@ -32,7 +32,7 @@ import {
 import { useUploadFiles } from "#/hooks/mutation/use-upload-files";
 import { useConfig } from "#/hooks/query/use-config";
 import { validateFiles } from "#/utils/file-validation";
-import { setMessageToSend } from "#/state/conversation-slice";
+import { setMessageToSend } from "#/state/conversation-store";
 
 function getEntryPoint(
   hasRepository: boolean | null,
@@ -141,7 +141,7 @@ export function ChatInterface() {
 
     send(createChatMessage(prompt, imageUrls, uploadedFiles, timestamp));
     setOptimisticUserMessage(content);
-    dispatch(setMessageToSend(null));
+    setMessageToSend(null);
   };
 
   const handleStop = () => {
@@ -181,7 +181,7 @@ export function ChatInterface() {
           !userEventsExist && (
             <ChatSuggestions
               onSuggestionsClick={(message) =>
-                dispatch(setMessageToSend(message))
+                setMessageToSend(message)
               }
             />
           )}

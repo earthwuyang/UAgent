@@ -18,3 +18,8 @@ export const useStatusStore = create<StatusState>((set) => ({
   setCurStatusMessage: (message: StatusMessage) =>
     set({ curStatusMessage: message }),
 }));
+
+// Compatibility exports for direct calling
+export const setCurStatusMessage = (message: StatusMessage) => {
+  useStatusStore.getState().setCurStatusMessage(message);
+};

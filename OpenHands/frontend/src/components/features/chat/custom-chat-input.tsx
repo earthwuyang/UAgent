@@ -5,7 +5,7 @@ import {
   clearAllFiles,
   setShouldHideSuggestions,
   setSubmittedMessage,
-} from "#/state/conversation-slice";
+} from "#/state/conversation-store";
 import { RootState } from "#/store";
 import { useChatInputLogic } from "#/hooks/chat/use-chat-input-logic";
 import { useFileHandling } from "#/hooks/chat/use-file-handling";
@@ -56,7 +56,7 @@ export function CustomChatInput({
       return;
     }
     onSubmit(submittedMessage);
-    dispatch(setSubmittedMessage(null));
+    setSubmittedMessage(null);
   }, [submittedMessage, disabled, onSubmit, dispatch]);
 
   // Custom hooks
@@ -112,8 +112,8 @@ export function CustomChatInput({
   // Cleanup: reset suggestions visibility when component unmounts
   useEffect(
     () => () => {
-      dispatch(setShouldHideSuggestions(false));
-      dispatch(clearAllFiles());
+      setShouldHideSuggestions(false);
+      clearAllFiles();
     },
     [dispatch],
   );

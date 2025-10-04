@@ -22,3 +22,12 @@ export const useEventMessageStore = create<EventMessageStore>((set) => ({
       ),
     })),
 }));
+
+// Compatibility exports for direct calling
+export const addSubmittedEventId = (id: number) => {
+  useEventMessageStore.getState().addSubmittedEventId(id);
+};
+
+export const removeSubmittedEventId = (id: number) => {
+  useEventMessageStore.getState().removeSubmittedEventId(id);
+};

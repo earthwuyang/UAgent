@@ -1,0 +1,9 @@
+FROM docker.all-hands.dev/all-hands-ai/runtime:0.57-nikolaik
+
+# Install missing httpx dependency in the poetry virtualenv
+WORKDIR /openhands/code
+RUN poetry run pip install httpx
+
+# Add poetry virtualenv to PATH so Python uses it
+RUN VENV_PATH=$(poetry env info -p) && echo "export PATH=\"$VENV_PATH/bin:\$PATH\"" >> /home/openhands/.bashrc
+ENV PATH="/openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin:$PATH"

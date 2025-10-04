@@ -13,6 +13,8 @@ from openhands.server.middleware import (
 from openhands.server.static import SPAStaticFiles
 
 if os.getenv('SERVE_FRONTEND', 'true').lower() == 'true':
+    # Mount static files at root, but this should be done AFTER all API routes
+    # are registered in app.py to ensure API routes have priority
     base_app.mount(
         '/', SPAStaticFiles(directory='./frontend/build', html=True), name='dist'
     )

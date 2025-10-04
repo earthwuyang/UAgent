@@ -38,3 +38,19 @@ export const useJupyterStore = create<JupyterState>((set) => ({
       cells: [],
     })),
 }));
+
+// Compatibility exports for direct calling
+export const appendJupyterInput = (content: string) => {
+  useJupyterStore.getState().appendJupyterInput(content);
+};
+
+export const appendJupyterOutput = (payload: {
+  content: string;
+  imageUrls?: string[];
+}) => {
+  useJupyterStore.getState().appendJupyterOutput(payload);
+};
+
+export const clearJupyter = () => {
+  useJupyterStore.getState().clearJupyter();
+};

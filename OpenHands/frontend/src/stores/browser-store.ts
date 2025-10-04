@@ -13,7 +13,7 @@ interface BrowserStore extends BrowserState {
   reset: () => void;
 }
 
-const initialState: BrowserState = {
+export const initialState: BrowserState = {
   url: "https://github.com/All-Hands-AI/OpenHands",
   screenshotSrc: "",
 };
@@ -24,3 +24,16 @@ export const useBrowserStore = create<BrowserStore>((set) => ({
   setScreenshotSrc: (screenshotSrc: string) => set({ screenshotSrc }),
   reset: () => set(initialState),
 }));
+
+// Compatibility exports for direct calling
+export const setUrl = (url: string) => {
+  useBrowserStore.getState().setUrl(url);
+};
+
+export const setScreenshotSrc = (screenshotSrc: string) => {
+  useBrowserStore.getState().setScreenshotSrc(screenshotSrc);
+};
+
+export const resetBrowserStore = () => {
+  useBrowserStore.getState().reset();
+};

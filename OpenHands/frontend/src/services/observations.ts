@@ -1,9 +1,8 @@
-import { setCurrentAgentState } from "#/state/agent-slice";
-import { setUrl, setScreenshotSrc } from "#/state/browser-slice";
-import store from "#/store";
+import { setCurrentAgentState } from "#/stores/agent-store";
+import { setUrl, setScreenshotSrc } from "#/stores/browser-store";
 import { ObservationMessage } from "#/types/message";
-import { appendOutput } from "#/state/command-slice";
-import { appendJupyterOutput } from "#/state/jupyter-slice";
+import { appendOutput } from "#/state/command-store";
+import { appendJupyterOutput } from "#/state/jupyter-store";
 import ObservationType from "#/types/observation-type";
 
 export function handleObservationMessage(message: ObservationMessage) {
@@ -19,30 +18,28 @@ export function handleObservationMessage(message: ObservationMessage) {
         content = `${head}\r\n\n... (truncated ${message.content.length - 5000} characters) ...\r\n\n${tail}`;
       }
 
-      store.dispatch(appendOutput(content));
+      appendOutput(content);
       break;
     }
     case ObservationType.RUN_IPYTHON:
-      store.dispatch(
-        appendJupyterOutput({
-          content: message.content,
-          imageUrls: Array.isArray(message.extras?.image_urls)
-            ? message.extras.image_urls
-            : undefined,
-        }),
-      );
+      appendJupyterOutput({
+        content: message.content,
+        imageUrls: Array.isArray(message.extras?.image_urls)
+          ? message.extras.image_urls
+          : undefined,
+      });
       break;
     case ObservationType.BROWSE:
     case ObservationType.BROWSE_INTERACTIVE:
       if (message.extras?.screenshot) {
-        store.dispatch(setScreenshotSrc(message.extras?.screenshot));
+        setScreenshotSrc(message.extras?.screenshot);
       }
       if (message.extras?.url) {
-        store.dispatch(setUrl(message.extras.url));
+        setUrl(message.extras.url);
       }
       break;
     case ObservationType.AGENT_STATE_CHANGED:
-      store.dispatch(setCurrentAgentState(message.extras.agent_state));
+      setCurrentAgentState(message.extras.agent_state);
       break;
     case ObservationType.DELEGATE:
     case ObservationType.READ:
@@ -64,18 +61,18 @@ export function handleObservationMessage(message: ObservationMessage) {
     switch (observation) {
       case "browse":
         if (message.extras?.screenshot) {
-          store.dispatch(setScreenshotSrc(message.extras.screenshot));
+          setScreenshotSrc(message.extras.screenshot);
         }
         if (message.extras?.url) {
-          store.dispatch(setUrl(message.extras.url));
+          setUrl(message.extras.url);
         }
         break;
       case "browse_interactive":
         if (message.extras?.screenshot) {
-          store.dispatch(setScreenshotSrc(message.extras.screenshot));
+          setScreenshotSrc(message.extras.screenshot);
         }
         if (message.extras?.url) {
-          store.dispatch(setUrl(message.extras.url));
+          setUrl(message.extras.url);
         }
         break;
       default:

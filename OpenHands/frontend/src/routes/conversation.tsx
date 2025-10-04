@@ -1,14 +1,13 @@
 import React from "react";
 import { useNavigate } from "react-router";
-import { useDispatch } from "react-redux";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { useConversationId } from "#/hooks/use-conversation-id";
-import { clearTerminal } from "#/state/command-slice";
+import { clearTerminal } from "#/state/command-store";
 import { useEffectOnce } from "#/hooks/use-effect-once";
-import { clearJupyter } from "#/state/jupyter-slice";
-import { resetConversationState } from "#/state/conversation-slice";
-import { setCurrentAgentState } from "#/state/agent-slice";
+import { clearJupyter } from "#/state/jupyter-store";
+import { resetConversationState } from "#/state/conversation-store";
+import { setCurrentAgentState } from "#/stores/agent-store";
 import { AgentState } from "#/types/agent-state";
 
 import { useBatchFeedback } from "#/hooks/query/use-batch-feedback";
@@ -38,7 +37,6 @@ function AppContent() {
   const { mutate: startConversation } = useStartConversation();
   const { data: isAuthed } = useIsAuthed();
   const { providers } = useUserProviders();
-  const dispatch = useDispatch();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -83,17 +81,17 @@ function AppContent() {
   ]);
 
   React.useEffect(() => {
-    dispatch(clearTerminal());
-    dispatch(clearJupyter());
-    dispatch(resetConversationState());
-    dispatch(setCurrentAgentState(AgentState.LOADING));
+    clearTerminal();
+    clearJupyter();
+    resetConversationState();
+    setCurrentAgentState(AgentState.LOADING);
   }, [conversationId]);
 
   useEffectOnce(() => {
-    dispatch(clearTerminal());
-    dispatch(clearJupyter());
-    dispatch(resetConversationState());
-    dispatch(setCurrentAgentState(AgentState.LOADING));
+    clearTerminal();
+    clearJupyter();
+    resetConversationState();
+    setCurrentAgentState(AgentState.LOADING);
   });
 
   return (

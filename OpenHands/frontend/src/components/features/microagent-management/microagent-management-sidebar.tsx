@@ -11,7 +11,7 @@ import {
   setPersonalRepositories,
   setOrganizationRepositories,
   setRepositories,
-} from "#/state/microagent-management-slice";
+} from "#/state/microagent-management-store";
 import { GitRepository } from "#/types/git";
 import { Provider } from "#/types/settings";
 import { cn } from "#/utils/utils";
@@ -96,9 +96,9 @@ export function MicroagentManagementSidebar({
 
   useEffect(() => {
     if (!filteredRepositories?.length) {
-      dispatch(setPersonalRepositories([]));
-      dispatch(setOrganizationRepositories([]));
-      dispatch(setRepositories([]));
+      setPersonalRepositories([]);
+      setOrganizationRepositories([]);
+      setRepositories([]);
       return;
     }
 
@@ -121,9 +121,9 @@ export function MicroagentManagementSidebar({
       }
     });
 
-    dispatch(setPersonalRepositories(personalRepos));
-    dispatch(setOrganizationRepositories(organizationRepos));
-    dispatch(setRepositories(otherRepos));
+    setPersonalRepositories(personalRepos);
+    setOrganizationRepositories(organizationRepos);
+    setRepositories(otherRepos);
   }, [filteredRepositories, selectedProvider, dispatch]);
 
   // Handle scroll to bottom for pagination

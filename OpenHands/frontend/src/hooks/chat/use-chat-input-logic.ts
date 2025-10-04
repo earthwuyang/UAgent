@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from "react-redux";
 import {
   setMessageToSend,
   setIsRightPanelShown,
-} from "#/state/conversation-slice";
+} from "#/state/conversation-store";
 import { RootState } from "#/store";
 import {
   isContentEmpty,
@@ -27,8 +27,8 @@ export const useChatInputLogic = () => {
   useEffect(() => {
     if (chatInputRef.current) {
       const currentText = getTextContent(chatInputRef.current);
-      dispatch(setMessageToSend(currentText));
-      dispatch(setIsRightPanelShown(hasRightPanelToggled));
+      setMessageToSend(currentText);
+      setIsRightPanelShown(hasRightPanelToggled);
     }
   }, [hasRightPanelToggled, dispatch]);
 

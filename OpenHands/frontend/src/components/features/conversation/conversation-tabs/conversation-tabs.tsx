@@ -18,7 +18,7 @@ import {
   setSelectedTab,
   setIsRightPanelShown,
   type ConversationTab,
-} from "#/state/conversation-slice";
+} from "#/state/conversation-store";
 import { RootState } from "#/store";
 
 export function ConversationTabs() {
@@ -41,7 +41,7 @@ export function ConversationTabs() {
     useLocalStorage<boolean>("conversation-right-panel-shown", true);
 
   const onTabChange = (value: ConversationTab | null) => {
-    dispatch(setSelectedTab(value));
+    setSelectedTab(value);
     // Persist the selected tab to localStorage
     setPersistedSelectedTab(value);
   };
@@ -49,9 +49,9 @@ export function ConversationTabs() {
   // Initialize Redux state from localStorage on component mount
   useEffect(() => {
     // Initialize selectedTab from localStorage if available
-    dispatch(setSelectedTab(persistedSelectedTab));
-    dispatch(setIsRightPanelShown(persistedIsRightPanelShown));
-    dispatch(setHasRightPanelToggled(persistedIsRightPanelShown));
+    setSelectedTab(persistedSelectedTab);
+    setIsRightPanelShown(persistedIsRightPanelShown);
+    setHasRightPanelToggled(persistedIsRightPanelShown);
   }, []);
 
   useEffect(() => {
@@ -72,13 +72,13 @@ export function ConversationTabs() {
   const onTabSelected = (tab: ConversationTab) => {
     if (selectedTab === tab && isRightPanelShown) {
       // If clicking the same active tab, close the drawer
-      dispatch(setHasRightPanelToggled(false));
+      setHasRightPanelToggled(false);
       setPersistedIsRightPanelShown(false);
     } else {
       // If clicking a different tab or drawer is closed, open drawer and select tab
       onTabChange(tab);
       if (!isRightPanelShown) {
-        dispatch(setHasRightPanelToggled(true));
+        setHasRightPanelToggled(true);
         setPersistedIsRightPanelShown(true);
       }
     }

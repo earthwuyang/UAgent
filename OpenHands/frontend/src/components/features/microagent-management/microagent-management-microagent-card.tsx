@@ -7,7 +7,7 @@ import { Conversation } from "#/api/open-hands.types";
 import {
   setSelectedMicroagentItem,
   setSelectedRepository,
-} from "#/state/microagent-management-slice";
+} from "#/state/microagent-management-store";
 import { RootState } from "#/store";
 import { cn } from "#/utils/utils";
 import { GitRepository } from "#/types/git";
@@ -96,7 +96,7 @@ export function MicroagentManagementMicroagentCard({
             },
       ),
     );
-    dispatch(setSelectedRepository(repository));
+    setSelectedRepository(repository);
   };
 
   return (

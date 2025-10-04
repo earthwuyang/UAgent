@@ -231,6 +231,61 @@ class DockerRuntime(ActionExecutionClient):
                 self.log('error', str(e))
 
     def maybe_build_runtime_container_image(self):
+        # UAgent: Custom image fallback logic for openhands-uagent:v0.1
+        # 1. Check if image exists locally
+        # 2. If not, try to pull from earthwuyang/openhands-uagent:v0.1
+        # 3. If pull fails, build from Dockerfile.runtime-fixed
+        if self.runtime_container_image == 'openhands-uagent:v0.1':
+            uagent_image = 'openhands-uagent:v0.1'
+
+            # Check if image exists locally
+            if self.runtime_builder.image_exists(uagent_image):
+                logger.info(f'Using existing local image: {uagent_image}')
+                return
+
+            # Try to pull from remote
+            remote_uagent_image = 'earthwuyang/openhands-uagent:v0.1'
+            logger.info(f'Image {uagent_image} not found locally, trying to pull from {remote_uagent_image}')
+            try:
+                docker_client = self._init_docker_client()
+                docker_client.images.pull(remote_uagent_image)
+                # Tag the pulled image as the local name
+                pulled_image = docker_client.images.get(remote_uagent_image)
+                pulled_image.tag(uagent_image.split(':')[0], uagent_image.split(':')[1])
+                logger.info(f'Successfully pulled and tagged {remote_uagent_image} as {uagent_image}')
+                return
+            except Exception as e:
+                logger.warning(f'Failed to pull {remote_uagent_image}: {e}')
+                logger.info('Building from Dockerfile.runtime-fixed as fallback')
+
+                # Build from Dockerfile.runtime-fixed
+                from pathlib import Path
+                import openhands
+                project_root = Path(openhands.__file__).parent.parent
+                dockerfile_path = project_root / 'Dockerfile.runtime-fixed'
+
+                if dockerfile_path.exists():
+                    try:
+                        docker_client = self._init_docker_client()
+                        logger.info(f'Building image from {dockerfile_path}')
+                        image, build_logs = docker_client.images.build(
+                            path=str(project_root),
+                            dockerfile=str(dockerfile_path),
+                            tag=uagent_image,
+                            rm=True
+                        )
+                        for log in build_logs:
+                            if 'stream' in log:
+                                logger.info(log['stream'].strip())
+                        logger.info(f'Successfully built {uagent_image} from Dockerfile.runtime-fixed')
+                        return
+                    except Exception as build_error:
+                        logger.error(f'Failed to build from Dockerfile.runtime-fixed: {build_error}')
+                        raise AgentRuntimeNotFoundError(f'Failed to build {uagent_image}: {build_error}')
+                else:
+                    logger.error(f'Dockerfile.runtime-fixed not found at {dockerfile_path}')
+                    raise AgentRuntimeNotFoundError(f'Dockerfile.runtime-fixed not found at {dockerfile_path}')
+
         if self.runtime_container_image is None:
             if self.base_container_image is None:
                 raise ValueError(

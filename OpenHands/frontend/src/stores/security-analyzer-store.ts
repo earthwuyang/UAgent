@@ -73,3 +73,22 @@ export const useSecurityAnalyzerStore = create<SecurityAnalyzerStore>(
     clearLogs: () => set({ logs: initialLogs }),
   }),
 );
+
+// Compatibility exports for direct calling
+export const appendSecurityAnalyzerInput = (message: {
+  id: number;
+  args: {
+    command?: string;
+    code?: string;
+    content?: string;
+    security_risk: ActionSecurityRisk;
+    confirmation_state?: "awaiting_confirmation" | "confirmed" | "rejected";
+  };
+  message?: string;
+}) => {
+  useSecurityAnalyzerStore.getState().appendSecurityAnalyzerInput(message);
+};
+
+export const clearLogs = () => {
+  useSecurityAnalyzerStore.getState().clearLogs();
+};

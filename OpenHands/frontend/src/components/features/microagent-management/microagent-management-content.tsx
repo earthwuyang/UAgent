@@ -9,7 +9,7 @@ import {
   setAddMicroagentModalVisible,
   setUpdateMicroagentModalVisible,
   setLearnThisRepoModalVisible,
-} from "#/state/microagent-management-slice";
+} from "#/state/microagent-management-store";
 import { useCreateConversationAndSubscribeMultiple } from "#/hooks/use-create-conversation-and-subscribe-multiple";
 import {
   LearnThisRepoFormData,
@@ -130,9 +130,9 @@ export function MicroagentManagementContent() {
 
   const hideUpsertMicroagentModal = (isUpdate: boolean = false) => {
     if (isUpdate) {
-      dispatch(setUpdateMicroagentModalVisible(false));
+      setUpdateMicroagentModalVisible(false);
     } else {
-      dispatch(setAddMicroagentModalVisible(false));
+      setAddMicroagentModalVisible(false);
     }
   };
 
@@ -264,7 +264,7 @@ export function MicroagentManagementContent() {
   };
 
   const hideLearnThisRepoModal = () => {
-    dispatch(setLearnThisRepoModalVisible(false));
+    setLearnThisRepoModalVisible(false);
   };
 
   const handleLearnThisRepoConfirm = (formData: LearnThisRepoFormData) => {
