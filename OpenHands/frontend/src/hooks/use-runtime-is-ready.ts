@@ -12,8 +12,11 @@ export const useRuntimeIsReady = (): boolean => {
   const { data: conversation } = useActiveConversation();
   const { curAgentState } = useSelector((state: RootState) => state.agent);
 
-  return (
-    conversation?.status === "RUNNING" &&
-    !RUNTIME_INACTIVE_STATES.includes(curAgentState)
-  );
+  // Runtime is ready if:
+  // 1. Conversation runtime_status is STATUS$READY (backend confirms runtime is ready)
+  // 2. OR agent state is not in inactive states AND conversation status is RUNNING
+  const backendRuntimeReady = conversation?.runtime_status === "STATUS$READY";
+  const agentAvailable = conversation?.status === "RUNNING" && !RUNTIME_INACTIVE_STATES.includes(curAgentState);
+
+  return backendRuntimeReady || agentAvailable;
 };

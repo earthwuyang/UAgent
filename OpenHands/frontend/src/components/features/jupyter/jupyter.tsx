@@ -9,6 +9,7 @@ import { RUNTIME_INACTIVE_STATES } from "#/types/agent-state";
 import { I18nKey } from "#/i18n/declaration";
 import JupyterLargeIcon from "#/icons/jupyter-large.svg?react";
 import { WaitingForRuntimeMessage } from "../chat/waiting-for-runtime-message";
+import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 
 interface JupyterEditorProps {
   maxWidth: number;
@@ -17,12 +18,15 @@ interface JupyterEditorProps {
 export function JupyterEditor({ maxWidth }: JupyterEditorProps) {
   const cells = useSelector((state: RootState) => state.jupyter?.cells ?? []);
   const { curAgentState } = useSelector((state: RootState) => state.agent);
+  const { data: conversation } = useActiveConversation();
 
   const jupyterRef = React.useRef<HTMLDivElement>(null);
 
   const { t } = useTranslation();
 
-  const isRuntimeInactive = RUNTIME_INACTIVE_STATES.includes(curAgentState);
+  // Check if runtime is ready: either via conversation runtime_status or agent state
+  const backendRuntimeReady = conversation?.runtime_status === "STATUS$READY";
+  const isRuntimeInactive = RUNTIME_INACTIVE_STATES.includes(curAgentState) && !backendRuntimeReady;
 
   const { hitBottom, scrollDomToBottom, onChatBodyScroll } =
     useScrollToBottom(jupyterRef);

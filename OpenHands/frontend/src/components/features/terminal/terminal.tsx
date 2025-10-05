@@ -5,12 +5,16 @@ import "@xterm/xterm/css/xterm.css";
 import { RUNTIME_INACTIVE_STATES } from "#/types/agent-state";
 import { cn } from "#/utils/utils";
 import { WaitingForRuntimeMessage } from "../chat/waiting-for-runtime-message";
+import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 
 function Terminal() {
   const { commands } = useSelector((state: RootState) => state.cmd);
   const { curAgentState } = useSelector((state: RootState) => state.agent);
+  const { data: conversation } = useActiveConversation();
 
-  const isRuntimeInactive = RUNTIME_INACTIVE_STATES.includes(curAgentState);
+  // Check if runtime is ready: either via conversation runtime_status or agent state
+  const backendRuntimeReady = conversation?.runtime_status === "STATUS$READY";
+  const isRuntimeInactive = RUNTIME_INACTIVE_STATES.includes(curAgentState) && !backendRuntimeReady;
 
   const ref = useTerminal({
     commands,

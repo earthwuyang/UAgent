@@ -7,12 +7,18 @@ import { RUNTIME_INACTIVE_STATES } from "#/types/agent-state";
 import { useVSCodeUrl } from "#/hooks/query/use-vscode-url";
 import { VSCODE_IN_NEW_TAB } from "#/utils/feature-flags";
 import { WaitingForRuntimeMessage } from "#/components/features/chat/waiting-for-runtime-message";
+import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 
 function VSCodeTab() {
   const { t } = useTranslation();
   const { data, isLoading, error } = useVSCodeUrl();
   const { curAgentState } = useSelector((state: RootState) => state.agent);
-  const isRuntimeInactive = RUNTIME_INACTIVE_STATES.includes(curAgentState);
+  const { data: conversation } = useActiveConversation();
+
+  // Check if runtime is ready: either via conversation runtime_status or agent state
+  const backendRuntimeReady = conversation?.runtime_status === "STATUS$READY";
+  const isRuntimeInactive = RUNTIME_INACTIVE_STATES.includes(curAgentState) && !backendRuntimeReady;
+
   const iframeRef = React.useRef<HTMLIFrameElement>(null);
   const [isCrossProtocol, setIsCrossProtocol] = useState(false);
   const [iframeError, setIframeError] = useState<string | null>(null);
