@@ -59,7 +59,10 @@
     "vite": "^7.1.4",
     "web-vitals": "^5.1.0",
     "ws": "^8.18.2",
-    "zustand": "^5.0.8"
+    "zustand": "^5.0.8",
+    "reactflow": "^11.11.0",
+    "dagre": "^0.8.5",
+    "@types/dagre": "^0.7.52"
   },
   "scripts": {
     "dev": "npm run make-i18n && cross-env VITE_MOCK_API=false react-router dev",

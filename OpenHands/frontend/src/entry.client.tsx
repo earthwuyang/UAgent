@@ -22,6 +22,7 @@ function PosthogInit() {
     null,
   );
 
+  // Always run effects, but conditionally execute logic inside
   React.useEffect(() => {
     (async () => {
       try {
@@ -34,11 +35,16 @@ function PosthogInit() {
   }, []);
 
   React.useEffect(() => {
-    if (posthogClientKey) {
+    if (!posthogClientKey) return;
+
+    try {
       posthog.init(posthogClientKey, {
         api_host: "https://us.i.posthog.com",
         person_profiles: "identified_only",
       });
+    } catch (error) {
+      // Silently handle PostHog initialization errors during SSR
+      console.debug("PostHog initialization skipped during SSR");
     }
   }, [posthogClientKey]);
 
@@ -46,6 +52,8 @@ function PosthogInit() {
 }
 
 async function prepareApp() {
+  if (typeof window === 'undefined') return;
+
   if (
     process.env.NODE_ENV === "development" &&
     import.meta.env.VITE_MOCK_API === "true"
@@ -69,7 +77,6 @@ prepareApp().then(() =>
             <PosthogInit />
           </QueryClientProvider>
         </Provider>
-        <div id="modal-portal-exit" />
       </StrictMode>,
     );
   }),

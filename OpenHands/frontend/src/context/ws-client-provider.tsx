@@ -142,15 +142,20 @@ export function WsClientProvider({
     (OpenHandsAction | OpenHandsObservation)[]
   >([]);
   const lastEventRef = React.useRef<Record<string, unknown> | null>(null);
+  // Queue user actions until WebSocket connects
+  const pendingEventsRef = React.useRef<Record<string, unknown>[]>([]);
   const { providers } = useUserProviders();
+
 
   const messageRateHandler = useRate({ threshold: 250 });
   const { data: conversation, refetch: refetchConversation } =
     useActiveConversation();
 
   function send(event: Record<string, unknown>) {
-    if (!sioRef.current) {
-      EventLogger.error("WebSocket is not connected.");
+    // If socket not ready, queue the event and trigger conversation start if needed
+    if (!sioRef.current || webSocketStatus !== "CONNECTED") {
+      pendingEventsRef.current.push(event);
+      EventLogger.info("Queued user action until WebSocket connects");
       return;
     }
     sioRef.current.emit("oh_user_action", event);
@@ -159,6 +164,13 @@ export function WsClientProvider({
   function handleConnect() {
     setWebSocketStatus("CONNECTED");
     removeErrorMessage();
+    // Flush any queued user actions
+    if (pendingEventsRef.current.length > 0 && sioRef.current) {
+      for (const evt of pendingEventsRef.current) {
+        sioRef.current.emit("oh_user_action", evt);
+      }
+      pendingEventsRef.current = [];
+    }
   }
 
   function handleMessage(event: Record<string, unknown>) {
@@ -304,21 +316,23 @@ export function WsClientProvider({
       return () => undefined; // conversation intentionally stopped
     }
 
-    // Set connecting status when conversation is starting
+    // Set connecting status when conversation is starting, but proceed to open socket so user input can queue
     if (conversation && conversation.status === "STARTING") {
       removeErrorMessage();
       setWebSocketStatus("CONNECTING");
-      return () => undefined; // conversation is starting, will connect when ready
+      // Do NOT return early; attempt socket connection below so queued user actions can be sent ASAP
     }
 
     // Only connect when conversation is fully loaded and running
+    // If conversation exists but socket isn't ready yet, allow connecting and let server buffer
+    if (!conversation) {
+      return () => undefined;
+    }
     if (
-      !conversation ||
-      conversation.status !== "RUNNING" ||
-      !conversation.runtime_status ||
+      conversation.status === "STOPPED" ||
       conversation.runtime_status === "STATUS$STOPPED"
     ) {
-      return () => undefined; // conversation not ready for WebSocket connection
+      return () => undefined;
     }
 
     let sio = sioRef.current;

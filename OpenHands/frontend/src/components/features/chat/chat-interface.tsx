@@ -7,7 +7,7 @@ import { convertImageToBase64 } from "#/utils/convert-image-to-base-64";
 import { TrajectoryActions } from "../trajectory/trajectory-actions";
 import { createChatMessage } from "#/services/chat-service";
 import { InteractiveChatBox } from "./interactive-chat-box";
-import { RootState } from "#/store";
+import { RootState, useAgentStore } from "#/store";
 import { AgentState } from "#/types/agent-state";
 import { isOpenHandsAction } from "#/types/core/guards";
 import { generateAgentStateChangeEvent } from "#/services/agent-state-service";
@@ -51,17 +51,20 @@ export function ChatInterface() {
     useOptimisticUserMessage();
   const { t } = useTranslation();
   const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  // Client-side only scroll hook to avoid SSR hydration issues
   const {
-    scrollDomToBottom,
-    onChatBodyScroll,
-    hitBottom,
     autoScroll,
     setAutoScroll,
+    scrollDomToBottom,
+    hitBottom,
     setHitBottom,
+    onChatBodyScroll,
   } = useScrollToBottom(scrollRef);
+
   const { data: config } = useConfig();
 
-  const { curAgentState } = useSelector((state: RootState) => state.agent);
+  const curAgentState = useAgentStore((state) => state.curAgentState);
 
   const [feedbackPolarity, setFeedbackPolarity] = React.useState<
     "positive" | "negative"

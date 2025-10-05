@@ -129,12 +129,40 @@ class ActionExecutionClient(Runtime):
         return send_request(self.session, method, url, **kwargs)
 
     def check_if_alive(self) -> None:
-        response = self._send_action_server_request(
-            'GET',
-            f'{self.action_execution_server_url}/alive',
-            timeout=5,
-        )
-        assert response.is_closed
+        try:
+            response = self._send_action_server_request(
+                'GET',
+                f'{self.action_execution_server_url}/alive',
+                timeout=30,  # Increased timeout from 10 to 30 seconds
+            )
+            assert response.is_closed
+            # Only consider the runtime alive when it reports status OK
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+            if data.get('status') != 'ok':
+                # Force wait_until_alive() to retry until fully initialized
+                from openhands.core.exceptions import AgentRuntimeNotFoundError
+                # If we get detailed initialization status, include it in the error message
+                if isinstance(data, dict) and 'status' in data:
+                    # Check if this is a detailed initialization status response
+                    if isinstance(data.get('detail'), str) and 'initializing' in data.get('detail', '').lower():
+                        # Extract initialization details for better debugging
+                        detail = data.get('detail', '')
+                        raise AgentRuntimeNotFoundError(f'Runtime still initializing: {detail}')
+                    raise AgentRuntimeNotFoundError(f'Runtime not ready. Status: {data}')
+                else:
+                    raise AgentRuntimeNotFoundError(f'Runtime not ready. Status: {data.get("status", "unknown")}')
+        except Exception as e:
+            # Log the specific error for better debugging
+            from openhands.core.logger import openhands_logger as logger
+            logger.warning(f'check_if_alive failed: {str(e)}')
+            from openhands.core.exceptions import AgentRuntimeNotFoundError
+            # Check if this is a timeout error and provide more specific messaging
+            if 'timeout' in str(e).lower() or 'connect' in str(e).lower():
+                raise AgentRuntimeNotFoundError(f'Runtime connection timeout: {str(e)}')
+            raise AgentRuntimeNotFoundError(f'Runtime not ready: {str(e)}')
 
     def list_files(self, path: str | None = None) -> list[str]:
         """List files in the sandbox.

@@ -2,6 +2,7 @@ import { lazy, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useSelector } from "react-redux";
 import { RootState } from "#/store";
+import { useConversationStore } from "#/state/conversation-store";
 import { ConversationLoading } from "../../conversation-loading";
 import { I18nKey } from "#/i18n/declaration";
 import { TabWrapper } from "./tab-wrapper";
@@ -16,11 +17,11 @@ const BrowserTab = lazy(() => import("#/routes/browser-tab"));
 const JupyterTab = lazy(() => import("#/routes/jupyter-tab"));
 const ServedTab = lazy(() => import("#/routes/served-tab"));
 const VSCodeTab = lazy(() => import("#/routes/vscode-tab"));
+const ResearchTab = lazy(() => import("#/routes/research-tab"));
 
 export function ConversationTabContent() {
-  const selectedTab = useSelector(
-    (state: RootState) => state.conversation.selectedTab,
-  );
+  // Use Zustand store instead of Redux for selectedTab
+  const selectedTab = useConversationStore((state) => state.selectedTab);
   const { shouldShownAgentLoading } = useSelector(
     (state: RootState) => state.conversation,
   );
@@ -34,6 +35,7 @@ export function ConversationTabContent() {
   const isServedActive = selectedTab === "served";
   const isVSCodeActive = selectedTab === "vscode";
   const isTerminalActive = selectedTab === "terminal";
+  const isResearchActive = selectedTab === "research";
 
   // Define tab configurations
   const tabs = [
@@ -54,6 +56,11 @@ export function ConversationTabContent() {
       key: "terminal",
       component: Terminal,
       isActive: isTerminalActive,
+    },
+    {
+      key: "research",
+      component: ResearchTab,
+      isActive: isResearchActive,
     },
   ];
 
@@ -76,6 +83,9 @@ export function ConversationTabContent() {
     if (isTerminalActive) {
       return t(I18nKey.COMMON$TERMINAL);
     }
+    if (isResearchActive) {
+      return "Research Tree";
+    }
     return "";
   }, [
     isEditorActive,
@@ -84,6 +94,7 @@ export function ConversationTabContent() {
     isServedActive,
     isVSCodeActive,
     isTerminalActive,
+    isResearchActive,
   ]);
 
   if (shouldShownAgentLoading) {

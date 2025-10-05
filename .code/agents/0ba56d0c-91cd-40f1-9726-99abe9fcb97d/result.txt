@@ -1,0 +1,318 @@
+Perfect! Now I understand the issue. Let me create a comprehensive analysis document:
+
+## **ROOT CAUSE ANALYSIS: Tools Status Stuck at "Starting"**
+
+### **Executive Summary**
+
+The UI shows "Tools: Starting" indefinitely because `wait_until_alive()` succeeds when `/alive` returns HTTP 200 (even with `{"status": "not initialized"}`), but the runtime never actually completes initialization due to an **MCP proxy crash** that prevents the ActionExecutor from finishing its `ainit()` sequence.
+
+---
+
+### **Root Cause Chain**
+
+#### **1. Backend Health Check Gap** (`action_execution_client.py:131-137`)
+
+```python
+def check_if_alive(self) -> None:
+    response = self._send_action_server_request(
+        'GET',
+        f'{self.action_execution_server_url}/alive',
+        timeout=5,
+    )
+    assert response.is_closed  # ❌ Only checks HTTP status, NOT body content
+```
+
+**Problem**: `check_if_alive()` only validates HTTP 200 status via `raise_for_status()`. It **does not check** if the response body is `{"status": "ok"}` vs `{"status": "not initialized"}`.
+
+The `/alive` endpoint (`action_execution_server.py:1202-1206`) returns HTTP 200 for **both states**:
+```python
+@app.get('/alive')
+async def alive():
+    if client is None or not client.initialized:
+        return {'status': 'not initialized'}  # ❌ Still HTTP 200!
+    return {'status': 'ok'}
+```
+
+**Result**: `wait_until_alive()` completes successfully, sets `RuntimeStatus.RUNTIME_STARTED`, and proceeds to `setup_initial_env()`, even though plugins/MCP are still initializing.
+
+---
+
+#### **2. MCP Proxy SSE Crash Prevents Initialization** (from logs)
+
+From your runtime logs:
+```
+ExceptionGroup in FastMCP SSE session: anyio.ClosedResourceError
+...causing shutdown... Then runtime restarts cleanly
+```
+
+**Timeline**:
+1. Container starts, `ActionExecutor.ainit()` begins (`action_execution_server.py:295-327`)
+2. Bash session initializes (line 298)
+3. Browser init starts in background (line 302)
+4. Plugins initialize (line 305-309): VSCode, Jupyter complete
+5. **MCP Proxy mounts** (line 738): `await mcp_proxy_manager.mount_to_app(app, allowed_origins)`
+6. **MCP SSE endpoint crashes** with `anyio.ClosedResourceError` during uvx tool registration
+7. **`ainit()` never reaches** `self._initialized = True` (line 327)
+8. Container restarts; `/alive` perpetually returns `{"status": "not initialized"}`
+
+**But**: The backend's `wait_until_alive()` had **already passed** (because HTTP 200 was returned during early startup), so the UI never retries or reports an error.
+
+---
+
+#### **3. Frontend Displays "Starting" Status** (`status.ts:73-86`, `agent-status.tsx:45-48`)
+
+```typescript
+// Frontend checks conversation.runtime_status
+if (
+  conversationStatus === "STARTING" ||
+  (!["STATUS$READY", null].includes(runtimeStatus) && !agentIsReady)
+) {
+  return IndicatorColor.YELLOW;  // "Starting" indicator
+}
+```
+
+**Behavior**:
+- `conversation.runtime_status` is likely `"STATUS$RUNTIME_STARTED"` (from line 589 of `docker_runtime.py`)
+- Since `!["STATUS$READY", null].includes("STATUS$RUNTIME_STARTED")` is `true`, UI shows **yellow "Starting"**
+- Runtime **never progresses** to `RuntimeStatus.READY` (line 213 of `docker_runtime.py`) because `/alive` keeps returning `"not initialized"`
+
+---
+
+### **Why This Is a Problem**
+
+1. **Silent Failure**: Backend thinks runtime is healthy; UI shows "Starting" forever; no error surfaced
+2. **MCP Proxy Fragility**: The `uvx mcp-server-fetch` tool (added by UAgent fork) triggers SSE crashes if `uvx` is missing or flaky
+3. **Status Ambiguity**: `RuntimeStatus.RUNTIME_STARTED` != `RuntimeStatus.READY`, but both return HTTP 200 from `/alive`
+
+---
+
+## **PROPOSED FIXES**
+
+### **Fix #1: Validate `/alive` Response Body** (Minimal Change)
+
+**File**: `OpenHands/openhands/runtime/impl/action_execution/action_execution_client.py`
+
+**Patch**:
+```python
+def check_if_alive(self) -> None:
+    response = self._send_action_server_request(
+        'GET',
+        f'{self.action_execution_server_url}/alive',
+        timeout=5,
+    )
+    assert response.is_closed
+    
+    # NEW: Validate response body
+    data = response.json()
+    if data.get('status') != 'ok':
+        raise AgentRuntimeNotReadyError(
+            f"Runtime not fully initialized: {data.get('status')}"
+        )
+```
+
+**Rationale**: Forces `wait_until_alive()` to **retry** until `client.initialized == True`, giving plugins/MCP time to finish.
+
+---
+
+### **Fix #2: Return HTTP 503 for Uninitialized State** (Better Semantics)
+
+**File**: `OpenHands/openhands/runtime/action_execution_server.py`
+
+**Patch**:
+```python
+@app.get('/alive')
+async def alive():
+    if client is None or not client.initialized:
+        # Return 503 Service Unavailable instead of 200
+        raise HTTPException(
+            status_code=503,
+            detail={'status': 'not initialized'}
+        )
+    return {'status': 'ok'}
+```
+
+**Rationale**: HTTP 503 signals "temporary unavailability," making `raise_for_status()` fail and triggering tenacity retries in `wait_until_alive()`.
+
+---
+
+### **Fix #3: Guard MCP Proxy Initialization** (Prevent Crash)
+
+**File**: `OpenHands/openhands/runtime/action_execution_server.py`
+
+**Patch** (around line 738):
+```python
+try:
+    await mcp_proxy_manager.mount_to_app(app, allowed_origins)
+    logger.info('MCP Proxy Manager mounted successfully')
+except Exception as e:
+    logger.error(f'MCP Proxy mount failed: {e}', exc_info=True)
+    # Allow runtime to continue without MCP tools
+    logger.warning('Continuing without MCP proxy')
+```
+
+**Rationale**: Prevents entire runtime crash if `uvx` or `mcp-server-fetch` is unavailable. MCP tools become optional.
+
+---
+
+### **Fix #4: Add Timeout to MCP Tool Registration** (Defensive)
+
+**File**: `OpenHands/openhands/runtime/action_execution_server.py`
+
+**Patch** (around line 1096):
+```python
+logger.info(f'Updating MCP server with tools: {json.dumps(mcp_tools_to_sync, indent=2)}')
+mcp_tools_to_sync = [MCPStdioServerConfig(**tool) for tool in mcp_tools_to_sync]
+
+try:
+    # Add timeout wrapper
+    await asyncio.wait_for(
+        mcp_proxy_manager.update_and_remount(app, mcp_tools_to_sync, ['*']),
+        timeout=30.0  # Fail fast if MCP hangs
+    )
+    logger.info('MCP Proxy Manager updated successfully')
+except asyncio.TimeoutError:
+    logger.error('MCP update timed out after 30s')
+    router_error_log = 'MCP update timeout'
+except Exception as e:
+    logger.error(f'Error updating MCP Proxy Manager: {e}', exc_info=True)
+    router_error_log = str(e)
+```
+
+---
+
+## **RECOMMENDED PATCH COMBINATION**
+
+Apply **Fix #1 + Fix #2 + Fix #3** for maximum reliability:
+
+### **Diff for `action_execution_client.py`**:
+```diff
+--- a/openhands/runtime/impl/action_execution/action_execution_client.py
++++ b/openhands/runtime/impl/action_execution/action_execution_client.py
+@@ -131,6 +131,11 @@ class ActionExecutionClient(Runtime):
+     def check_if_alive(self) -> None:
+         response = self._send_action_server_request(
+             'GET',
+             f'{self.action_execution_server_url}/alive',
+             timeout=5,
+         )
+         assert response.is_closed
++        
++        data = response.json()
++        if data.get('status') != 'ok':
++            from openhands.core.exceptions import AgentRuntimeNotReadyError
++            raise AgentRuntimeNotReadyError(f"Runtime not ready: {data}")
+```
+
+### **Diff for `action_execution_server.py`**:
+```diff
+--- a/openhands/runtime/action_execution_server.py
++++ b/openhands/runtime/action_execution_server.py
+@@ -735,7 +735,11 @@ if __name__ == '__main__':
+             allowed_origins = ['*']
+             try:
+                 await mcp_proxy_manager.mount_to_app(app, allowed_origins)
++                logger.info('MCP Proxy mounted successfully')
+             except Exception as e:
+-                logger.error(f'Error mounting MCP Proxy: {e}', exc_info=True)
+-                raise RuntimeError(f'Cannot mount MCP Proxy: {e}')
++                logger.error(f'MCP Proxy mount failed, continuing without it: {e}', exc_info=True)
++                # Don't crash - allow runtime to proceed without MCP tools
++                mcp_proxy_manager = None
+ 
+         yield
+ 
+@@ -1202,6 +1206,9 @@ if __name__ == '__main__':
+     @app.get('/alive')
+     async def alive():
+         if client is None or not client.initialized:
+-            return {'status': 'not initialized'}
++            raise HTTPException(
++                status_code=503,
++                detail='Runtime still initializing'
++            )
+         return {'status': 'ok'}
+```
+
+---
+
+## **VALIDATION PLAN**
+
+### **Step 1: Verify Fix on Live System**
+
+**Commands**:
+```bash
+# Before applying fix:
+curl http://127.0.0.1:36787/alive
+# Expected: {"status":"not initialized"}  (HTTP 200 ❌)
+
+# After applying Fix #2:
+curl http://127.0.0.1:36787/alive
+# Expected: HTTP 503 + error detail (tenacity will retry ✅)
+
+# After full initialization:
+curl http://127.0.0.1:36787/alive
+# Expected: {"status":"ok"}  (HTTP 200 ✅)
+```
+
+### **Step 2: Monitor Runtime Logs**
+
+Watch for:
+1. `"All plugins initialized"` (line 309)
+2. `"MCP Proxy mounted successfully"` (should appear ~1s after plugins)
+3. `"Runtime client initialized."` (line 326, sets `_initialized = True`)
+4. No more `anyio.ClosedResourceError` after MCP mount
+
+### **Step 3: Frontend Observation**
+
+1. Open UI: `http://120.46.207.248:3000/conversations/{id}`
+2. **Within 5-10s**, "Tools" widget should transition:
+   - `"Starting"` (yellow dot) → `"Ready"` (green dot)
+3. Agent status changes to `"Waiting for task"` (blue)
+4. No console errors in browser DevTools
+
+### **Step 4: Regression Testing**
+
+```bash
+# Test 1: Normal startup (no MCP errors)
+docker restart openhands-runtime-{id}
+# Should reach "Ready" in <10s
+
+# Test 2: Simulate MCP failure (remove uvx from image)
+docker exec openhands-runtime-{id} rm /usr/local/bin/uvx
+docker restart openhands-runtime-{id}
+# Should log "MCP mount failed" but still reach "Ready" (degraded mode)
+
+# Test 3: Reconnect after container restart
+# UI should detect STATUS$READY change via websocket
+```
+
+---
+
+## **EXPECTED OUTCOME**
+
+- **Before Patch**: UI stuck at "Starting" indefinitely; `/alive` returns HTTP 200 with `{"status":"not initialized"}`
+- **After Patch**:
+  - `/alive` returns **HTTP 503** until `client.initialized == True`
+  - `wait_until_alive()` **retries every 2s** for up to 120s
+  - UI transitions to **"Ready"** within 5-10s after plugins finish
+  - MCP failures are **non-fatal** (logged warnings, tools unavailable but runtime starts)
+
+---
+
+## **FILES TO MODIFY**
+
+1. `/home/wuy/AI/UAgent/OpenHands/openhands/runtime/impl/action_execution/action_execution_client.py:131-137`
+2. `/home/wuy/AI/UAgent/OpenHands/openhands/runtime/action_execution_server.py:1202-1206` (HTTP 503)
+3. `/home/wuy/AI/UAgent/OpenHands/openhands/runtime/action_execution_server.py:735-742` (MCP guard)
+
+**Total Lines Changed**: ~15 lines across 3 locations
+
+---
+
+### **Summary**
+
+**Root Cause**: `check_if_alive()` only validates HTTP status, not response body, so it passes when `/alive` returns `{"status":"not initialized"}`. MCP proxy crashes prevent `client.initialized` from being set, keeping runtime in perpetual "not initialized" state while backend believes it's healthy.
+
+**Fix**: Change `/alive` to return HTTP 503 until fully initialized + validate response body in `check_if_alive()` + make MCP failures non-fatal.
+
+**Validation**: Curl `/alive` before/after, watch for green "Ready" status in UI within 10s, no SSE crashes in logs.

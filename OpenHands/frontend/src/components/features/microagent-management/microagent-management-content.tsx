@@ -98,8 +98,8 @@ const getUpdateConversationInstructions = (
 `;
 
 export function MicroagentManagementContent() {
-  // Responsive width state
-  const [width, setWidth] = useState(window.innerWidth);
+  // Responsive width state - use undefined initially to avoid hydration errors
+  const [width, setWidth] = useState<number | undefined>(undefined);
 
   const {
     addMicroagentModalVisible,
@@ -122,6 +122,9 @@ export function MicroagentManagementContent() {
   }
 
   useEffect(() => {
+    // Set initial width after mount to avoid hydration errors
+    setWidth(window.innerWidth);
+
     window.addEventListener("resize", handleResize);
     return () => {
       window.removeEventListener("resize", handleResize);
@@ -322,6 +325,19 @@ export function MicroagentManagementContent() {
   );
 
   const providersAreSet = providers.length > 0;
+
+  // While loading (before client mount), render desktop layout
+  if (width === undefined) {
+    return (
+      <div className="w-full h-full flex rounded-lg border border-[#525252] bg-[#24272E] overflow-hidden">
+        {providersAreSet && <MicroagentManagementSidebar providers={providers} />}
+        <div className="flex-1">
+          <MicroagentManagementMain />
+        </div>
+        {renderModals()}
+      </div>
+    );
+  }
 
   if (width < 1024) {
     return (

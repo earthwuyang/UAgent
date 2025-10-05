@@ -345,16 +345,27 @@ class DockerNestedConversationManager(ConversationManager):
     async def _get_runtime_status_from_nested_runtime(
         self, conversation_id: str, nested_url: str
     ) -> RuntimeStatus | None:
-        """Get runtime status from the nested runtime via API call.
+        """Get runtime readiness from the nested runtime via /alive.
 
-        Args:
-            conversation_id: The conversation ID to query
-            nested_url: The base URL of the nested runtime
+        The action execution server running inside the runtime container exposes
+        a lightweight health endpoint `/alive` which returns JSON:
+          - {"status": "ok"} when fully initialized
+          - {"status": "not initialized"} (or HTTP 503 after our change) otherwise
 
-        Returns:
-            The runtime status if available, None otherwise
+        Historically this method attempted to query a conversation endpoint inside
+        the nested runtime. However, the default runtime only runs the
+        ActionExecutionServer and does not expose conversation APIs. Mapping
+        `/alive` → RuntimeStatus ensures the outer server reports an accurate
+        runtime_status for the UI.
         """
         try:
+            # Derive the base URL hosting the action execution server
+            base_url = (
+                nested_url.split('/api/conversations/')[0]
+                if '/api/conversations/' in nested_url
+                else nested_url
+            )
+
             async with httpx.AsyncClient(
                 headers={
                     'X-Session-API-Key': self._get_session_api_key_for_conversation(
@@ -362,24 +373,23 @@ class DockerNestedConversationManager(ConversationManager):
                     )
                 }
             ) as client:
-                # Query the nested runtime for conversation info
-                response = await client.get(nested_url)
-                if response.status_code == 200:
-                    conversation_data = response.json()
-                    runtime_status_str = conversation_data.get('runtime_status')
-                    if runtime_status_str:
-                        # Convert string back to RuntimeStatus enum
-                        return RuntimeStatus(runtime_status_str)
-                else:
-                    logger.debug(
-                        f'Failed to get conversation info for {conversation_id}: {response.status_code}'
-                    )
-        except ValueError:
-            logger.debug(f'Invalid runtime status value: {runtime_status_str}')
+                resp = await client.get(f'{base_url}/alive', timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('status') == 'ok':
+                        return RuntimeStatus.READY
+                    # Not fully initialized yet
+                    return RuntimeStatus.STARTING_RUNTIME
+                # Treat non-200 as still starting; log for visibility
+                logger.debug(
+                    f'/alive returned {resp.status_code} for {conversation_id} at {base_url}'
+                )
+                return RuntimeStatus.STARTING_RUNTIME
         except Exception as e:
-            logger.debug(f'Could not get runtime status for {conversation_id}: {e}')
-
-        return None
+            logger.debug(
+                f'Could not query /alive for {conversation_id} at {nested_url}: {e}'
+            )
+            return None
 
     async def get_agent_loop_info(
         self, user_id: str | None = None, filter_to_sids: set[str] | None = None

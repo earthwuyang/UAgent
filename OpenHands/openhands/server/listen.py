@@ -26,4 +26,9 @@ base_app.add_middleware(
     rate_limiter=InMemoryRateLimiter(requests=10, seconds=1),
 )
 
-app = socketio.ASGIApp(sio, other_asgi_app=base_app)
+# Configure SocketIO to allow WebSocket routes to pass through to FastAPI
+app = socketio.ASGIApp(
+    sio,
+    other_asgi_app=base_app,
+    socketio_path='/socket.io/'  # Explicitly set SocketIO path to avoid conflicts
+)

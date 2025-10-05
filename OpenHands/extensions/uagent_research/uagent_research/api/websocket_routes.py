@@ -136,7 +136,9 @@ async def experiment_websocket(websocket: WebSocket, experiment_id: str):
         "timestamp": "2024-10-04T12:00:00Z"
     }
     """
+    logger.info(f"[WebSocket] New connection request for experiment {experiment_id}")
     await manager.connect(websocket, experiment_id=experiment_id)
+    logger.info(f"[WebSocket] Connected to experiment {experiment_id}")
 
     try:
         # Send initial connection confirmation
@@ -185,7 +187,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         "timestamp": "2024-10-04T12:00:00Z"
     }
     """
+    logger.info(f"[WebSocket] New connection request for session {session_id}")
     await manager.connect(websocket, session_id=session_id)
+    logger.info(f"[WebSocket] Connected to session {session_id}")
 
     try:
         # Send initial connection confirmation

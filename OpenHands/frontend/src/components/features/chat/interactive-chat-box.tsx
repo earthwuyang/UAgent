@@ -3,7 +3,7 @@ import { isFileImage } from "#/utils/is-file-image";
 import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import { validateFiles } from "#/utils/file-validation";
 import { CustomChatInput } from "./custom-chat-input";
-import { RootState } from "#/store";
+import { RootState, useAgentStore } from "#/store";
 import { AgentState } from "#/types/agent-state";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 import { GitControlBar } from "./git-control-bar";
@@ -34,9 +34,7 @@ export function InteractiveChatBox({
   optimisticUserMessage,
 }: InteractiveChatBoxProps) {
   const dispatch = useDispatch();
-  const curAgentState = useSelector(
-    (state: RootState) => state.agent.curAgentState,
-  );
+  const curAgentState = useAgentStore((state) => state.curAgentState);
   const images = useSelector((state: RootState) => state.conversation.images);
   const files = useSelector((state: RootState) => state.conversation.files);
   const { data: conversation } = useActiveConversation();
@@ -147,9 +145,15 @@ export function InteractiveChatBox({
     handleSubmit(suggestion);
   };
 
+  // Only disable input when waiting for user confirmation
+  // OR when loading AND conversation is not stopped (stopped means user can restart)
+  // OR when running AND conversation is not stopped (agent is actively working)
   const isDisabled =
-    curAgentState === AgentState.LOADING ||
-    curAgentState === AgentState.AWAITING_USER_CONFIRMATION;
+    curAgentState === AgentState.AWAITING_USER_CONFIRMATION ||
+    (curAgentState === AgentState.LOADING &&
+      conversation?.status !== "STOPPED") ||
+    (curAgentState === AgentState.RUNNING &&
+      conversation?.status !== "STOPPED");
 
   return (
     <div data-testid="interactive-chat-box">

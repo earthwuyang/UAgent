@@ -1,0 +1,298 @@
+Perfect! Now I have a complete understanding of the issue. Let me create a comprehensive analysis and solution:
+
+## Analysis Summary
+
+The bug is confirmed to be a **Redux/Zustand state mismatch** with the following root causes:
+
+1. **State writes go to Zustand** (`agent-store.ts`): The backend sends `AgentStateChangedObservation` events, which are handled in `observations.ts` line 42, calling `setCurrentAgentState(message.extras.agent_state)` which updates the **Zustand store**.
+
+2. **State reads come from Redux** (`store.ts`): Components like `AgentStatus`, `ChatInterface`, and `InteractiveChatBox` all read from Redux using `useSelector((state: RootState) => state.agent.curAgentState)`.
+
+3. **Redux stub has uppercase initial value**: The Redux `agentSlice` in `store.ts` line 29 has `initialState: { curAgentState: "LOADING" }` (uppercase string), while the `AgentState` enum uses lowercase strings like `"loading"`.
+
+4. **Redux is never updated**: The Redux slice has `reducers: {}`, so the state remains stuck at the uppercase `"LOADING"` value forever.
+
+5. **Result**: All comparisons in `AgentStatus.tsx` (lines 45-62) fail because they're comparing the stale uppercase `"LOADING"` against lowercase enum values, causing all conditions to be false and falling back to the clock icon (line 93).
+
+## Proposed Solution (Option A - Recommended)
+
+**Approach A: Migrate components to read from Zustand** ✅ **RECOMMENDED**
+
+**Pros:**
+- Minimal changes (only update imports/reads, no new code)
+- Aligns reads with writes (single source of truth)
+- Removes dead Redux code path
+- Clean architecture - Zustand is already the active store
+- No risk of sync bugs between two stores
+
+**Cons:**
+- Need to update ~15 component files
+- Small breaking change if any external code relies on Redux
+
+**Migration scope:** 15 files that use `useSelector((state: RootState) => state.agent.curAgentState)`
+
+---
+
+## Minimal Patch Implementation (Approach A)
+
+Here's the unified diff for the **smallest viable fix** targeting the critical UI bug:
+
+```diff
+--- a/OpenHands/frontend/src/components/features/controls/agent-status.tsx
++++ b/OpenHands/frontend/src/components/features/controls/agent-status.tsx
+@@ -1,7 +1,7 @@
+ import { useTranslation } from "react-i18next";
+-import { useSelector, useDispatch } from "react-redux";
++import { useDispatch } from "react-redux";
+ import { useEffect } from "react";
+-import { RootState } from "#/store";
++import { useAgentStore } from "#/stores/agent-store";
+ import { useWsClient } from "#/context/ws-client-provider";
+ import { useActiveConversation } from "#/hooks/query/use-active-conversation";
+ import { getStatusCode } from "#/utils/status";
+@@ -29,7 +29,7 @@ export function AgentStatus({
+ }: AgentStatusProps) {
+   const { t } = useTranslation();
+   const dispatch = useDispatch();
+-  const { curAgentState } = useSelector((state: RootState) => state.agent);
++  const curAgentState = useAgentStore((state) => state.curAgentState);
+   const { curStatusMessage } = useSelector((state: RootState) => state.status);
+   const { webSocketStatus } = useWsClient();
+   const { data: conversation } = useActiveConversation();
+```
+
+```diff
+--- a/OpenHands/frontend/src/components/features/chat/chat-interface.tsx
++++ b/OpenHands/frontend/src/components/features/chat/chat-interface.tsx
+@@ -1,5 +1,5 @@
+-import { useSelector, useDispatch } from "react-redux";
++import { useDispatch } from "react-redux";
+ import React from "react";
+ import posthog from "posthog-js";
+ import { useParams } from "react-router";
+@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
+ import { convertImageToBase64 } from "#/utils/convert-image-to-base-64";
+ import { TrajectoryActions } from "../trajectory/trajectory-actions";
+ import { createChatMessage } from "#/services/chat-service";
+ import { InteractiveChatBox } from "./interactive-chat-box";
+-import { RootState } from "#/store";
++import { useAgentStore } from "#/stores/agent-store";
+ import { AgentState } from "#/types/agent-state";
+ import { isOpenHandsAction } from "#/types/core/guards";
+ import { generateAgentStateChangeEvent } from "#/services/agent-state-service";
+@@ -61,7 +61,7 @@ export function ChatInterface() {
+   } = useScrollToBottom(scrollRef);
+   const { data: config } = useConfig();
+ 
+-  const { curAgentState } = useSelector((state: RootState) => state.agent);
++  const curAgentState = useAgentStore((state) => state.curAgentState);
+ 
+   const [feedbackPolarity, setFeedbackPolarity] = React.useState<
+     "positive" | "negative"
+```
+
+```diff
+--- a/OpenHands/frontend/src/components/features/chat/interactive-chat-box.tsx
++++ b/OpenHands/frontend/src/components/features/chat/interactive-chat-box.tsx
+@@ -1,9 +1,9 @@
+-import { useSelector, useDispatch } from "react-redux";
++import { useDispatch, useSelector } from "react-redux";
+ import { isFileImage } from "#/utils/is-file-image";
+ import { displayErrorToast } from "#/utils/custom-toast-handlers";
+ import { validateFiles } from "#/utils/file-validation";
+ import { CustomChatInput } from "./custom-chat-input";
+-import { RootState } from "#/store";
++import { RootState, useAgentStore } from "#/store";
+ import { AgentState } from "#/types/agent-state";
+ import { useActiveConversation } from "#/hooks/query/use-active-conversation";
+ import { GitControlBar } from "./git-control-bar";
+@@ -35,9 +35,7 @@ export function InteractiveChatBox({
+ }: InteractiveChatBoxProps) {
+   const dispatch = useDispatch();
+-  const curAgentState = useSelector(
+-    (state: RootState) => state.agent.curAgentState,
+-  );
++  const curAgentState = useAgentStore((state) => state.curAgentState);
+   const images = useSelector((state: RootState) => state.conversation.images);
+   const files = useSelector((state: RootState) => state.conversation.files);
+   const { data: conversation } = useActiveConversation();
+```
+
+For the remaining 12 files, the same pattern applies. Here's a script-friendly search-and-replace pattern:
+
+**Pattern to find:**
+```typescript
+const { curAgentState } = useSelector((state: RootState) => state.agent);
+// OR
+const curAgentState = useSelector((state: RootState) => state.agent.curAgentState);
+```
+
+**Replace with:**
+```typescript
+const curAgentState = useAgentStore((state) => state.curAgentState);
+```
+
+**And update imports:**
+- Remove: `import { RootState } from "#/store";` (if only used for agent state)
+- Add: `import { useAgentStore } from "#/stores/agent-store";`
+
+---
+
+## Quick Build & Test Instructions
+
+### Local Build:
+```bash
+cd /home/wuy/AI/UAgent/OpenHands/frontend
+npm install
+npm run build
+```
+
+### Development Mode (with hot reload):
+```bash
+cd /home/wuy/AI/UAgent/OpenHands/frontend
+npm run dev
+```
+
+### Simulate Backend Events for Testing:
+
+Create a test file `test-agent-state.js`:
+```javascript
+// Test script to verify state changes
+const { io } = require('socket.io-client');
+
+const socket = io('http://localhost:3000', {
+  transports: ['websocket'],
+});
+
+socket.on('connect', () => {
+  console.log('Connected');
+  
+  // Simulate AWAITING_USER_INPUT
+  setTimeout(() => {
+    socket.emit('oh_event', {
+      observation: 'agent_state_changed',
+      extras: { agent_state: 'awaiting_user_input' },
+      id: '1',
+      source: 'agent',
+      timestamp: new Date().toISOString(),
+    });
+  }, 1000);
+  
+  // Simulate RUNNING
+  setTimeout(() => {
+    socket.emit('oh_event', {
+      observation: 'agent_state_changed',
+      extras: { agent_state: 'running' },
+      id: '2',
+      source: 'agent',
+      timestamp: new Date().toISOString(),
+    });
+  }, 3000);
+});
+```
+
+### Visual Verification Checklist:
+
+After applying the patch, verify in the browser DevTools:
+
+1. **Initial state (LOADING):** Should show spinner/loading indicator
+2. **RUNNING state:** Should show **Stop button (pause icon)**, NOT clock icon
+3. **AWAITING_USER_INPUT state:** Should show **Stop button (pause icon)**, NOT clock icon, status text "Waiting for task"
+4. **STOPPED state:** Should show **Resume/Play button**
+5. **ERROR state:** Should show **Error icon (red circle)**
+
+**Browser Console Test:**
+```javascript
+// In browser console after opening the app
+const store = window.__ZUSTAND_STORES__?.agentStore || 
+              require('#/stores/agent-store').useAgentStore.getState();
+
+// Check current state
+console.log('Current agent state:', store.curAgentState);
+
+// Manually trigger state change to test UI
+store.setCurrentAgentState('awaiting_user_input');
+// UI should immediately show Stop button
+
+store.setCurrentAgentState('running');
+// UI should show Stop button + "Running" status
+
+store.setCurrentAgentState('stopped');
+// UI should show Play/Resume button
+```
+
+---
+
+## Complete File List to Update (15 files)
+
+For a complete fix, update these files using the same pattern:
+
+1. ✅ `components/features/controls/agent-status.tsx` (critical - shows button)
+2. ✅ `components/features/chat/chat-interface.tsx` (critical - typing indicator)
+3. ✅ `components/features/chat/interactive-chat-box.tsx` (critical - input disabled state)
+4. `components/features/jupyter/jupyter.tsx`
+5. `components/features/terminal/terminal.tsx`
+6. `components/features/conversation/conversation-tabs/vscode-tooltip-content.tsx`
+7. `components/features/controls/server-status.tsx`
+8. `components/features/microagent-management/microagent-management-content.tsx`
+9. `components/features/microagent-management/microagent-management-sidebar-tabs.tsx`
+10. `components/features/conversation-panel/microagents-modal.tsx`
+11. `hooks/use-terminal.ts`
+12. `hooks/use-runtime-is-ready.ts`
+13. `hooks/use-handle-runtime-active.ts`
+14. `hooks/query/use-conversation-microagents.ts`
+15. `routes/changes-tab.tsx`
+16. `routes/vscode-tab.tsx`
+
+---
+
+## Optional: Lightweight Component Test
+
+Create `agent-status.test.tsx`:
+```typescript
+import { render, screen } from '@testing-library/react';
+import { AgentStatus } from './agent-status';
+import { useAgentStore } from '#/stores/agent-store';
+import { AgentState } from '#/types/agent-state';
+
+describe('AgentStatus', () => {
+  it('shows stop button when agent is RUNNING', () => {
+    useAgentStore.setState({ curAgentState: AgentState.RUNNING });
+    
+    render(<AgentStatus handleStop={jest.fn()} handleResumeAgent={jest.fn()} />);
+    
+    expect(screen.getByTestId('stop-button')).toBeInTheDocument();
+    expect(screen.queryByTestId('clock-icon')).not.toBeInTheDocument();
+  });
+  
+  it('shows stop button when agent is AWAITING_USER_INPUT', () => {
+    useAgentStore.setState({ curAgentState: AgentState.AWAITING_USER_INPUT });
+    
+    render(<AgentStatus handleStop={jest.fn()} handleResumeAgent={jest.fn()} />);
+    
+    expect(screen.getByTestId('stop-button')).toBeInTheDocument();
+  });
+  
+  it('shows resume button when agent is STOPPED', () => {
+    useAgentStore.setState({ curAgentState: AgentState.STOPPED });
+    
+    render(<AgentStatus handleStop={jest.fn()} handleResumeAgent={jest.fn()} />);
+    
+    expect(screen.queryByTestId('stop-button')).not.toBeInTheDocument();
+    // Resume button would have its own testid
+  });
+});
+```
+
+---
+
+## Summary
+
+**Root cause:** Redux/Zustand split-brain + uppercase/lowercase enum mismatch  
+**Recommended fix:** Approach A (migrate to Zustand)  
+**Minimal changeset:** 3 critical files (agent-status, chat-interface, interactive-chat-box)  
+**Full fix:** 15 files  
+**Testing:** Browser DevTools + manual state injection  
+**Build:** `cd OpenHands/frontend && npm install && npm run build`
+
+The patches above will restore the Stop/Resume button functionality and correctly display agent states in the UI.

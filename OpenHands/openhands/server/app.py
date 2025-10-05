@@ -45,7 +45,8 @@ try:
         sys.path.insert(0, str(extension_dir))
 
         # Import from source (not installed package)
-        from uagent_research.api import router as research_router, ws_router as research_ws_router
+        from uagent_research.api import router as research_router
+        from uagent_research.api import ws_router as research_ws_router
         from uagent_research.models.base import init_database, close_database
 
         RESEARCH_EXTENSION_AVAILABLE = True
@@ -141,8 +142,14 @@ app.include_router(trajectory_router)
 # Include UAgent Research Extension routes if available
 if RESEARCH_EXTENSION_AVAILABLE and research_router is not None:
     app.include_router(research_router)
+    print("✅ UAgent Research Extension routes registered")
+    print(f"Research router prefix: {research_router.prefix}")
+    print(f"Research router routes: {[route.path for route in research_router.routes]}")
+
     if research_ws_router is not None:
         app.include_router(research_ws_router)
-    print("✅ UAgent Research Extension routes registered")
+        print("✅ UAgent Research Extension WebSocket routes registered")
+        print(f"Research WS router prefix: {getattr(research_ws_router, 'prefix', 'N/A')}")
+        print(f"Research WS router routes: {[route.path for route in research_ws_router.routes]}")
 
 add_health_endpoints(app)

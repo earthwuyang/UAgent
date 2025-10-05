@@ -46,9 +46,8 @@ export function CustomChatInput({
   );
   const dispatch = useDispatch();
 
-  // Disable input when conversation is stopped
-  const isConversationStopped = conversationStatus === "STOPPED";
-  const isDisabled = disabled || isConversationStopped;
+  // Allow input even when conversation is STOPPED so user can restart
+  const isDisabled = disabled;
 
   // Listen to submittedMessage state changes
   useEffect(() => {
@@ -95,7 +94,14 @@ export function CustomChatInput({
     chatInputRef as React.RefObject<HTMLDivElement | null>,
     fileInputRef as React.RefObject<HTMLInputElement | null>,
     smartResize,
-    onSubmit,
+    (msg: string) => {
+      try {
+        onSubmit(msg);
+      } catch {
+        // If submission fails (e.g., socket not yet connected), schedule retry shortly
+        setTimeout(() => onSubmit(msg), 300);
+      }
+    },
   );
 
   const { handleInput, handlePaste, handleKeyDown, handleBlur, handleFocus } =

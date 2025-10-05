@@ -7,6 +7,7 @@
  */
 
 import { combineReducers, configureStore, createSlice } from "@reduxjs/toolkit";
+import { AgentState } from "#/types/agent-state";
 
 // Re-export Zustand store hooks for convenience
 export { useAgentStore } from "./stores/agent-store";
@@ -26,7 +27,9 @@ export { useEventMessageStore } from "./stores/event-message-store";
 // The actual state management happens in Zustand stores
 const agentSlice = createSlice({
   name: "agent",
-  initialState: { curAgentState: "LOADING" },
+  // Keep a compat value so legacy components using Redux won't break.
+  // Use lowercase enum to match actual AgentState values set by WebSocket → Zustand.
+  initialState: { curAgentState: AgentState.LOADING },
   reducers: {},
 });
 

@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { useSelector, useDispatch } from "react-redux";
 import { useEffect } from "react";
-import { RootState } from "#/store";
+import { RootState, useAgentStore } from "#/store";
 import { useWsClient } from "#/context/ws-client-provider";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 import { getStatusCode } from "#/utils/status";
@@ -29,7 +29,7 @@ export function AgentStatus({
 }: AgentStatusProps) {
   const { t } = useTranslation();
   const dispatch = useDispatch();
-  const { curAgentState } = useSelector((state: RootState) => state.agent);
+  const curAgentState = useAgentStore((state) => state.curAgentState);
   const { curStatusMessage } = useSelector((state: RootState) => state.status);
   const { webSocketStatus } = useWsClient();
   const { data: conversation } = useActiveConversation();
@@ -43,17 +43,25 @@ export function AgentStatus({
   );
 
   const shouldShownAgentLoading =
-    curAgentState === AgentState.INIT ||
-    curAgentState === AgentState.LOADING ||
-    webSocketStatus === "CONNECTING";
+    (conversation?.status !== "STOPPED") && (
+      curAgentState === AgentState.INIT ||
+      curAgentState === AgentState.LOADING ||
+      (webSocketStatus === "CONNECTING" && curAgentState !== AgentState.AWAITING_USER_INPUT)
+    );
 
   const shouldShownAgentError =
     curAgentState === AgentState.ERROR ||
     curAgentState === AgentState.RATE_LIMITED;
 
-  const shouldShownAgentStop = curAgentState === AgentState.RUNNING;
+  const shouldShownAgentStop =
+    curAgentState === AgentState.RUNNING ||
+    curAgentState === AgentState.PAUSED ||
+    curAgentState === AgentState.AWAITING_USER_INPUT ||
+    curAgentState === AgentState.AWAITING_USER_CONFIRMATION;
 
-  const shouldShownAgentResume = curAgentState === AgentState.STOPPED;
+  const shouldShownAgentResume =
+    curAgentState === AgentState.STOPPED ||
+    curAgentState === AgentState.FINISHED;
 
   // Update global state when agent loading condition changes
   useEffect(() => {

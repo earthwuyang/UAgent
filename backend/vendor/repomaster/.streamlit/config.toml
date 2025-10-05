@@ -1,8 +1,0 @@
-[ui]
-hideTopBar = true
-
-[server]
-showErrorDetails = false
-
-[browser]
-gatherUsageStats = false

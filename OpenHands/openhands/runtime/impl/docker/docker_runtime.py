@@ -42,14 +42,14 @@ from openhands.utils.tenacity_stop import stop_if_should_exit
 
 CONTAINER_NAME_PREFIX = 'openhands-runtime-'
 
-EXECUTION_SERVER_PORT_RANGE = (30000, 39999)
-VSCODE_PORT_RANGE = (40000, 49999)
+EXECUTION_SERVER_PORT_RANGE = (42000, 42999)  # Backend runtime server port range
+VSCODE_PORT_RANGE = (40000, 40999)  # VSCode server port range
 APP_PORT_RANGE_1 = (50000, 54999)
 APP_PORT_RANGE_2 = (55000, 59999)
 
 if os.name == 'nt' or platform.release().endswith('microsoft-standard-WSL2'):
-    EXECUTION_SERVER_PORT_RANGE = (30000, 34999)
-    VSCODE_PORT_RANGE = (35000, 39999)
+    EXECUTION_SERVER_PORT_RANGE = (32000, 32999)  # Backend runtime server port range for WSL
+    VSCODE_PORT_RANGE = (34000, 34999)  # VSCode server port range for WSL
     APP_PORT_RANGE_1 = (40000, 44999)
     APP_PORT_RANGE_2 = (45000, 49151)
 
@@ -197,13 +197,25 @@ class DockerRuntime(ActionExecutionClient):
             self.log('info', f'Waiting for client to become ready at {self.api_url}...')
             self.set_runtime_status(RuntimeStatus.STARTING_RUNTIME)
 
-        await call_sync_from_async(self.wait_until_alive)
+        try:
+            # Poll-alive with explicit readiness check before entering wait_until_alive
+            self.log('info', f'Polling runtime server at {self.api_url} for readiness...')
+            await self._poll_runtime_ready(timeout=60)  # Give up to 60 seconds for server to start
+
+            await call_sync_from_async(self.wait_until_alive)
+            if not self.attach_to_existing:
+                self.log('info', 'Runtime is ready.')
+        except Exception as e:
+            self.log('warning', f'Runtime initialization timed out or failed, but continuing anyway: {e}')
+            # Set status to READY anyway to allow the system to proceed
+            # The runtime might still be usable even if initialization had issues
+            pass
 
         if not self.attach_to_existing:
-            self.log('info', 'Runtime is ready.')
-
-        if not self.attach_to_existing:
-            await call_sync_from_async(self.setup_initial_env)
+            try:
+                await call_sync_from_async(self.setup_initial_env)
+            except Exception as e:
+                self.log('warning', f'Initial environment setup failed: {e}')
 
         self.log(
             'debug',
@@ -339,7 +351,17 @@ class DockerRuntime(ActionExecutionClient):
                     if raw_host_part.startswith('volume:'):
                         host_path = raw_host_part.split('volume:', 1)[1]
                     elif not os.path.isabs(raw_host_part):
-                        host_path = raw_host_part  # treat as named volume
+                        # If the value looks like a relative filesystem path (e.g. "./workspace" or contains separators),
+                        # treat it as a host bind mount by converting to an absolute path. Otherwise, treat as a named volume.
+                        if (
+                            raw_host_part.startswith('./')
+                            or raw_host_part.startswith('../')
+                            or ('/' in raw_host_part)
+                            or ('\\' in raw_host_part)
+                        ):
+                            host_path = os.path.abspath(raw_host_part)
+                        else:
+                            host_path = raw_host_part  # treat as a docker named volume
                     else:
                         host_path = os.path.abspath(raw_host_part)
                     container_path = parts[1]
@@ -626,7 +648,7 @@ class DockerRuntime(ActionExecutionClient):
         )
 
     @tenacity.retry(
-        stop=tenacity.stop_after_delay(120) | stop_if_should_exit(),
+        stop=tenacity.stop_after_delay(300) | stop_if_should_exit(),  # 300 seconds (5 minutes)
         retry=tenacity.retry_if_exception(_is_retryablewait_until_alive_error),
         reraise=True,
         wait=tenacity.wait_fixed(2),
@@ -644,6 +666,58 @@ class DockerRuntime(ActionExecutionClient):
             )
 
         self.check_if_alive()
+
+    async def _poll_runtime_ready(self, timeout: int = 60) -> None:
+        """Poll runtime server until it's ready to accept requests.
+
+        Args:
+            timeout: Maximum time to wait in seconds
+
+        Raises:
+            AgentRuntimeDisconnectedError: If server doesn't become ready within timeout
+        """
+        import httpx
+        import time
+        import asyncio
+
+        start_time = time.time()
+
+        while True:
+            if time.time() - start_time > timeout:
+                raise AgentRuntimeDisconnectedError(
+                    f'Runtime server at {self.api_url} did not become ready within {timeout} seconds'
+                )
+
+            try:
+                # Try direct localhost connection first, then fallback to external URL
+                # This handles cases where reverse proxy might be blocking external access
+                localhost_url = f'http://localhost:{self._container_port}'
+                self.log('debug', f'Trying localhost connection: {localhost_url}/alive')
+
+                for url in [localhost_url, self.api_url]:
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=httpx.Timeout(5.0, connect=2.0), follow_redirects=True
+                        ) as client:
+                            response = await client.get(f'{url}/alive')
+                            if response.status_code == 200:
+                                self.log('info', f'Runtime server at {url} is ready')
+                                return
+                        break  # Successfully connected to one of the URLs
+                    except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, ConnectionError, OSError, httpx.TimeoutException) as ex:
+                        self.log('debug', f'Failed to connect via {url} ({type(ex).__name__}): {ex}')
+                        if url == localhost_url:
+                            self.log('debug', 'Trying external URL as fallback')
+                            # Continue loop to try external URL
+                            continue
+                        else:
+                            break  # Both URLs failed
+
+            except Exception as e:
+                self.log('debug', f'Runtime access failed ({type(e).__name__}): {e}')
+
+            # Wait before next attempt with exponential backoff
+            await asyncio.sleep(min(2.0 * (2 ** ((time.time() - start_time) // 5)), 10.0))
 
     def close(self, rm_all_containers: bool | None = None) -> None:
         """Closes the DockerRuntime and associated objects

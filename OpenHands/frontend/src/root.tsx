@@ -12,6 +12,13 @@ import React from "react";
 import { Toaster } from "react-hot-toast";
 
 export function Layout({ children }: { children: React.ReactNode }) {
+  // Use a ref to track hydration to avoid conditional hooks/risky DOM manipulation
+  const [isSsr, setIsSsr] = React.useState(true);
+  React.useEffect(() => {
+    // Mark as client-side after first render
+    setIsSsr(false);
+  }, []);
+
   return (
     <html lang="en">
       <head>
@@ -22,6 +29,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </head>
       <body>
         {children}
+        {/* Render portal targets only on client after hydration completes */}
+        {!isSsr && <>
+          <div id="modal-portal-exit" />
+          <div id="root-outlet" />
+        </>}
         <ScrollRestoration />
         <Scripts />
         <Toaster />

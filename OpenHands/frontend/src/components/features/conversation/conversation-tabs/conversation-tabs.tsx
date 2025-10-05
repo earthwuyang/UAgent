@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
 import { useTranslation } from "react-i18next";
 import { useLocalStorage } from "@uidotdev/usehooks";
 import JupyterIcon from "#/icons/jupyter.svg?react";
@@ -8,27 +7,24 @@ import GlobeIcon from "#/icons/globe.svg?react";
 import ServerIcon from "#/icons/server.svg?react";
 import GitChanges from "#/icons/git_changes.svg?react";
 import VSCodeIcon from "#/icons/vscode.svg?react";
+import ResearchTreeIcon from "#/icons/research-tree.svg?react";
 import { cn } from "#/utils/utils";
 import { ConversationTabNav } from "./conversation-tab-nav";
 import { ChatActionTooltip } from "../../chat/chat-action-tooltip";
 import { I18nKey } from "#/i18n/declaration";
 import { VSCodeTooltipContent } from "./vscode-tooltip-content";
 import {
+  useConversationStore,
   setHasRightPanelToggled,
   setSelectedTab,
   setIsRightPanelShown,
   type ConversationTab,
 } from "#/state/conversation-store";
-import { RootState } from "#/store";
 
 export function ConversationTabs() {
-  const dispatch = useDispatch();
-  const selectedTab = useSelector(
-    (state: RootState) => state.conversation.selectedTab,
-  );
-  const { isRightPanelShown } = useSelector(
-    (state: RootState) => state.conversation,
-  );
+  // Use Zustand store instead of Redux
+  const selectedTab = useConversationStore((state) => state.selectedTab);
+  const isRightPanelShown = useConversationStore((state) => state.isRightPanelShown);
 
   // Persist selectedTab and isRightPanelShown in localStorage
   const [persistedSelectedTab, setPersistedSelectedTab] =
@@ -74,13 +70,14 @@ export function ConversationTabs() {
       // If clicking the same active tab, close the drawer
       setHasRightPanelToggled(false);
       setPersistedIsRightPanelShown(false);
+      setIsRightPanelShown(false);
     } else {
       // If clicking a different tab or drawer is closed, open drawer and select tab
       onTabChange(tab);
-      if (!isRightPanelShown) {
-        setHasRightPanelToggled(true);
-        setPersistedIsRightPanelShown(true);
-      }
+      // Always ensure panel is shown when selecting a tab (remove the conditional)
+      setHasRightPanelToggled(true);
+      setPersistedIsRightPanelShown(true);
+      setIsRightPanelShown(true);
     }
   };
 
@@ -129,6 +126,13 @@ export function ConversationTabs() {
       onClick: () => onTabSelected("browser"),
       tooltipContent: t(I18nKey.COMMON$BROWSER),
       tooltipAriaLabel: t(I18nKey.COMMON$BROWSER),
+    },
+    {
+      isActive: isTabActive("research"),
+      icon: ResearchTreeIcon,
+      onClick: () => onTabSelected("research"),
+      tooltipContent: "Research Tree",
+      tooltipAriaLabel: "Research Tree",
     },
   ];
 

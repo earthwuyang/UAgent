@@ -1,0 +1,15 @@
+## Diagnosis Complete
+
+**Root Cause:** Frontend has not been rebuilt after research tab implementation. The production bundle at `http://120.46.207.248:3000` does not include the new research tab code.
+
+**Primary Fix:** Run `npm run build` in `OpenHands/frontend/` to regenerate the production bundle with research tab components.
+
+**Secondary Requirement (post-fix):** Once the tab is visible, a research experiment must be actively running for the tree to populate. The tree will show "No Active Research" until you start a research task via the `/api/research/experiments/start` endpoint or through agent interaction that triggers research mode.
+
+All code infrastructure is correctly implemented:
+- ✅ Tab registered in UI (conversation-tabs.tsx:130-136)  
+- ✅ Route configured (conversation-tab-content.tsx:60-64)
+- ✅ Components implemented (ResearchTab, ResearchTreeView, stores, WebSocket hooks)
+- ✅ Backend API configured (app.py:38-65, research_routes.py, websocket_routes.py)
+- ✅ Dependencies installed (reactflow, dagre)
+- ❌ **Build not deployed** ← needs `npm run build`

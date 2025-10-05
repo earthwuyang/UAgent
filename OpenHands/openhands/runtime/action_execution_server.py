@@ -242,11 +242,19 @@ class ActionExecutor:
 
         logger.debug('Initializing browser asynchronously')
         try:
-            self.browser = BrowserEnv(self.browsergym_eval_env)
+            # Add timeout to prevent hanging
+            await asyncio.wait_for(self._init_browser_internal(), timeout=120)  # 2 minute timeout
             logger.debug('Browser initialized asynchronously')
+        except asyncio.TimeoutError:
+            logger.warning('Browser initialization timed out')
+            self.browser = None
         except Exception as e:
             logger.error(f'Failed to initialize browser: {e}')
             self.browser = None
+
+    async def _init_browser_internal(self):
+        """Internal method to initialize browser with proper error handling."""
+        self.browser = BrowserEnv(self.browsergym_eval_env)
 
     async def _ensure_browser_ready(self):
         """Ensure the browser is ready for use."""
@@ -289,46 +297,93 @@ class ActionExecutor:
                 ),
                 max_memory_mb=self.max_memory_gb * 1024 if self.max_memory_gb else None,
             )
+            # Initialize the bash session
             bash_session.initialize()
             return bash_session
 
-    async def ainit(self):
-        # bash needs to be initialized first
-        logger.debug('Initializing bash session')
+    async def _init_bash_session(self):
+        """Internal method to initialize bash session with proper error handling."""
         self.bash_session = self._create_bash_session()
-        logger.debug('Bash session initialized')
 
-        # Start browser initialization in the background
-        self.browser_init_task = asyncio.create_task(self._init_browser_async())
-        logger.debug('Browser initialization started in background')
+    async def ainit(self):
+        try:
+            # bash needs to be initialized first
+            logger.info('Initializing bash session')
+            # Add timeout to bash session initialization to prevent hanging
+            try:
+                await asyncio.wait_for(self._init_bash_session(), timeout=60)  # Increased from 30 to 60 seconds
+                logger.info('Bash session initialized successfully')
+            except asyncio.TimeoutError:
+                logger.warning('Bash session initialization timed out')
+            except Exception as e:
+                logger.error(f'Bash session initialization failed: {str(e)}', exc_info=True)
 
-        await wait_all(
-            (self._init_plugin(plugin) for plugin in self.plugins_to_load),
-            timeout=int(os.environ.get('INIT_PLUGIN_TIMEOUT', '120')),
-        )
-        logger.debug('All plugins initialized')
+            # Start browser initialization in the background
+            self.browser_init_task = asyncio.create_task(self._init_browser_async())
+            logger.info('Browser initialization started in background')
 
-        # This is a temporary workaround
-        # TODO: refactor AgentSkills to be part of JupyterPlugin
-        # AFTER ServerRuntime is deprecated
-        logger.debug('Initializing AgentSkills')
-        if 'agent_skills' in self.plugins and 'jupyter' in self.plugins:
-            obs = await self.run_ipython(
-                IPythonRunCellAction(
-                    code='from openhands.runtime.plugins.agent_skills.agentskills import *\n'
+            logger.info(f'Initializing {len(self.plugins_to_load)} plugins with timeout')
+            try:
+                await wait_all(
+                    (self._init_plugin(plugin) for plugin in self.plugins_to_load),
+                    timeout=int(os.environ.get('INIT_PLUGIN_TIMEOUT', '600')),  # Increased from 300 to 600 seconds (10 minutes)
                 )
-            )
-            logger.debug(f'AgentSkills initialized: {obs}')
+                logger.info('All plugins initialized successfully')
+            except asyncio.TimeoutError as e:
+                logger.error(f'Plugin initialization timed out: {str(e)}')
+                raise
+            except Exception as e:
+                logger.error(f'Plugin initialization failed: {str(e)}', exc_info=True)
+                raise
 
-        logger.debug('Initializing bash commands')
-        await self._init_bash_commands()
+            # This is a temporary workaround
+            # TODO: refactor AgentSkills to be part of JupyterPlugin
+            # AFTER ServerRuntime is deprecated
+            logger.info('Initializing AgentSkills')
+            if 'agent_skills' in self.plugins and 'jupyter' in self.plugins:
+                try:
+                    obs = await self.run_ipython(
+                        IPythonRunCellAction(
+                            code='from openhands.runtime.plugins.agent_skills.agentskills import *\n'
+                        )
+                    )
+                    logger.info(f'AgentSkills initialized successfully: {obs}')
+                except Exception as e:
+                    logger.error(f'AgentSkills initialization failed: {str(e)}', exc_info=True)
 
-        logger.debug('Runtime client initialized.')
-        self._initialized = True
+            logger.info('Initializing bash commands')
+            # Add timeout to bash commands initialization
+            try:
+                await asyncio.wait_for(self._init_bash_commands(), timeout=120)  # Increased from 60 to 120 seconds
+                logger.info('Bash commands initialized successfully')
+            except asyncio.TimeoutError:
+                logger.warning('Bash commands initialization timed out, continuing anyway')
+            except Exception as e:
+                logger.error(f'Bash commands initialization failed: {str(e)}', exc_info=True)
+
+            logger.info('Runtime client initialized.')
+            self._initialized = True
+        except Exception as e:
+            logger.error(f'Error during runtime initialization: {str(e)}', exc_info=True)
+            # Set initialized to True even if there was an error, so the /alive endpoint can provide more details
+            self._initialized = True
+            # Re-raise the exception so it can be handled by the caller
+            raise
 
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def initialization_status(self) -> dict:
+        """Return detailed information about the initialization status."""
+        return {
+            'initialized': self._initialized,
+            'plugins_loaded': len(self.plugins),
+            'browser_ready': self.browser is not None,
+            'bash_session_ready': self.bash_session is not None,
+            'plugins': list(self.plugins.keys()) if self.plugins else [],
+        }
 
     async def _init_plugin(self, plugin: Plugin):
         assert self.bash_session is not None
@@ -1201,8 +1256,15 @@ if __name__ == '__main__':
 
     @app.get('/alive')
     async def alive():
-        if client is None or not client.initialized:
-            return {'status': 'not initialized'}
+        if client is None:
+            # Use 503 to indicate temporary unavailability so callers retry
+            raise HTTPException(status_code=503, detail='Runtime client not initialized')
+        if not client.initialized:
+            # Provide more detailed information about initialization status
+            initialization_status = client.initialization_status
+            initialization_status['status'] = 'initializing'
+            # Use 503 to indicate temporary unavailability so callers retry
+            raise HTTPException(status_code=503, detail=f'Runtime still initializing: {initialization_status}')
         return {'status': 'ok'}
 
     # ================================

@@ -723,15 +723,18 @@ class StandaloneConversationManager(ConversationManager):
         return results
 
     def _agent_loop_info_from_session(self, session: Session):
+        status = _get_status_from_session(session)
+        # If conversation is stopped, clear the runtime_status to avoid showing stale "STARTING" state
+        runtime_status = None if status == ConversationStatus.STOPPED else getattr(
+            session.agent_session.runtime, 'runtime_status', None
+        )
         return AgentLoopInfo(
             conversation_id=session.sid,
             url=self._get_conversation_url(session.sid),
             session_api_key=None,
             event_store=session.agent_session.event_stream,
-            status=_get_status_from_session(session),
-            runtime_status=getattr(
-                session.agent_session.runtime, 'runtime_status', None
-            ),
+            status=status,
+            runtime_status=runtime_status,
         )
 
     def _get_conversation_url(self, conversation_id: str):
@@ -740,8 +743,24 @@ class StandaloneConversationManager(ConversationManager):
 
 def _get_status_from_session(session: Session) -> ConversationStatus:
     agent_session = session.agent_session
+
+    # Get the current agent state
+    agent_state = agent_session.get_state()
+
+    # If agent is in a terminal state (finished/stopped/error), mark conversation as stopped
+    if agent_state in [
+        AgentState.FINISHED,
+        AgentState.STOPPED,
+        AgentState.REJECTED,
+        AgentState.ERROR,
+    ]:
+        return ConversationStatus.STOPPED
+
+    # If runtime is initialized, conversation is running
     if agent_session.runtime and agent_session.runtime.runtime_initialized:
         return ConversationStatus.RUNNING
+
+    # Otherwise, conversation is starting
     return ConversationStatus.STARTING
 
 

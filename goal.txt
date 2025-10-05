@@ -1,1 +1,0 @@
-please write a fibonacci series and print the first ten items.

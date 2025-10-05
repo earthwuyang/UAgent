@@ -7,7 +7,8 @@ export type ConversationTab =
   | "jupyter"
   | "served"
   | "vscode"
-  | "terminal";
+  | "terminal"
+  | "research";
 
 export interface IMessageToSend {
   text: string;
@@ -53,10 +54,17 @@ interface ConversationActions {
 
 type ConversationStore = ConversationState & ConversationActions;
 
-// Helper function to get initial right panel state from localStorage
+// Helper function to get initial right panel state from localStorage (SSR-safe)
 const getInitialRightPanelState = (): boolean => {
-  const stored = localStorage.getItem("conversation-right-panel-shown");
-  return stored !== null ? JSON.parse(stored) : true;
+  try {
+    if (typeof window === "undefined" || typeof localStorage === "undefined") {
+      return true;
+    }
+    const stored = localStorage.getItem("conversation-right-panel-shown");
+    return stored !== null ? JSON.parse(stored) : true;
+  } catch {
+    return true;
+  }
 };
 
 export const useConversationStore = create<ConversationStore>()(
