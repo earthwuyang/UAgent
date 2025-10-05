@@ -4,9 +4,8 @@ import React from "react";
 import { FileDiffViewer } from "#/components/features/diff-viewer/file-diff-viewer";
 import { retrieveAxiosErrorMessage } from "#/utils/retrieve-axios-error-message";
 import { useGetGitChanges } from "#/hooks/query/use-get-git-changes";
+import { useRuntimeIsReady } from "#/hooks/use-runtime-is-ready";
 import { I18nKey } from "#/i18n/declaration";
-import { RootState } from "#/store";
-import { RUNTIME_INACTIVE_STATES } from "#/types/agent-state";
 import { RandomTip } from "#/components/features/tips/random-tip";
 
 // Error message patterns
@@ -34,8 +33,7 @@ function GitChanges() {
     null,
   );
 
-  const { curAgentState } = useSelector((state: RootState) => state.agent);
-  const runtimeIsActive = !RUNTIME_INACTIVE_STATES.includes(curAgentState);
+  const runtimeIsActive = useRuntimeIsReady();
 
   const isNotGitRepoError =
     error && GIT_REPO_ERROR_PATTERN.test(retrieveAxiosErrorMessage(error));
