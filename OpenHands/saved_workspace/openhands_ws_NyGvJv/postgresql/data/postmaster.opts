@@ -1,0 +1,1 @@
+/workspace/postgresql/bin/postgres "-D" "/workspace/postgresql/data"

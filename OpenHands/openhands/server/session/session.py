@@ -36,6 +36,15 @@ from openhands.server.session.conversation_init_data import ConversationInitData
 from openhands.storage.data_models.settings import Settings
 from openhands.storage.files import FileStore
 
+# Import research middleware for auto-triggering on all messages
+try:
+    from extensions.uagent_research.middleware.research_middleware import research_middleware
+    RESEARCH_MIDDLEWARE_AVAILABLE = True
+except ImportError:
+    RESEARCH_MIDDLEWARE_AVAILABLE = False
+except Exception:
+    RESEARCH_MIDDLEWARE_AVAILABLE = False
+
 
 class WebSession:
     """Web server-bound session wrapper.
@@ -354,6 +363,40 @@ class WebSession:
 
     async def dispatch(self, data: dict) -> None:
         event = event_from_dict(data.copy())
+
+        # Check if research should be triggered for this message
+        if RESEARCH_MIDDLEWARE_AVAILABLE and isinstance(event, MessageAction) and event.content:
+            try:
+                result = await research_middleware.process_message(
+                    user_message=event.content,
+                    session_id=self.sid,
+                    conversation_metadata={'source': 'subsequent_message'}
+                )
+
+                if result.get('should_trigger_research'):
+                    self.logger.info(
+                        f"Research mode triggered for message in conversation {self.sid}",
+                        extra={
+                            'task_type': result.get('task_type'),
+                            'confidence': result.get('confidence'),
+                            'experiment_id': result.get('experiment_id'),
+                        }
+                    )
+
+                    # Optionally append research context to the message
+                    if result.get('status') == 'research_started':
+                        experiment_id = result.get('experiment_id', 'N/A')
+                        research_info = (
+                            f"\n\n[System: Research mode activated - "
+                            f"Experiment ID: {experiment_id}, "
+                            f"Confidence: {result.get('confidence', 0):.2f}. "
+                            f"Check the Research Tree tab for progress.]"
+                        )
+                        event.content += research_info
+            except Exception as e:
+                self.logger.error(f"Failed to process research middleware: {str(e)}", exc_info=True)
+                # Continue with normal message processing
+
         # This checks if the model supports images
         if isinstance(event, MessageAction) and event.image_urls:
             controller = self.agent_session.controller

@@ -233,6 +233,8 @@ logs
 
 # agent
 .envrc
+OpenHands/workspace
+OpenHands/saved_workspace
 /workspace
 /_test_workspace
 /debug
