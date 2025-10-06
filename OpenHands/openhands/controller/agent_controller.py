@@ -511,7 +511,35 @@ class AgentController:
 
         elif isinstance(action, AgentFinishAction):
             self.state.outputs = action.outputs
-            await self.set_agent_state_to(AgentState.FINISHED)
+
+            # In interactive/headless mode, don't actually finish - wait for user confirmation
+            # This prevents the agent from prematurely ending the conversation
+            if not self.headless_mode:
+                # Instead of finishing, send a message and await user input
+                self.log(
+                    'info',
+                    'Agent attempted to finish, but in interactive mode - awaiting user confirmation instead',
+                    extra={'msg_type': 'FINISH_INTERCEPTED'},
+                )
+                # Set state to awaiting user input instead of finished
+                await self.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+
+                # Add a message observation to inform the agent
+                from openhands.events.observation import AgentStateChangedObservation
+                self.event_stream.add_event(
+                    AgentStateChangedObservation(
+                        content=(
+                            "State changed to AWAITING_USER_INPUT. "
+                            "The conversation will continue when the user sends their next message. "
+                            "Do not finish the task unless the user explicitly confirms they are done."
+                        ),
+                        agent_state=AgentState.AWAITING_USER_INPUT,
+                    ),
+                    EventSource.AGENT,
+                )
+            else:
+                # In headless mode, respect the finish action
+                await self.set_agent_state_to(AgentState.FINISHED)
         elif isinstance(action, AgentRejectAction):
             self.state.outputs = action.outputs
             await self.set_agent_state_to(AgentState.REJECTED)
