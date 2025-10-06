@@ -364,6 +364,14 @@ async def health_check():
 # Phase 2: Research Tree Endpoints
 # ============================================================================
 
+# Import middleware to access orchestrators
+try:
+    from ...middleware.research_middleware import research_middleware
+    MIDDLEWARE_AVAILABLE = True
+except ImportError:
+    MIDDLEWARE_AVAILABLE = False
+    logger.warning("Research middleware not available for API routes")
+
 # Global storage for active orchestrators (in production, use Redis/DB)
 _active_orchestrators = {}
 
@@ -423,8 +431,12 @@ async def get_experiment_tree(
                 }
             )
 
-        # Get orchestrator (if running)
-        orchestrator = _active_orchestrators.get(experiment_id)
+        # Get orchestrator (if running) - check middleware first
+        orchestrator = None
+        if MIDDLEWARE_AVAILABLE:
+            orchestrator = research_middleware.get_orchestrator(experiment_id)
+        if not orchestrator:
+            orchestrator = _active_orchestrators.get(experiment_id)
 
         if not orchestrator or not hasattr(orchestrator, 'tree') or not orchestrator.tree:
             # Return empty tree

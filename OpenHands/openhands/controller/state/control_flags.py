@@ -55,11 +55,12 @@ class IterationControlFlag(ControlFlag[int]):
             self._hit_limit = False
 
     def step(self):
-        if self.reached_limit():
-            raise RuntimeError(
-                f'Agent reached maximum iteration. '
-                f'Current iteration: {self.current_value}, max iteration: {self.max_value}'
-            )
+        # No iteration limit - agent can run indefinitely
+        # if self.reached_limit():
+        #     raise RuntimeError(
+        #         f'Agent reached maximum iteration. '
+        #         f'Current iteration: {self.current_value}, max iteration: {self.max_value}'
+        #     )
 
         # Increment the current value
         self.current_value += 1

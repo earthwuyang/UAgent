@@ -51,9 +51,13 @@ def get_field_info(field: FieldInfo) -> dict[str, Any]:
 
 def model_defaults_to_dict(model: BaseModel) -> dict[str, Any]:
     """Serialize field information in a dict for the frontend, including type hints, defaults, and whether it's optional."""
+    import warnings
     result = {}
     for name, field in model.__class__.model_fields.items():
-        field_value = getattr(model, name)
+        # Suppress deprecation warning for field access
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=DeprecationWarning)
+            field_value = getattr(model, name)
 
         if isinstance(field_value, BaseModel):
             result[name] = model_defaults_to_dict(field_value)

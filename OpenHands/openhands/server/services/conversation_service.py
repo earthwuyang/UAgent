@@ -30,6 +30,18 @@ from openhands.storage.data_models.conversation_metadata import (
 from openhands.storage.data_models.user_secrets import UserSecrets
 from openhands.utils.conversation_summary import get_default_conversation_title
 
+# Import research middleware
+try:
+    from extensions.uagent_research.middleware.research_middleware import research_middleware
+    RESEARCH_MIDDLEWARE_AVAILABLE = True
+    logger.info("Research middleware loaded successfully")
+except ImportError as e:
+    RESEARCH_MIDDLEWARE_AVAILABLE = False
+    logger.warning(f"Research middleware not available: {str(e)}")
+except Exception as e:
+    RESEARCH_MIDDLEWARE_AVAILABLE = False
+    logger.error(f"Failed to load research middleware: {str(e)}", exc_info=True)
+
 
 async def initialize_conversation(
     user_id: str | None,
@@ -150,6 +162,49 @@ async def start_conversation(
             image_urls=image_urls or [],
         )
 
+    # Check if research mode should be triggered (non-blocking)
+    research_triggered = False
+    if RESEARCH_MIDDLEWARE_AVAILABLE and initial_user_msg:
+        try:
+            # Process research in a non-blocking way - don't await the actual research execution
+            result = await research_middleware.process_message(
+                user_message=initial_user_msg,
+                session_id=conversation_id,
+                conversation_metadata={
+                    'user_id': user_id,
+                    'repository': conversation_metadata.selected_repository,
+                    'branch': conversation_metadata.selected_branch,
+                }
+            )
+
+            if result.get('should_trigger_research'):
+                research_triggered = True
+                experiment_id = result.get('experiment_id', 'N/A')
+                logger.info(
+                    f"Research mode triggered for conversation {conversation_id}",
+                    extra={
+                        'task_type': result.get('task_type'),
+                        'confidence': result.get('confidence'),
+                        'experiment_id': experiment_id,
+                    }
+                )
+
+                # Add research info to initial message for context (optional)
+                # Only add if research actually started successfully
+                if result.get('status') == 'research_started' and initial_message_action:
+                    research_context = (
+                        f"\n\n[System: Research mode activated - "
+                        f"Experiment ID: {experiment_id}, "
+                        f"Task Type: {result.get('task_type')}, "
+                        f"Confidence: {result.get('confidence', 0):.2f}. "
+                        f"Check the Research Tree tab for progress.]"
+                    )
+                    initial_message_action.content += research_context
+        except Exception as e:
+            # Don't let research middleware errors block conversation startup
+            logger.error(f"Failed to process research middleware: {str(e)}", exc_info=True)
+            logger.info("Continuing with normal conversation despite research middleware error")
+
     agent_loop_info = await conversation_manager.maybe_start_agent_loop(
         conversation_id,
         conversation_init_data,
@@ -157,6 +212,12 @@ async def start_conversation(
         initial_user_msg=initial_message_action,
         replay_json=replay_json,
     )
+
+    # Store research status in agent loop info if available
+    if hasattr(agent_loop_info, 'metadata') and research_triggered:
+        agent_loop_info.metadata = agent_loop_info.metadata or {}
+        agent_loop_info.metadata['research_mode_active'] = True
+
     logger.info(f'Finished initializing conversation {agent_loop_info.conversation_id}')
     return agent_loop_info
 
