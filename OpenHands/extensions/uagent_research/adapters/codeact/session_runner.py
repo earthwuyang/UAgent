@@ -139,9 +139,11 @@ class HeadlessAgentSession:
 
         # Build minimal OpenHandsConfig and LLM registry
         oh_config = OpenHandsConfig()
-        # Prefer Docker runtime for headless reliability (isolation + fewer host deps)
-        # If you need LocalRuntime explicitly, set via settings before start()
-        oh_config.runtime = 'docker'
+        # Prefer Docker runtime; fallback to LocalRuntime if Docker is unavailable
+        # Can be overridden via env OPENHANDS_HEADLESS_RUNTIME in {'docker','local'}
+        import os
+        preferred_runtime = os.getenv('OPENHANDS_HEADLESS_RUNTIME', 'docker').lower()
+        oh_config.runtime = preferred_runtime if preferred_runtime in ('docker', 'local') else 'docker'
         # Avoid browser dependency in headless runs unless explicitly needed
         oh_config.enable_browser = False
         if self.llm_config is not None:
@@ -164,8 +166,36 @@ class HeadlessAgentSession:
             if hasattr(self.runtime, 'connect'):
                 await self.runtime.connect()
         except Exception as e:
-            logger.error(f"Failed to create runtime: {e}", exc_info=True)
-            raise
+            logger.warning(
+                f"Primary runtime '{self.oh_config.runtime}' connect failed, attempting fallback to 'local': {e}"
+            )
+            # Clean up any partial subscription from the failed runtime init
+            try:
+                from openhands.events.stream import EventStreamSubscriber
+                self.event_stream.unsubscribe(EventStreamSubscriber.RUNTIME, self.experiment_id)
+            except Exception:
+                logger.debug("Unsubscribe of failed runtime subscriber ignored", exc_info=True)
+            try:
+                if self.runtime:
+                    # best-effort close; close() is synchronous
+                    self.runtime.close()
+            except Exception:
+                logger.debug("Error during failed runtime close", exc_info=True)
+            finally:
+                self.runtime = None
+            # Fallback to LocalRuntime
+            try:
+                self.oh_config.runtime = 'local'
+                # Recreate runtime fresh
+                self.runtime = await self._create_runtime()
+                if hasattr(self.runtime, 'connect'):
+                    await self.runtime.connect()
+                logger.info("Fallback to LocalRuntime succeeded")
+            except Exception as e2:
+                logger.error(
+                    f"Fallback to LocalRuntime failed: {e2}", exc_info=True
+                )
+                raise
 
         # Create controller
         self.controller = AgentController(
@@ -251,10 +281,10 @@ class HeadlessAgentSession:
             except Exception as e:
                 logger.error(f"Error closing controller: {e}")
 
-        # Close runtime
+        # Close runtime (synchronous)
         if self.runtime:
             try:
-                await self.runtime.close()
+                self.runtime.close()
             except Exception as e:
                 logger.error(f"Error closing runtime: {e}")
 

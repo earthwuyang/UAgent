@@ -60,6 +60,9 @@ except ImportError as e:
 # Global storage for active orchestrators
 _active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
 
+# In-memory tree snapshots for UI polling (/api/research/experiments/{id}/tree)
+_active_tree_snapshots: Dict[str, dict] = {}
+
 
 async def run_experiment_async(experiment_id: str, goal: str, config: Optional[Dict[str, Any]] = None):
     """
@@ -280,6 +283,28 @@ async def start_experiment(
         started_at=experiment.started_at.isoformat() if experiment.started_at else None,
         completed_at=experiment.completed_at.isoformat() if experiment.completed_at else None,
     )
+
+
+@router.get("/experiments/{experiment_id}/tree")
+async def get_experiment_tree_snapshot(experiment_id: str) -> dict:
+    """Return the latest research tree snapshot for the given experiment.
+
+    The orchestrator publishes snapshots via update_tree_state(). If no snapshot
+    is available yet, return an empty tree with version 0.
+    """
+    snap = _active_tree_snapshots.get(experiment_id)
+    if not snap:
+        return {
+            'version': 0,
+            'timestamp': datetime.utcnow().isoformat(),
+            'experiment_id': experiment_id,
+            'data': {
+                'nodes': [],
+                'edges': [],
+                'stats': {},
+            },
+        }
+    return snap
 
 
 @router.get("/experiments/{experiment_id}", response_model=ExperimentResponse)
@@ -509,6 +534,18 @@ async def health_check():
         "version": "0.1.0",
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+# ===== Tree publishing hook used by orchestrator =====
+def update_tree_state(experiment_id: str, tree_data: dict) -> None:
+    """Update the in-memory snapshot for the experiment's research tree."""
+    _active_tree_snapshots[experiment_id] = tree_data
+    # Also index by session_id so UI polling with conversation_id works
+    if experiment_id.startswith('exp_'):
+        parts = experiment_id.split('_')
+        if len(parts) >= 3:
+            session_id = parts[1]
+            _active_tree_snapshots[session_id] = tree_data
 
 
 # ============================================================================

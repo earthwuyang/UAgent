@@ -384,6 +384,12 @@ class TreeSearchOrchestrator:
 
         logger.info(f"Generated {len(children)} children for node {node.id}")
 
+        # Publish snapshot immediately after expansion so UI reflects new nodes
+        try:
+            self._update_tree_stats()
+        except Exception:
+            logger.debug("Failed to publish tree after expansion", exc_info=True)
+
         return children
 
     async def _execute_children_parallel(self, children: List[ResearchNode]):
@@ -497,7 +503,9 @@ class TreeSearchOrchestrator:
             return
 
         try:
-            from ..api.research_routes import update_tree_state
+            # Import the server-exposed API route that backs the frontend
+            # Use absolute import to ensure we hit the package used by app.py
+            from uagent_research.api.research_routes import update_tree_state
 
             # Serialize tree to dict
             tree_snapshot = {

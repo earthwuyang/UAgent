@@ -174,6 +174,8 @@ async def start_conversation(
                     'user_id': user_id,
                     'repository': conversation_metadata.selected_repository,
                     'branch': conversation_metadata.selected_branch,
+                    'research_goal': conversation_metadata.research_goal,
+                    'research_locked': conversation_metadata.research_locked,
                 }
             )
 
@@ -189,8 +191,14 @@ async def start_conversation(
                     }
                 )
 
+                # Persist goal in single-goal mode if not set yet
+                if result.get('status') == 'research_started' and not conversation_metadata.research_locked:
+                    conversation_metadata.research_goal = initial_user_msg.strip()
+                    conversation_metadata.research_locked = True
+                    conversation_store = await ConversationStoreImpl.get_instance(config, user_id)
+                    await conversation_store.save_metadata(conversation_metadata)
+
                 # Add research info to initial message for context (optional)
-                # Only add if research actually started successfully
                 if result.get('status') == 'research_started' and initial_message_action:
                     research_context = (
                         f"\n\n[System: Research mode activated - "
@@ -244,6 +252,37 @@ async def start_conversation(
         agent_loop_info.metadata['research_mode_active'] = True
 
     logger.info(f'Finished initializing conversation {agent_loop_info.conversation_id}')
+    # If no research was triggered and no goal is set, ask user to provide a single research goal
+    if (
+        RESEARCH_MIDDLEWARE_AVAILABLE
+        and not research_triggered
+        and not conversation_metadata.research_locked
+    ):
+        try:
+            session = conversation_manager.get_agent_session(conversation_id)
+            if session and session.event_stream:
+                from openhands.events.action import MessageAction
+                from openhands.events.event import EventSource
+                from openhands.core.schema import AgentState
+
+                session.event_stream.add_event(
+                    MessageAction(
+                        content=(
+                            'To begin research, please provide your single research goal in one sentence. '
+                            'Example: "Investigate ML-based query routing between engines and prototype a minimal PoC."'
+                        ),
+                        wait_for_response=True,
+                    ),
+                    EventSource.AGENT,
+                )
+                if session.controller:
+                    await session.controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+        except Exception as e:
+            logger.error(
+                f'Failed to prompt for research goal: {e}',
+                extra={'session_id': conversation_id},
+            )
+
     return agent_loop_info
 
 

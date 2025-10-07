@@ -438,8 +438,55 @@ class ResearchMiddleware:
                 'control_result': control_result
             }
 
-        # Normal flow: check if auto-trigger disabled or single-goal mode enforced
-        if SINGLE_GOAL_MODE or not self.enable_auto_trigger:
+        # Single-goal mode: if goal not yet set, attempt to detect and launch; else do not auto-trigger
+        if SINGLE_GOAL_MODE:
+            goal_already_set = False
+            if conversation_metadata and isinstance(conversation_metadata, dict):
+                goal_already_set = bool(conversation_metadata.get('research_goal'))
+            if not goal_already_set:
+                should_trigger, task_type, confidence, reasoning = task_classifier.should_trigger_research(
+                    user_message,
+                    confidence_threshold=self.confidence_threshold,
+                )
+                if should_trigger:
+                    try:
+                        experiment_id = await self.start_research(
+                            goal=user_message,
+                            session_id=session_id,
+                            research_type='scientific',
+                            config=conversation_metadata or {},
+                        )
+                        return {
+                            'mode': 'research',
+                            'should_trigger_research': True,
+                            'task_type': task_type,
+                            'confidence': confidence,
+                            'reasoning': reasoning,
+                            'experiment_id': experiment_id,
+                            'status': 'research_started',
+                            'auto_single_goal': True,
+                        }
+                    except Exception as e:
+                        logger.error(f'Failed to start single-goal research: {e}', exc_info=True)
+                        return {
+                            'mode': 'normal',
+                            'should_trigger_research': False,
+                            'task_type': TaskType.SIMPLE,
+                            'confidence': 1.0,
+                            'reasoning': {'decision': 'Start failed; awaiting user retry'},
+                            'error': str(e),
+                        }
+            # Goal already set or no trigger: no auto start
+            return {
+                'mode': 'normal',
+                'should_trigger_research': False,
+                'task_type': TaskType.SIMPLE,
+                'confidence': 1.0,
+                'reasoning': {'decision': 'Single-goal mode; no auto-trigger'},
+            }
+
+        # Normal flow: check if auto-trigger disabled
+        if not self.enable_auto_trigger:
             return {
                 'mode': 'normal',
                 'should_trigger_research': False,
