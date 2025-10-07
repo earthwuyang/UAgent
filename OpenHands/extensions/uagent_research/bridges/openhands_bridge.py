@@ -5,7 +5,9 @@ Maps OpenHands CodeActAgent events to UAgent research event model for
 seamless integration with the research orchestrator.
 """
 
+import asyncio
 import logging
+import uuid
 from typing import AsyncIterator, Optional
 
 from openhands.events import EventSource
@@ -27,6 +29,7 @@ from openhands.events.observation import (
     BrowserOutputObservation,
     ErrorObservation,
 )
+from openhands.events.stream import EventStreamSubscriber
 
 from ..uagent_research.models.events import (
     ResearchEvent,
@@ -122,17 +125,58 @@ class OpenHandsEventBridge:
 
     async def _subscribe_to_stream(self):
         """
-        Subscribe to OpenHands event stream.
+        Subscribe to the OpenHands EventStream and yield raw events.
 
-        This is a placeholder - actual implementation depends on
-        EventStream API.
+        Uses an asyncio.Queue to shuttle events from the background
+        callback thread into the async generator.
         """
-        # TODO: Implement actual subscription using EventStream
-        # For now, this is a stub
-        # In practice: async for event in self.event_stream.subscribe():
-        #     yield event
-        return
-        yield  # Make this an async generator
+        if not self.event_stream:
+            return
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        callback_id = f'research_bridge_{self.branch_id}_{self.node_id}_{uuid.uuid4().hex}'
+
+        def _on_event(event):
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+            except RuntimeError:
+                logger.debug('Failed to enqueue OpenHands event in research bridge', exc_info=True)
+
+        try:
+            self.event_stream.subscribe(
+                EventStreamSubscriber.SERVER,
+                _on_event,
+                callback_id,
+            )
+        except Exception as exc:
+            logger.error(
+                'Unable to subscribe research bridge to event stream: %s',
+                exc,
+                exc_info=True,
+            )
+            return
+
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield event
+        finally:
+            try:
+                self.event_stream.unsubscribe(
+                    EventStreamSubscriber.SERVER, callback_id
+                )
+            except Exception:
+                logger.debug(
+                    'Failed to unsubscribe research bridge from event stream',
+                    exc_info=True,
+                )
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            except RuntimeError:
+                pass
 
     def _map_event(self, oh_event) -> Optional[ResearchEvent]:
         """

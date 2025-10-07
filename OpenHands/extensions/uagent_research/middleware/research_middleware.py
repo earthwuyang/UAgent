@@ -32,7 +32,10 @@ SINGLE_GOAL_MODE = True
 # Import control components
 try:
     from ..control.control_bus import ControlMessage
-    from ..services.research_session_manager import ResearchSessionManager
+    from ..services.research_session_manager import (
+        ResearchSessionManager,
+        ExperimentStatus,
+    )
     from ..orchestrator.event_bus import get_event_bus
     CONTROL_AVAILABLE = True
 except ImportError as e:
@@ -40,6 +43,7 @@ except ImportError as e:
     CONTROL_AVAILABLE = False
     ControlMessage = None
     ResearchSessionManager = None
+    ExperimentStatus = None
 
 logger = logging.getLogger(__name__)
 
@@ -597,11 +601,26 @@ class ResearchMiddleware:
             deadline=None,
         )
 
-        # Create orchestrator
-        logger.info(f"[RESEARCH_MIDDLEWARE] Creating TreeSearchOrchestrator with max_parallel={max_parallel}")
+        session_mgr = self.get_session_manager()
+        event_bus = None
+        control_bus = None
+        if session_mgr:
+            event_bus = session_mgr.event_bus or get_event_bus()
+            control_bus = getattr(session_mgr, 'control_bus', None)
+        else:
+            try:
+                event_bus = get_event_bus()
+            except Exception:
+                logger.debug('Unable to acquire global research event bus', exc_info=True)
+
+        logger.info(
+            f"[RESEARCH_MIDDLEWARE] Creating TreeSearchOrchestrator with max_parallel={max_parallel}"
+        )
         orchestrator = TreeSearchOrchestrator(
             max_parallel=max_parallel,
             budget=budget,
+            event_bus=event_bus,
+            control_bus=control_bus,
         )
         logger.info(f"[RESEARCH_MIDDLEWARE] TreeSearchOrchestrator created successfully")
 
@@ -615,6 +634,17 @@ class ResearchMiddleware:
         # Track session goal for single-goal mode
         self._session_goal[session_id] = goal
         logger.info(f"[RESEARCH_MIDDLEWARE] Stored orchestrator in active_orchestrators, total active: {len(self.active_orchestrators)}")
+
+        if session_mgr:
+            try:
+                session_mgr.register(experiment_id, orchestrator)
+                logger.info(
+                    f"[RESEARCH_MIDDLEWARE] Registered experiment {experiment_id} with session manager"
+                )
+            except Exception:
+                logger.exception(
+                    f"[RESEARCH_MIDDLEWARE] Failed to register experiment {experiment_id} with session manager"
+                )
 
         # Start research in background, pass experiment_id as research_id
         logger.info(f"[RESEARCH_MIDDLEWARE] Creating background task for experiment {experiment_id}")
@@ -633,6 +663,8 @@ class ResearchMiddleware:
         Args:
             experiment_id: Experiment ID
         """
+        session_mgr = self.get_session_manager()
+
         try:
             logger.info(f"[RESEARCH_MIDDLEWARE] _run_research started for {experiment_id}")
 
@@ -655,13 +687,41 @@ class ResearchMiddleware:
             logger.info(f"Research completed: {experiment_id}")
             logger.info(f"Tree stats: {tree.stats if hasattr(tree, 'stats') else 'N/A'}")
 
+            if session_mgr and ExperimentStatus:
+                try:
+                    session_mgr.update_experiment_status(
+                        experiment_id, ExperimentStatus.COMPLETE
+                    )
+                except Exception:
+                    logger.exception(
+                        f"[RESEARCH_MIDDLEWARE] Failed to mark experiment {experiment_id} complete"
+                    )
+
         except Exception as e:
             logger.error(f"Research failed: {experiment_id}, error: {str(e)}", exc_info=True)
+
+            if session_mgr and ExperimentStatus:
+                try:
+                    session_mgr.update_experiment_status(
+                        experiment_id, ExperimentStatus.FAILED
+                    )
+                except Exception:
+                    logger.exception(
+                        f"[RESEARCH_MIDDLEWARE] Failed to mark experiment {experiment_id} failed"
+                    )
 
         finally:
             # Cleanup
             if experiment_id in self.active_orchestrators:
                 del self.active_orchestrators[experiment_id]
+            if session_mgr:
+                try:
+                    session_mgr.unregister(experiment_id)
+                except Exception:
+                    logger.debug(
+                        f"[RESEARCH_MIDDLEWARE] Failed to unregister experiment {experiment_id}",
+                        exc_info=True,
+                    )
 
     def get_orchestrator(self, experiment_id: str) -> Optional[TreeSearchOrchestrator]:
         """Get active orchestrator by experiment ID"""
