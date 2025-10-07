@@ -1520,11 +1520,11 @@ class ExperimentExecutor:
                     "Experiment execution requires an OpenHands session and cannot proceed without one"
                 )
 
-                success_flag = False
-                llm_assessment_reason: Optional[str] = None
+            # Determine success based on collected data or explicit flags
+            success_flag = False
             if data_result:
                 if "success" in data_result:
-                    success_flag = bool(data_result["success"])
+                    success_flag = bool(data_result["success"]) 
                 elif data_result.get("measurements"):
                     success_flag = True
                 else:
@@ -4913,9 +4913,21 @@ Return JSON only.
                             "node_type": "evaluation",
                             "title": "Idea Evaluation",
                             "overall_score": idea.evaluation.overall_score,
-                            "novelty_score": idea.evaluation.novelty_score,
-                            "feasibility_score": idea.evaluation.feasibility_score,
-                            "impact_score": idea.evaluation.impact_score,
+                            "novelty_score": (
+                                idea.evaluation.scores.get("novelty")
+                                if isinstance(idea.evaluation.scores, dict)
+                                else None
+                            ),
+                            "feasibility_score": (
+                                idea.evaluation.scores.get("feasibility")
+                                if isinstance(idea.evaluation.scores, dict)
+                                else None
+                            ),
+                            "impact_score": (
+                                idea.evaluation.scores.get("impact")
+                                if isinstance(idea.evaluation.scores, dict)
+                                else None
+                            ),
                             "confidence": idea.confidence_score,
                             "iterations": idea.iteration_count,
                         },

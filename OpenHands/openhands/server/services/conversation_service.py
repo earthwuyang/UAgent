@@ -162,7 +162,7 @@ async def start_conversation(
             image_urls=image_urls or [],
         )
 
-    # Check if research mode should be triggered (non-blocking)
+    # Check if research mode should be triggered from initial message (legacy path)
     research_triggered = False
     if RESEARCH_MIDDLEWARE_AVAILABLE and initial_user_msg:
         try:
@@ -205,6 +205,31 @@ async def start_conversation(
             logger.error(f"Failed to process research middleware: {str(e)}", exc_info=True)
             logger.info("Continuing with normal conversation despite research middleware error")
 
+    # Single-goal auto-start: if conversation has an immutable research goal set,
+    # start research tied to this conversation id regardless of initial message.
+    if RESEARCH_MIDDLEWARE_AVAILABLE and conversation_metadata.research_goal:
+        try:
+            logger.info(
+                f"Starting single-goal research for conversation {conversation_id}",
+                extra={'session_id': conversation_id},
+            )
+            exp_id = await research_middleware.start_research(
+                goal=conversation_metadata.research_goal,
+                session_id=conversation_id,
+            )
+            research_triggered = True
+            # Optionally, annotate the initial message for UX if present
+            if initial_message_action:
+                initial_message_action.content += (
+                    f"\n\n[System: Research mode activated - Experiment ID: {exp_id}. "
+                    f"Check the Research Tree tab for progress.]"
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to start single-goal research for {conversation_id}: {e}",
+                exc_info=True,
+            )
+
     agent_loop_info = await conversation_manager.maybe_start_agent_loop(
         conversation_id,
         conversation_init_data,
@@ -236,6 +261,7 @@ async def create_new_conversation(
     git_provider: ProviderType | None = None,
     conversation_id: str | None = None,
     mcp_config: MCPConfig | None = None,
+    research_goal: str | None = None,
 ) -> AgentLoopInfo:
     conversation_metadata = await initialize_conversation(
         user_id,
@@ -248,6 +274,13 @@ async def create_new_conversation(
 
     if not conversation_metadata:
         raise Exception('Failed to initialize conversation')
+
+    # Persist research goal if provided and not yet set
+    if research_goal and not conversation_metadata.research_locked:
+        conversation_metadata.research_goal = research_goal.strip()
+        conversation_metadata.research_locked = True
+        conversation_store = await ConversationStoreImpl.get_instance(config, user_id)
+        await conversation_store.save_metadata(conversation_metadata)
 
     return await start_conversation(
         user_id,

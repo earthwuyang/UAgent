@@ -127,13 +127,26 @@ class ResearchTree(BaseModel):
     })
     version: int = 0  # Incremented on each update
 
-    def add_node(self, node: ResearchNode, parent: Optional[ResearchNode] = None):
-        """Add node to tree"""
+    def add_node(self, node: ResearchNode, parent: Optional[ResearchNode] = None, parent_id: Optional[str] = None):
+        """Add node to tree
+
+        Args:
+            node: The node to add
+            parent: Parent node object (deprecated, use parent_id instead)
+            parent_id: Parent node ID string
+        """
         self.nodes[node.id] = node
 
+        # Support both parent object and parent_id for backwards compatibility
+        actual_parent_id = None
         if parent:
+            actual_parent_id = parent.id
+        elif parent_id:
+            actual_parent_id = parent_id
+
+        if actual_parent_id:
             self.edges.append(ResearchEdge(
-                parent_id=parent.id,
+                parent_id=actual_parent_id,
                 child_id=node.id
             ))
 
@@ -144,6 +157,12 @@ class ResearchTree(BaseModel):
         """Get children of a node"""
         child_ids = [e.child_id for e in self.edges if e.parent_id == node_id]
         return [self.nodes[cid] for cid in child_ids if cid in self.nodes]
+
+    def get_parent(self, node_id: str) -> Optional[str]:
+        """Get parent ID of a node"""
+        if node_id not in self.nodes:
+            return None
+        return self.nodes[node_id].parent_id
 
     def get_path_to_root(self, node_id: str) -> List[ResearchNode]:
         """Get path from node to root"""
@@ -160,6 +179,60 @@ class ResearchTree(BaseModel):
 
         return list(reversed(path))
 
+    def calculate_max_depth(self) -> int:
+        """Calculate maximum depth of the tree
+
+        Returns:
+            Maximum depth (root is depth 0)
+        """
+        if not self.nodes:
+            return 0
+
+        # Find root nodes (nodes without parents)
+        root_ids = [nid for nid, node in self.nodes.items()
+                   if not node.parent_id or node.parent_id not in self.nodes]
+
+        if not root_ids:
+            # No clear root, return 0
+            return 0
+
+        max_depth = 0
+        for root_id in root_ids:
+            # BFS to find max depth from this root
+            depth = self._calculate_depth_from_node(root_id)
+            max_depth = max(max_depth, depth)
+
+        return max_depth
+
+    def _calculate_depth_from_node(self, node_id: str, visited: Optional[set] = None) -> int:
+        """Calculate depth from a specific node using DFS
+
+        Args:
+            node_id: Starting node ID
+            visited: Set of visited nodes to avoid cycles
+
+        Returns:
+            Maximum depth from this node
+        """
+        if visited is None:
+            visited = set()
+
+        if node_id in visited or node_id not in self.nodes:
+            return 0
+
+        visited.add(node_id)
+        children = self.get_children(node_id)
+
+        if not children:
+            return 0
+
+        max_child_depth = 0
+        for child in children:
+            child_depth = self._calculate_depth_from_node(child.id, visited)
+            max_child_depth = max(max_child_depth, child_depth)
+
+        return 1 + max_child_depth
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON storage"""
         return {
@@ -173,6 +246,7 @@ class ResearchTree(BaseModel):
 
 class Task(BaseModel):
     """Task to be executed by an agent adapter"""
+    id: Optional[str] = None  # Task/node ID
     goal: str
     context: Optional[str] = None
     budget: Budget = Field(default_factory=Budget)
@@ -181,6 +255,7 @@ class Task(BaseModel):
 
 class Context(BaseModel):
     """Execution context for agent adapters"""
+    branch_id: Optional[str] = None  # Current branch/node ID
     parent_nodes: List[ResearchNode] = Field(default_factory=list)  # Ancestor nodes
     tools: List[str] = Field(default_factory=list)  # Available tools
     secrets: Dict[str, str] = Field(default_factory=dict)  # API keys, etc.

@@ -1,13 +1,30 @@
 """
 WebSocket routes for real-time research progress updates
+
+Phase 3 Enhancement:
+- Bidirectional control (client can send control commands via WebSocket)
+- Control command validation and routing to ControlBus
+- Real-time acknowledgement of control commands
 """
 
 import asyncio
 import json
 import logging
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from datetime import datetime
+
+# Import control components
+try:
+    from ...control.control_bus import ControlMessage
+    from ...services.research_session_manager import ResearchSessionManager
+    from ...orchestrator.event_bus import get_event_bus
+    CONTROL_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Control components not available: {e}")
+    CONTROL_AVAILABLE = False
+    ControlMessage = None
+    ResearchSessionManager = None
 
 logger = logging.getLogger(__name__)
 
@@ -120,20 +137,151 @@ class ConnectionManager:
 # Global connection manager
 manager = ConnectionManager()
 
+# Global session manager for control commands
+_session_manager: Optional[ResearchSessionManager] = None
+
+
+def get_session_manager() -> Optional[ResearchSessionManager]:
+    """Get or create global session manager"""
+    global _session_manager
+
+    if not CONTROL_AVAILABLE:
+        return None
+
+    if _session_manager is None:
+        try:
+            from ...control.control_bus import ControlBus
+            event_bus = get_event_bus()
+            control_bus = ControlBus()
+            _session_manager = ResearchSessionManager(
+                event_bus=event_bus,
+                control_bus=control_bus
+            )
+            logger.info("ResearchSessionManager initialized for WebSocket")
+        except Exception as e:
+            logger.error(f"Failed to initialize session manager: {e}")
+            return None
+
+    return _session_manager
+
+
+async def handle_control_command(
+    websocket: WebSocket,
+    experiment_id: str,
+    command: dict
+) -> dict:
+    """
+    Handle control command from WebSocket client.
+
+    Args:
+        websocket: WebSocket connection
+        experiment_id: Experiment ID
+        command: Control command dict
+
+    Returns:
+        Response dict
+
+    Command format:
+    {
+        "type": "control",
+        "action": "pause" | "resume" | "cancel" | "cancel_node" | "reprioritize" | "steer" | "add_node",
+        "target": { ... },  # Optional target specification
+        "payload": { ... }  # Optional payload
+    }
+
+    Response format:
+    {
+        "type": "control_ack",
+        "action": "pause",
+        "status": "success" | "error",
+        "message": "...",
+        "timestamp": "2024-10-04T12:00:00Z"
+    }
+    """
+    session_mgr = get_session_manager()
+
+    if not session_mgr or not CONTROL_AVAILABLE:
+        return {
+            "type": "control_ack",
+            "status": "error",
+            "message": "Control system not available"
+        }
+
+    try:
+        # Extract control parameters
+        action = command.get("action")
+        target = command.get("target", {})
+        payload = command.get("payload", {})
+
+        if not action:
+            return {
+                "type": "control_ack",
+                "status": "error",
+                "message": "Missing 'action' field in control command"
+            }
+
+        # Validate action
+        valid_actions = ["pause", "resume", "cancel", "cancel_node", "reprioritize", "steer", "add_node"]
+        if action not in valid_actions:
+            return {
+                "type": "control_ack",
+                "action": action,
+                "status": "error",
+                "message": f"Invalid action '{action}'. Valid actions: {', '.join(valid_actions)}"
+            }
+
+        # Create control message
+        control_msg = ControlMessage(
+            action=action,
+            target=target,
+            payload=payload,
+            sender="websocket"
+        )
+
+        # Send control command
+        await session_mgr.send_control(experiment_id, control_msg)
+
+        logger.info(f"WebSocket control command sent: action={action}, experiment={experiment_id}")
+
+        return {
+            "type": "control_ack",
+            "action": action,
+            "status": "success",
+            "message": f"Control command '{action}' sent successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error handling control command: {e}", exc_info=True)
+        return {
+            "type": "control_ack",
+            "status": "error",
+            "message": f"Error processing control command: {str(e)}"
+        }
+
 
 @router.websocket("/experiment/{experiment_id}")
 async def experiment_websocket(websocket: WebSocket, experiment_id: str):
     """
-    WebSocket endpoint for real-time experiment updates.
+    WebSocket endpoint for real-time experiment updates and control.
 
-    Clients can connect to receive live progress updates for a specific experiment.
+    Phase 3 Enhancement: Bidirectional communication
+    - Server → Client: progress updates, status changes, logs
+    - Client → Server: control commands (pause, resume, cancel, etc.)
 
-    Message format:
+    Server → Client message format:
     {
-        "type": "progress" | "status" | "log" | "result" | "error",
+        "type": "progress" | "status" | "log" | "result" | "error" | "control_ack",
         "experiment_id": "exp_123",
         "data": { ... },
         "timestamp": "2024-10-04T12:00:00Z"
+    }
+
+    Client → Server message format:
+    {
+        "type": "control",
+        "action": "pause" | "resume" | "cancel" | ...,
+        "target": { ... },
+        "payload": { ... }
     }
     """
     logger.info(f"[WebSocket] New connection request for experiment {experiment_id}")
@@ -146,26 +294,74 @@ async def experiment_websocket(websocket: WebSocket, experiment_id: str):
             "type": "connected",
             "experiment_id": experiment_id,
             "message": f"Connected to experiment {experiment_id}",
+            "control_enabled": CONTROL_AVAILABLE,
             "timestamp": datetime.utcnow().isoformat()
         })
 
         # Keep connection alive and handle client messages
         while True:
             try:
-                # Wait for messages from client (e.g., ping/pong)
+                # Wait for messages from client
                 data = await websocket.receive_text()
 
+                # Try to parse as JSON
+                try:
+                    message = json.loads(data)
+                except json.JSONDecodeError:
+                    # Handle simple text messages (ping, etc.)
+                    if data == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+                    else:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Invalid JSON format",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+
+                # Handle control commands
+                if isinstance(message, dict) and message.get("type") == "control":
+                    logger.info(f"[WebSocket] Received control command for experiment {experiment_id}: {message.get('action')}")
+
+                    # Process control command
+                    response = await handle_control_command(websocket, experiment_id, message)
+
+                    # Add timestamp and send acknowledgement
+                    response["timestamp"] = datetime.utcnow().isoformat()
+                    await websocket.send_json(response)
+
                 # Handle ping
-                if data == "ping":
+                elif isinstance(message, dict) and message.get("type") == "ping":
                     await websocket.send_json({
                         "type": "pong",
                         "timestamp": datetime.utcnow().isoformat()
                     })
 
+                # Unknown message type
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Unknown message type: {message.get('type') if isinstance(message, dict) else 'invalid'}",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+
             except WebSocketDisconnect:
+                logger.info(f"[WebSocket] Client disconnected from experiment {experiment_id}")
                 break
             except Exception as e:
-                logger.error(f"Error in experiment WebSocket: {e}")
+                logger.error(f"Error in experiment WebSocket: {e}", exc_info=True)
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Server error: {str(e)}",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                except:
+                    pass
                 break
 
     finally:
@@ -176,6 +372,10 @@ async def experiment_websocket(websocket: WebSocket, experiment_id: str):
 async def session_websocket(websocket: WebSocket, session_id: str):
     """
     WebSocket endpoint for real-time session updates.
+
+    Phase 3 Enhancement: Bidirectional communication
+    - Server → Client: experiment lifecycle events, progress updates
+    - Client → Server: control commands (routed to active experiment)
 
     Clients can connect to receive updates for all experiments in a session.
 
@@ -197,6 +397,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "type": "connected",
             "session_id": session_id,
             "message": f"Connected to session {session_id}",
+            "control_enabled": CONTROL_AVAILABLE,
             "timestamp": datetime.utcnow().isoformat()
         })
 
@@ -205,17 +406,73 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             try:
                 data = await websocket.receive_text()
 
+                # Try to parse as JSON
+                try:
+                    message = json.loads(data)
+                except json.JSONDecodeError:
+                    # Handle simple text messages
+                    if data == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+                    else:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Invalid JSON format",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+
+                # Handle control commands (requires experiment_id in message)
+                if isinstance(message, dict) and message.get("type") == "control":
+                    experiment_id = message.get("experiment_id")
+
+                    if not experiment_id:
+                        await websocket.send_json({
+                            "type": "control_ack",
+                            "status": "error",
+                            "message": "Control command requires 'experiment_id' field",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+
+                    logger.info(f"[WebSocket] Received control command for session {session_id}, experiment {experiment_id}: {message.get('action')}")
+
+                    # Process control command
+                    response = await handle_control_command(websocket, experiment_id, message)
+                    response["timestamp"] = datetime.utcnow().isoformat()
+                    await websocket.send_json(response)
+
                 # Handle ping
-                if data == "ping":
+                elif isinstance(message, dict) and message.get("type") == "ping":
                     await websocket.send_json({
                         "type": "pong",
                         "timestamp": datetime.utcnow().isoformat()
                     })
 
+                # Unknown message type
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Unknown message type: {message.get('type') if isinstance(message, dict) else 'invalid'}",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+
             except WebSocketDisconnect:
+                logger.info(f"[WebSocket] Client disconnected from session {session_id}")
                 break
             except Exception as e:
-                logger.error(f"Error in session WebSocket: {e}")
+                logger.error(f"Error in session WebSocket: {e}", exc_info=True)
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Server error: {str(e)}",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                except:
+                    pass
                 break
 
     finally:

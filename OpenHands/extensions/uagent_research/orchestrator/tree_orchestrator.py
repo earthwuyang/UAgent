@@ -26,6 +26,7 @@ from ..uagent_research.models.events import ResearchEvent, EventType, CompleteEv
 from ..adapters.base.agent_adapter import AgentAdapter, adapter_registry
 from ..router.skill_router import SkillRouter
 from .event_bus import EventBus
+from ..control.control_bus import ControlBus, ControlMessage
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class TreeSearchOrchestrator:
         budget: Optional[Budget] = None,
         router: Optional[SkillRouter] = None,
         event_bus: Optional[EventBus] = None,
+        control_bus: Optional[ControlBus] = None,
     ):
         """
         Initialize tree search orchestrator.
@@ -67,17 +69,24 @@ class TreeSearchOrchestrator:
             budget: Budget constraints
             router: Skill router for adapter selection
             event_bus: Event bus for streaming
+            control_bus: Control bus for runtime commands
         """
         self.max_parallel = max_parallel
         self.budget = budget or Budget()
         self.router = router or SkillRouter()
         self.event_bus = event_bus or EventBus()
+        self.control_bus = control_bus or ControlBus()
 
         # Execution state
         self.tree: Optional[ResearchTree] = None
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._cancelled = False
+        self._paused = False
         self._semaphore = asyncio.Semaphore(max_parallel)
+
+        # Control state
+        self._steer_map: Dict[str, str] = {}  # node_id/branch_id -> steer text
+        self._control_task: Optional[asyncio.Task] = None
 
         # Statistics
         self.stats = {
@@ -94,6 +103,7 @@ class TreeSearchOrchestrator:
         goal: str,
         context: Optional[str] = None,
         max_iterations: int = 10,
+        research_id: Optional[str] = None,
     ) -> ResearchTree:
         """
         Run research tree exploration.
@@ -113,56 +123,94 @@ class TreeSearchOrchestrator:
             )
         """
         try:
-            # Initialize tree
-            self.tree = ResearchTree(
-                root=ResearchNode(
-                    id="root",
-                    type=NodeType.ROOT,
-                    title="Research Root",
-                    content=goal,
-                    status=NodeStatus.COMPLETE,
-                )
+            # Initialize tree with research_id; allow caller to override for UI mapping
+            if research_id is None:
+                import uuid
+                research_id = f"research_{uuid.uuid4().hex[:8]}"
+
+            # Create root node
+            root_node = ResearchNode(
+                id="root",
+                type=NodeType.ROOT,
+                title="Research Root",
+                content=goal,
+                status=NodeStatus.COMPLETE,
             )
 
+            # Initialize tree
+            self.tree = ResearchTree(research_id=research_id)
+
+            # Add root node to tree
+            self.tree.add_node(root_node)
+
+            # Publish initial tree state so UI reflects activity immediately
+            self._update_tree_stats()
+
             self._cancelled = False
+            self._paused = False
 
-            logger.info(f"Starting tree search for: {goal}")
+            logger.info(f"Starting tree search for: {goal} (research_id: {research_id})")
 
-            # Main PUCT loop
-            for iteration in range(max_iterations):
-                if self._cancelled:
-                    logger.info("Tree search cancelled")
-                    break
+            # Start control loop in background (concurrent with PUCT loop)
+            self._control_task = asyncio.create_task(self._control_loop())
 
-                if not await self._check_budget():
-                    logger.info("Budget exhausted")
-                    break
+            try:
+                # Main PUCT loop
+                for iteration in range(max_iterations):
+                    # Check cancellation
+                    if self._cancelled:
+                        logger.info("Tree search cancelled")
+                        break
 
-                self.stats["iterations"] = iteration + 1
+                    # Check pause state
+                    if self._paused:
+                        logger.info("Research paused, waiting for resume...")
+                        await asyncio.sleep(1)  # Wait for resume command
+                        continue
 
-                logger.info(f"\n=== Iteration {iteration + 1}/{max_iterations} ===")
+                    if not await self._check_budget():
+                        logger.info("Budget exhausted")
+                        break
 
-                # Select best node using PUCT
-                node = self._select_best_node()
+                    self.stats["iterations"] = iteration + 1
 
-                if node is None:
-                    logger.info("No more nodes to explore")
-                    break
+                    logger.info(f"\n=== Iteration {iteration + 1}/{max_iterations} ===")
 
-                # Expand node (generate children)
-                children = await self._expand_node(node, goal, context)
+                    # Select best node using PUCT
+                    node = self._select_best_node()
 
-                if not children:
-                    logger.info(f"No children generated for node {node.id}")
-                    continue
+                    if node is None:
+                        logger.info("No more nodes to explore")
+                        break
 
-                # Execute children in parallel
-                await self._execute_children_parallel(children)
+                    # Expand node (generate children)
+                    children = await self._expand_node(node, goal, context)
 
-                # Update tree statistics
-                self._update_tree_stats()
+                    if not children:
+                        logger.info(f"No children generated for node {node.id}")
+                        continue
 
-            logger.info(f"\nTree search completed: {self.stats}")
+                    # Execute children in parallel
+                    await self._execute_children_parallel(children)
+
+                    # Update tree statistics
+                    self._update_tree_stats()
+
+                logger.info(f"\nTree search completed: {self.stats}")
+
+            finally:
+                # Cleanup: Cancel control loop
+                if self._control_task and not self._control_task.done():
+                    self._control_task.cancel()
+                    try:
+                        await self._control_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Unsubscribe from control bus
+                self.control_bus.unsubscribe_all(research_id)
+
+                logger.info("Control loop cleanup complete")
 
             return self.tree
 
@@ -443,22 +491,192 @@ class TreeSearchOrchestrator:
 
         return True
 
+    def _publish_tree_to_api(self):
+        """Publish tree state to API endpoint for frontend consumption"""
+        if not self.tree:
+            return
+
+        try:
+            from ..api.research_routes import update_tree_state
+
+            # Serialize tree to dict
+            tree_snapshot = {
+                "version": self.stats.get("iterations", 0),
+                "timestamp": datetime.now().isoformat(),
+                "experiment_id": self.tree.research_id,
+                "data": {
+                    "nodes": [
+                        {
+                            "id": node.id,
+                            "type": node.type.value,
+                            "title": node.title,
+                            "content": node.content,
+                            "status": node.status.value,
+                            "prior": node.prior,
+                            "visits": node.visits,
+                            "avg_value": node.avg_value,
+                            "cost": node.cost,
+                        }
+                        for node in self.tree.nodes.values()
+                    ],
+                    "edges": [
+                        {
+                            "source": edge.parent_id,
+                            "target": edge.child_id,
+                            "type": edge.relation,
+                        }
+                        for edge in self.tree.edges
+                    ],
+                    "stats": self.tree.stats if hasattr(self.tree, "stats") else {},
+                }
+            }
+
+            # Update API endpoint
+            update_tree_state(self.tree.research_id, tree_snapshot)
+            logger.debug(f"Published tree state for experiment {self.tree.research_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to publish tree state: {e}", exc_info=True)
+
     def _update_tree_stats(self):
         """Update tree-level statistics"""
         if not self.tree:
             return
 
-        self.tree.stats = {
+        # Update stats while preserving existing fields like "created" and "expanded"
+        self.tree.stats.update({
             "total_nodes": len(self.tree.nodes),
             "total_edges": len(self.tree.edges),
             "max_depth": self.tree.calculate_max_depth(),
             "total_cost": self.stats["total_cost"],
             "total_tokens": self.stats["total_tokens"],
-        }
+        })
+
+        # Publish tree state to API endpoint
+        self._publish_tree_to_api()
+
+    async def _control_loop(self):
+        """
+        Process control commands in background.
+
+        Listens for control messages via ControlBus and applies them
+        to the running research tree.
+
+        Supported actions:
+        - pause: Pause research (stop scheduling new nodes)
+        - resume: Resume paused research
+        - cancel: Cancel entire experiment
+        - cancel_node: Cancel specific branch/node
+        - reprioritize: Adjust node priorities
+        - steer: Send guidance to running adapters
+        """
+        if not self.tree:
+            return
+
+        logger.info(f"Starting control loop for research {self.tree.research_id}")
+
+        try:
+            async for cmd in self.control_bus.subscribe(self.tree.research_id):
+                logger.info(
+                    f"Received control command: {cmd.action} "
+                    f"(target={cmd.target}, sender={cmd.sender})"
+                )
+
+                if cmd.action == "pause":
+                    self._paused = True
+                    logger.info(f"Paused research: {self.tree.research_id}")
+
+                elif cmd.action == "resume":
+                    self._paused = False
+                    logger.info(f"Resumed research: {self.tree.research_id}")
+
+                elif cmd.action == "cancel":
+                    self._cancelled = True
+                    # Cancel all running tasks
+                    for node_id, task in list(self._running_tasks.items()):
+                        if not task.done():
+                            task.cancel()
+                            logger.info(f"Cancelled task for node {node_id}")
+                    logger.info(f"Cancelled research: {self.tree.research_id}")
+
+                elif cmd.action == "cancel_node":
+                    node_id = cmd.target.get("node_id")
+                    if node_id and node_id in self._running_tasks:
+                        task = self._running_tasks[node_id]
+                        if not task.done():
+                            task.cancel()
+                            # Mark node as cancelled in tree
+                            if node_id in self.tree.nodes:
+                                self.tree.nodes[node_id].status = NodeStatus.FAILED
+                            logger.info(f"Cancelled node: {node_id}")
+
+                elif cmd.action == "reprioritize":
+                    # Adjust node priors
+                    delta = cmd.payload.get("delta", 0.1)
+                    target_adapter = cmd.target.get("adapter")
+                    target_node_type = cmd.target.get("node_type")
+
+                    # Update priors for matching nodes
+                    for node in self.tree.nodes.values():
+                        if node.status == NodeStatus.PENDING:
+                            # Check if node matches target criteria
+                            if target_adapter and hasattr(node, 'adapter'):
+                                if node.adapter == target_adapter:
+                                    node.prior = min(1.0, node.prior + delta)
+                            elif target_node_type:
+                                if node.type.value == target_node_type:
+                                    node.prior = min(1.0, node.prior + delta)
+
+                    logger.info(
+                        f"Reprioritized nodes: adapter={target_adapter}, "
+                        f"type={target_node_type}, delta={delta}"
+                    )
+
+                elif cmd.action == "steer":
+                    # Store steering directive
+                    target_id = (
+                        cmd.target.get("node_id") or
+                        cmd.target.get("branch_id") or
+                        cmd.target.get("adapter")
+                    )
+                    steer_text = cmd.payload.get("text", "")
+
+                    if target_id:
+                        self._steer_map[target_id] = steer_text
+                        logger.info(f"Stored steer directive for {target_id}: {steer_text[:100]}")
+
+                        # TODO: Send message to running adapter if it supports it
+                        # This would require adapter to expose send_message() method
+
+                elif cmd.action == "add_node":
+                    # Add new research direction
+                    parent_id = cmd.payload.get("parent_id", "root")
+                    node_data = cmd.payload.get("node", {})
+
+                    if parent_id in self.tree.nodes:
+                        new_node = ResearchNode(
+                            id=f"manual-{uuid.uuid4().hex[:8]}",
+                            type=NodeType[node_data.get("type", "IDEA")],
+                            title=node_data.get("title", "Manual node"),
+                            content=node_data.get("content", ""),
+                            status=NodeStatus.PENDING,
+                            prior=node_data.get("prior", 0.5),
+                        )
+                        self.tree.add_node(new_node, parent_id=parent_id)
+                        logger.info(f"Added manual node {new_node.id} under {parent_id}")
+
+        except asyncio.CancelledError:
+            logger.info(f"Control loop cancelled for {self.tree.research_id}")
+        except Exception as e:
+            logger.error(f"Error in control loop: {e}", exc_info=True)
 
     async def cancel(self):
         """Cancel ongoing tree search"""
         self._cancelled = True
+
+        # Cancel control loop
+        if self._control_task and not self._control_task.done():
+            self._control_task.cancel()
 
         # Cancel all running tasks
         for task_id, task in self._running_tasks.items():

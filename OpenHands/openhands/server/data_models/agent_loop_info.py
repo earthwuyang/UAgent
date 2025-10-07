@@ -15,3 +15,4 @@ class AgentLoopInfo:
     event_store: EventStoreABC | None
     status: ConversationStatus = field(default=ConversationStatus.RUNNING)
     runtime_status: RuntimeStatus | None = None
+    research_experiment_id: str | None = None  # Active research experiment ID

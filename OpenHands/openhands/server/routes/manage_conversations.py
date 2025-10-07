@@ -168,6 +168,8 @@ class InitSessionRequest(BaseModel):
     create_microagent: CreateMicroagent | None = None
     conversation_instructions: str | None = None
     mcp_config: MCPConfig | None = None
+    # Research goal for single-goal conversations (immutable once set)
+    research_goal: str | None = None
     # Only nested runtimes require the ability to specify a conversation id, and it could be a security risk
     if os.getenv('ALLOW_SET_CONVERSATION_ID', '0') == '1':
         conversation_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -184,6 +186,10 @@ class ConversationResponse(BaseModel):
 
 class ProvidersSetModel(BaseModel):
     providers_set: list[ProviderType] | None = None
+
+
+class ResearchGoalRequest(BaseModel):
+    research_goal: str = Field(..., min_length=1, max_length=500, description='Immutable research goal for this conversation')
 
 
 @app.post('/conversations')
@@ -209,6 +215,7 @@ async def new_conversation(
     create_microagent = data.create_microagent
     git_provider = data.git_provider
     conversation_instructions = data.conversation_instructions
+    research_goal = data.research_goal
 
     conversation_trigger = ConversationTrigger.GUI
 
@@ -260,6 +267,7 @@ async def new_conversation(
             git_provider=git_provider,
             conversation_id=conversation_id,
             mcp_config=data.mcp_config,
+            research_goal=research_goal,
         )
 
         return ConversationResponse(
@@ -275,6 +283,55 @@ async def new_conversation(
                 'msg_id': 'CONFIGURATION$SETTINGS_NOT_FOUND',
             },
             status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@app.post('/conversations/{conversation_id}/research-goal')
+async def set_research_goal(
+    req: ResearchGoalRequest,
+    conversation_id: str = Depends(validate_conversation_id),
+    user_id: str | None = Depends(get_user_id),
+    conversation_store: ConversationStore = Depends(get_conversation_store),
+):
+    """Set immutable research goal for a conversation (can only be set once)."""
+    try:
+        metadata = await conversation_store.get_metadata(conversation_id)
+        if metadata.research_locked:
+            return JSONResponse(
+                content={
+                    'status': 'error',
+                    'message': 'Research goal already set and locked',
+                    'msg_id': 'CONVERSATION$RESEARCH_GOAL_LOCKED',
+                },
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        # Optionally, validate ownership
+        if user_id and metadata.user_id and metadata.user_id != user_id:
+            return JSONResponse(
+                content={
+                    'status': 'error',
+                    'message': 'Permission denied: You can only update your own conversations',
+                    'msg_id': 'AUTHORIZATION$PERMISSION_DENIED',
+                },
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        metadata.research_goal = req.research_goal.strip()
+        metadata.research_locked = True
+        await conversation_store.save_metadata(metadata)
+        return JSONResponse(
+            content={'status': 'ok', 'conversation_id': conversation_id},
+            status_code=status.HTTP_200_OK,
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            content={
+                'status': 'error',
+                'message': 'Conversation not found',
+                'msg_id': 'CONVERSATION$NOT_FOUND',
+            },
+            status_code=status.HTTP_404_NOT_FOUND,
         )
 
     except LLMAuthenticationError as e:
@@ -461,6 +518,9 @@ async def _get_conversation_info(
             url=agent_loop_info.url if agent_loop_info else None,
             session_api_key=getattr(agent_loop_info, 'session_api_key', None),
             pr_number=conversation.pr_number,
+            research_experiment_id=getattr(agent_loop_info, 'research_experiment_id', None),
+            research_goal=getattr(conversation, 'research_goal', None),
+            research_locked=getattr(conversation, 'research_locked', False),
         )
     except Exception as e:
         logger.error(

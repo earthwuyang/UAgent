@@ -113,7 +113,7 @@ class RepoMasterAdapter(AgentAdapter):
                     yield ErrorEvent(
                         branch_id=context.branch_id,
                         node_id=task.id,
-                        error="Task cancelled by user",
+                        message="Task cancelled by user",
                     )
                     return
 
@@ -124,7 +124,7 @@ class RepoMasterAdapter(AgentAdapter):
             yield ErrorEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                error=str(e),
+                message=str(e),
             )
 
     async def _execute_code_research(
@@ -160,7 +160,7 @@ class RepoMasterAdapter(AgentAdapter):
             yield ErrorEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                error=f"GitHub search failed: {search_result.error}",
+                message=f"GitHub search failed: {search_result.error}",
             )
             return
 
@@ -174,7 +174,7 @@ class RepoMasterAdapter(AgentAdapter):
             yield ErrorEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                error="No GitHub repositories found",
+                message="No GitHub repositories found",
             )
             return
 

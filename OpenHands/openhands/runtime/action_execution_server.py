@@ -209,7 +209,19 @@ class ActionExecutor:
         self.last_execution_time = self.start_time
         self._initialized = False
         self.downloaded_files: list[str] = []
-        self.downloads_directory = '/workspace/.downloads'
+        # Use a writable downloads directory. Prefer OPENHANDS_DOWNLOADS_DIR, else workspace/.downloads
+        downloads_dir = os.environ.get('OPENHANDS_DOWNLOADS_DIR')
+        if not downloads_dir:
+            downloads_dir = os.path.join(self._initial_cwd, '.downloads')
+        try:
+            os.makedirs(downloads_dir, exist_ok=True)
+        except Exception:
+            # Fallback to temp dir
+            import tempfile
+
+            downloads_dir = os.path.join(tempfile.gettempdir(), 'openhands_downloads')
+            os.makedirs(downloads_dir, exist_ok=True)
+        self.downloads_directory = downloads_dir
 
         self.max_memory_gb: int | None = None
         if _override_max_memory_gb := os.environ.get('RUNTIME_MAX_MEMORY_GB', None):
@@ -694,8 +706,9 @@ class ActionExecutor:
                 except Exception as _:
                     pass
 
+                # Save into the current workspace rather than hard-coded /workspace
                 tgt_path = os.path.join(
-                    '/workspace', f'file_{len(self.downloaded_files)}{file_ext}'
+                    self.initial_cwd, f'file_{len(self.downloaded_files)}{file_ext}'
                 )
                 shutil.copy(src_path, tgt_path)
                 file_download_obs = FileDownloadObservation(

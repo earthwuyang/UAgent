@@ -3,11 +3,17 @@ Research Middleware
 
 Automatically triggers research mode for complex tasks.
 Intercepts user messages and routes to appropriate execution mode.
+
+Phase 3 Enhancement:
+- Progress query detection ("how's progress?", "what's happening?")
+- Control intent detection ("pause research", "cancel idea-2")
+- Integration with ResearchSessionManager for real-time status
 """
 
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+import re
+from typing import Optional, Dict, Any, Tuple
 
 from ..classifier.task_classifier import task_classifier, TaskType
 from ..orchestrator.tree_orchestrator import TreeSearchOrchestrator
@@ -20,18 +26,39 @@ except ImportError:
     ENABLE_AUTO_RESEARCH_TRIGGER = False
     RESEARCH_CONFIDENCE_THRESHOLD = 0.7
 
+# Enforce single-goal per conversation: do not auto-trigger new research from chat
+SINGLE_GOAL_MODE = True
+
+# Import control components
+try:
+    from ..control.control_bus import ControlMessage
+    from ..services.research_session_manager import ResearchSessionManager
+    from ..orchestrator.event_bus import get_event_bus
+    CONTROL_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Control components not available: {e}")
+    CONTROL_AVAILABLE = False
+    ControlMessage = None
+    ResearchSessionManager = None
+
 logger = logging.getLogger(__name__)
 
 
 class ResearchMiddleware:
     """
     Middleware that intercepts user messages and triggers research mode when needed.
+
+    Phase 3 Features:
+    - Progress query detection and response
+    - Control intent detection and routing
+    - Integration with ResearchSessionManager
     """
 
     def __init__(
         self,
         confidence_threshold: float = 0.7,
         enable_auto_trigger: bool = True,
+        session_manager: Optional['ResearchSessionManager'] = None,
     ):
         """
         Initialize research middleware.
@@ -39,10 +66,322 @@ class ResearchMiddleware:
         Args:
             confidence_threshold: Minimum confidence to auto-trigger research (0-1)
             enable_auto_trigger: Enable automatic research triggering
+            session_manager: Optional ResearchSessionManager instance
         """
         self.confidence_threshold = confidence_threshold
         self.enable_auto_trigger = enable_auto_trigger
         self.active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
+
+        # Session manager for progress queries
+        self._session_manager = session_manager
+
+        # Progress query patterns
+        self.progress_patterns = [
+            r"how'?s?\s+(the\s+)?progress",
+            r"what'?s?\s+(the\s+)?status",
+            r"what'?s?\s+happening",
+            r"how\s+is\s+(it|research)\s+(going|doing)",
+            r"show\s+(me\s+)?(the\s+)?progress",
+            r"check\s+status",
+            r"research\s+status",
+            r"update\s+me",
+        ]
+
+        # Control intent patterns (action -> pattern list)
+        self.control_patterns = {
+            'pause': [
+                r"pause\s+(the\s+)?research",
+                r"stop\s+(the\s+)?research",
+                r"halt\s+(the\s+)?research",
+            ],
+            'resume': [
+                r"resume\s+(the\s+)?research",
+                r"continue\s+(the\s+)?research",
+                r"restart\s+(the\s+)?research",
+            ],
+            'cancel': [
+                r"cancel\s+(the\s+)?research",
+                r"abort\s+(the\s+)?research",
+                r"kill\s+(the\s+)?research",
+            ],
+            'cancel_node': [
+                r"cancel\s+(node\s+)?(?P<node_id>[\w\-]+)",
+                r"stop\s+(node\s+)?(?P<node_id>[\w\-]+)",
+            ],
+        }
+
+        # Register adapters for orchestrator
+        self._register_adapters()
+
+    def _register_adapters(self):
+        """Register all agent adapters with the adapter registry"""
+        try:
+            from ..adapters.base.agent_adapter import adapter_registry
+            from ..adapters.deepresearch.adapter import DeepResearchAdapter
+            from ..adapters.repomaster.adapter import RepoMasterAdapter
+            from ..adapters.codeact.adapter import CodeActAdapter
+
+            # Register adapters with default configs (name comes from class attribute)
+            adapter_registry.register(DeepResearchAdapter(config={}))
+            adapter_registry.register(RepoMasterAdapter(config={}))
+            adapter_registry.register(CodeActAdapter(config={}))
+
+            logger.info("Research adapters registered successfully: deepresearch, repomaster, codeact")
+        except Exception as e:
+            logger.error(f"Failed to register adapters: {e}", exc_info=True)
+
+    def get_session_manager(self) -> Optional['ResearchSessionManager']:
+        """Get or create session manager"""
+        if self._session_manager is None and CONTROL_AVAILABLE:
+            try:
+                from ..control.control_bus import ControlBus
+                event_bus = get_event_bus()
+                control_bus = ControlBus()
+                self._session_manager = ResearchSessionManager(
+                    event_bus=event_bus,
+                    control_bus=control_bus
+                )
+                logger.info("ResearchSessionManager initialized in middleware")
+            except Exception as e:
+                logger.error(f"Failed to create session manager: {e}")
+        return self._session_manager
+
+    def detect_progress_query(self, message: str) -> bool:
+        """
+        Detect if message is asking about research progress.
+
+        Args:
+            message: User message
+
+        Returns:
+            True if progress query detected
+        """
+        message_lower = message.lower()
+        for pattern in self.progress_patterns:
+            if re.search(pattern, message_lower, re.IGNORECASE):
+                return True
+        return False
+
+    def detect_control_intent(self, message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """
+        Detect control intent in user message.
+
+        Args:
+            message: User message
+
+        Returns:
+            Tuple of (action, target_dict) or None
+
+        Example:
+            "pause research" -> ("pause", {})
+            "cancel node idea-2" -> ("cancel_node", {"node_id": "idea-2"})
+        """
+        message_lower = message.lower()
+
+        for action, patterns in self.control_patterns.items():
+            for pattern in patterns:
+                match = re.search(pattern, message_lower, re.IGNORECASE)
+                if match:
+                    # Extract any named groups (like node_id)
+                    target = match.groupdict()
+                    return (action, target)
+
+        return None
+
+    async def handle_progress_query(self, session_id: str) -> Dict[str, Any]:
+        """
+        Handle progress query by fetching status from session manager.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            Dict with progress information
+        """
+        session_mgr = self.get_session_manager()
+
+        if not session_mgr:
+            return {
+                'type': 'progress_query',
+                'status': 'unavailable',
+                'message': 'Progress tracking not available (session manager not initialized)'
+            }
+
+        # Get all active experiments for this session
+        # For now, we assume experiment_id follows pattern: exp_{session_id}_...
+        # In production, we'd query the database for active experiments
+
+        try:
+            # Try to find active experiment for this session
+            experiment_id = None
+            for exp_id in list(self.active_orchestrators.keys()):
+                if session_id in exp_id:
+                    experiment_id = exp_id
+                    break
+
+            if not experiment_id:
+                return {
+                    'type': 'progress_query',
+                    'status': 'no_active_research',
+                    'message': 'No active research found for this session'
+                }
+
+            # Get status from session manager
+            status = session_mgr.get_status(experiment_id)
+
+            # Format user-friendly summary
+            summary = self._format_progress_summary(status)
+
+            return {
+                'type': 'progress_query',
+                'status': 'success',
+                'experiment_id': experiment_id,
+                'data': status,
+                'summary': summary
+            }
+
+        except KeyError:
+            return {
+                'type': 'progress_query',
+                'status': 'not_tracked',
+                'message': 'Research is running but not tracked by session manager'
+            }
+        except Exception as e:
+            logger.error(f"Error handling progress query: {e}", exc_info=True)
+            return {
+                'type': 'progress_query',
+                'status': 'error',
+                'message': f'Error fetching progress: {str(e)}'
+            }
+
+    def _format_progress_summary(self, status: Dict[str, Any]) -> str:
+        """
+        Format progress status into user-friendly summary.
+
+        Args:
+            status: Status dict from ResearchSessionManager
+
+        Returns:
+            Human-readable summary string
+        """
+        lines = []
+
+        # Overall status
+        exp_status = status.get('status', 'unknown')
+        lines.append(f"**Research Status:** {exp_status}")
+
+        # Node statistics
+        stats = status.get('stats', {})
+        total = stats.get('total_nodes', 0)
+        completed = stats.get('completed', 0)
+        failed = stats.get('failed', 0)
+        running = stats.get('running', 0)
+
+        if total > 0:
+            completion_pct = (completed / total) * 100 if total > 0 else 0
+            lines.append(f"**Progress:** {completed}/{total} nodes completed ({completion_pct:.1f}%)")
+            if running > 0:
+                lines.append(f"**Active:** {running} nodes currently running")
+            if failed > 0:
+                lines.append(f"**Failed:** {failed} nodes failed")
+
+        # Cost tracking
+        total_cost = stats.get('total_cost', 0.0)
+        if total_cost > 0:
+            lines.append(f"**Cost:** ${total_cost:.3f}")
+
+        # Active branches
+        active_branches = status.get('active_branches', [])
+        if active_branches:
+            lines.append(f"**Active Branches:** {', '.join(active_branches[:3])}" +
+                        (f" (+{len(active_branches)-3} more)" if len(active_branches) > 3 else ""))
+
+        # Adapter status
+        adapters = status.get('adapters', {})
+        if adapters:
+            adapter_summary = []
+            for adapter_name, adapter_info in adapters.items():
+                count = adapter_info.get('running_count', 0)
+                if count > 0:
+                    adapter_summary.append(f"{adapter_name}({count})")
+            if adapter_summary:
+                lines.append(f"**Adapters:** {', '.join(adapter_summary)}")
+
+        return "\n".join(lines)
+
+    async def handle_control_intent(
+        self,
+        action: str,
+        target: Dict[str, Any],
+        session_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle control intent by sending command via ControlBus.
+
+        Args:
+            action: Control action (pause, resume, cancel, etc.)
+            target: Target parameters
+            session_id: Session ID
+
+        Returns:
+            Dict with control result
+        """
+        session_mgr = self.get_session_manager()
+
+        if not session_mgr or not CONTROL_AVAILABLE:
+            return {
+                'type': 'control_intent',
+                'status': 'unavailable',
+                'message': 'Control system not available'
+            }
+
+        # Find active experiment for session
+        experiment_id = None
+        for exp_id in list(self.active_orchestrators.keys()):
+            if session_id in exp_id:
+                experiment_id = exp_id
+                break
+
+        if not experiment_id:
+            return {
+                'type': 'control_intent',
+                'status': 'no_active_research',
+                'message': 'No active research to control'
+            }
+
+        try:
+            # Create control message
+            control_msg = ControlMessage(
+                action=action,
+                target=target,
+                payload={},
+                sender='middleware'
+            )
+
+            # Send control command
+            await session_mgr.send_control(experiment_id, control_msg)
+
+            # Handle terminal actions
+            if action == 'cancel':
+                # Remove from active orchestrators
+                if experiment_id in self.active_orchestrators:
+                    del self.active_orchestrators[experiment_id]
+
+            return {
+                'type': 'control_intent',
+                'status': 'success',
+                'action': action,
+                'experiment_id': experiment_id,
+                'message': f"Control command '{action}' sent successfully"
+            }
+
+        except Exception as e:
+            logger.error(f"Error handling control intent: {e}", exc_info=True)
+            return {
+                'type': 'control_intent',
+                'status': 'error',
+                'message': f'Error sending control command: {str(e)}'
+            }
 
     async def process_message(
         self,
@@ -53,6 +392,8 @@ class ResearchMiddleware:
         """
         Process user message and determine execution mode.
 
+        Phase 3 Enhancement: Detects progress queries and control intents.
+
         Args:
             user_message: User's input message
             session_id: Conversation/session ID
@@ -60,14 +401,45 @@ class ResearchMiddleware:
 
         Returns:
             Dict with:
-            - mode: "research" or "normal"
+            - mode: "research" or "normal" or "progress_query" or "control_intent"
             - should_trigger_research: bool
             - task_type: TaskType
             - confidence: float
             - reasoning: Dict
             - experiment_id: Optional[str] (if research triggered)
+            - progress_data: Optional[Dict] (if progress query)
+            - control_result: Optional[Dict] (if control intent)
         """
-        if not self.enable_auto_trigger:
+        # Check for progress query first
+        if self.detect_progress_query(user_message):
+            logger.info(f"Detected progress query from session {session_id}")
+            progress_data = await self.handle_progress_query(session_id)
+            return {
+                'mode': 'progress_query',
+                'should_trigger_research': False,
+                'task_type': TaskType.SIMPLE,
+                'confidence': 1.0,
+                'reasoning': {'decision': 'Progress query detected'},
+                'progress_data': progress_data
+            }
+
+        # Check for control intent
+        control_intent = self.detect_control_intent(user_message)
+        if control_intent:
+            action, target = control_intent
+            logger.info(f"Detected control intent from session {session_id}: action={action}, target={target}")
+            control_result = await self.handle_control_intent(action, target, session_id)
+            return {
+                'mode': 'control_intent',
+                'should_trigger_research': False,
+                'task_type': TaskType.SIMPLE,
+                'confidence': 1.0,
+                'reasoning': {'decision': f'Control intent detected: {action}'},
+                'control_result': control_result
+            }
+
+        # Normal flow: check if auto-trigger disabled or single-goal mode enforced
+        if SINGLE_GOAL_MODE or not self.enable_auto_trigger:
             return {
                 'mode': 'normal',
                 'should_trigger_research': False,
@@ -141,8 +513,11 @@ class ResearchMiddleware:
         import time
         import uuid
 
-        # Generate experiment ID
-        experiment_id = f"exp_{session_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        logger.info(f"[RESEARCH_MIDDLEWARE] start_research called: session_id={session_id}, goal={goal[:100]}")
+
+        # Use the conversation/session id as experiment id so the frontend URL matches
+        experiment_id = session_id
+        logger.info(f"[RESEARCH_MIDDLEWARE] Using experiment_id = session_id: {experiment_id}")
 
         # Create orchestrator configuration
         config = config or {}
@@ -158,10 +533,12 @@ class ResearchMiddleware:
         )
 
         # Create orchestrator
+        logger.info(f"[RESEARCH_MIDDLEWARE] Creating TreeSearchOrchestrator with max_parallel={max_parallel}")
         orchestrator = TreeSearchOrchestrator(
             max_parallel=max_parallel,
             budget=budget,
         )
+        logger.info(f"[RESEARCH_MIDDLEWARE] TreeSearchOrchestrator created successfully")
 
         # Store orchestrator and goal
         self.active_orchestrators[experiment_id] = {
@@ -170,9 +547,12 @@ class ResearchMiddleware:
             'session_id': session_id,
             'max_iterations': max_iterations,
         }
+        logger.info(f"[RESEARCH_MIDDLEWARE] Stored orchestrator in active_orchestrators, total active: {len(self.active_orchestrators)}")
 
-        # Start research in background
+        # Start research in background, pass experiment_id as research_id
+        logger.info(f"[RESEARCH_MIDDLEWARE] Creating background task for experiment {experiment_id}")
         asyncio.create_task(self._run_research(experiment_id))
+        logger.info(f"[RESEARCH_MIDDLEWARE] Background task created, returning experiment_id")
 
         return experiment_id
 
@@ -187,7 +567,7 @@ class ResearchMiddleware:
             experiment_id: Experiment ID
         """
         try:
-            logger.info(f"Starting research execution: {experiment_id}")
+            logger.info(f"[RESEARCH_MIDDLEWARE] _run_research started for {experiment_id}")
 
             exp_data = self.active_orchestrators.get(experiment_id)
             if not exp_data:
@@ -201,7 +581,8 @@ class ResearchMiddleware:
             # Run orchestrator
             tree = await orchestrator.run(
                 goal=goal,
-                max_iterations=max_iterations
+                max_iterations=max_iterations,
+                research_id=experiment_id,
             )
 
             logger.info(f"Research completed: {experiment_id}")

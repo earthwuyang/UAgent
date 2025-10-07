@@ -24,16 +24,22 @@ class AgentAdapter(ABC):
     and provide a unified event stream for the orchestrator.
     """
 
-    def __init__(self, name: str, config: dict):
+    def __init__(self, config: Optional[dict] = None, name: Optional[str] = None):
         """
         Initialize adapter.
 
         Args:
-            name: Adapter name (e.g., "deepresearch", "repomaster", "codeact")
             config: Adapter-specific configuration
+            name: Adapter name (e.g., "deepresearch", "repomaster", "codeact")
+                  If not provided, uses the class's `name` attribute
         """
-        self.name = name
-        self.config = config
+        # Use provided name or class attribute
+        if name:
+            self.name = name
+        elif not hasattr(self, 'name'):
+            raise ValueError("Adapter must have either a 'name' parameter or class attribute")
+
+        self.config = config or {}
         self._cancelled = False
 
     @abstractmethod

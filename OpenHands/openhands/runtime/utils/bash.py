@@ -200,6 +200,9 @@ class BashSession:
         self.username = username
         self._initialized = False
         self.max_memory_mb = max_memory_mb
+        # Ensure _closed is always defined to avoid __del__ AttributeError
+        # If initialization fails before setting up the tmux session, we consider it closed.
+        self._closed: bool = True
 
     def initialize(self) -> None:
         self.server = libtmux.Server()
@@ -231,7 +234,8 @@ class BashSession:
 
         # Set history limit to a large number to avoid losing history
         # https://unix.stackexchange.com/questions/43414/unlimited-history-in-tmux
-        self.session.set_option('history-limit', str(self.HISTORY_LIMIT), _global=True)
+        # libtmux >=0.46 uses parameter name `global_` (not `_global`)
+        self.session.set_option('history-limit', str(self.HISTORY_LIMIT), global_=True)
         self.session.history_limit = self.HISTORY_LIMIT
         # We need to create a new pane because the initial pane's history limit is (default) 2000
         _initial_window = self.session.active_window
@@ -254,7 +258,7 @@ class BashSession:
         # Store the last command for interactive input handling
         self.prev_status: BashCommandStatus | None = None
         self.prev_output: str = ''
-        self._closed: bool = False
+        self._closed = False
         logger.debug(f'Bash session initialized with work dir: {self.work_dir}')
 
         # Maintain the current working directory
@@ -263,7 +267,11 @@ class BashSession:
 
     def __del__(self) -> None:
         """Ensure the session is closed when the object is destroyed."""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Best-effort cleanup; avoid raising during GC
+            logger.debug('Error during BashSession.__del__ cleanup', exc_info=True)
 
     def _get_pane_content(self) -> str:
         """Capture the current pane content and update the buffer."""
@@ -280,8 +288,12 @@ class BashSession:
         """Clean up the session."""
         if self._closed:
             return
-        self.session.kill()
-        self._closed = True
+        try:
+            # session may not exist if initialize() failed early
+            if hasattr(self, 'session') and self.session is not None:
+                self.session.kill()
+        finally:
+            self._closed = True
 
     @property
     def cwd(self) -> str:

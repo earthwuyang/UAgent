@@ -115,7 +115,7 @@ class DeepResearchAdapter(AgentAdapter):
                     yield ErrorEvent(
                         branch_id=context.branch_id,
                         node_id=task.id,
-                        error="Task cancelled by user",
+                        message="Task cancelled by user",
                     )
                     return
 
@@ -126,7 +126,7 @@ class DeepResearchAdapter(AgentAdapter):
             yield ErrorEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                error=str(e),
+                message=str(e),
             )
 
     async def _execute_research(
@@ -159,7 +159,7 @@ class DeepResearchAdapter(AgentAdapter):
             yield ErrorEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                error=f"Search failed: {search_result.error}",
+                message=f"Search failed: {search_result.error}",
             )
             return
 

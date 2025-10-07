@@ -1,13 +1,12 @@
 """
-CodeAct Adapter
+CodeAct Adapter - Real OpenHands CodeActAgent Integration
 
-Wraps OpenHands CodeActAgent for code execution and general programming tasks.
+Integrates OpenHands CodeActAgent for real code execution via HeadlessAgentSession.
 """
 
 import asyncio
 import logging
 from typing import AsyncIterator, Dict, Any, Optional
-from datetime import datetime
 
 from ...adapters.base.agent_adapter import AgentAdapter
 from ...uagent_research.models.research_tree import Task, Context
@@ -15,25 +14,27 @@ from ...uagent_research.models.events import (
     ResearchEvent,
     PlanEvent,
     StepEvent,
-    ToolCallEvent,
-    ObservationEvent,
-    SummaryEvent,
-    CompleteEvent,
     ErrorEvent,
-    Artifact,
+    CompleteEvent,
 )
+from .session_runner import HeadlessAgentSession
+from ...bridges.openhands_bridge import OpenHandsEventBridge
 
 logger = logging.getLogger(__name__)
 
 
 class CodeActAdapter(AgentAdapter):
     """
-    Adapter for OpenHands CodeActAgent.
+    Adapter for real OpenHands CodeActAgent integration.
+
+    Uses HeadlessAgentSession to run actual CodeActAgent in embedded mode,
+    with OpenHandsEventBridge converting events to ResearchEvents.
 
     Capabilities:
-    - Code execution (Python, Bash)
+    - Code execution (Python, Bash, IPython)
     - File operations (read, write, edit)
     - Testing and benchmarking
+    - Browser interactions
     - General programming tasks
     - Debugging and refactoring
 
@@ -46,7 +47,7 @@ class CodeActAdapter(AgentAdapter):
     """
 
     name = "codeact"
-    description = "Code execution agent for programming tasks"
+    description = "Real OpenHands CodeActAgent for programming tasks"
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
@@ -54,206 +55,241 @@ class CodeActAdapter(AgentAdapter):
 
         Args:
             config: Adapter configuration
-                - model: LLM model name
+                - llm_config: LLM configuration for the agent
                 - max_iterations: Max execution iterations (default: 30)
-                - work_dir: Working directory for execution
+                - agent_config: Optional AgentConfig
         """
-        super().__init__(config)
+        super().__init__(name="codeact", config=config or {})
 
-        self.model = config.get("model", "gpt-4o") if config else "gpt-4o"
+        # Extract configuration
+        self.llm_config = config.get("llm_config") if config else None
         self.max_iterations = config.get("max_iterations", 30) if config else 30
-        self.work_dir = config.get("work_dir", "/tmp/codeact") if config else "/tmp/codeact"
+        self.agent_config = config.get("agent_config") if config else None
 
         # Agent state
-        self._agent = None
-        self._current_task = None
+        self._current_session: Optional[HeadlessAgentSession] = None
         self._cancelled = False
+
+        # Import CodeActAgent lazily to avoid circular imports
+        self._codeact_agent_class = None
+
+    def _get_codeact_agent_class(self):
+        """Lazy load CodeActAgent class"""
+        if self._codeact_agent_class is None:
+            try:
+                from openhands.agenthub.codeact_agent import CodeActAgent
+                self._codeact_agent_class = CodeActAgent
+                logger.info("CodeActAgent loaded successfully")
+            except ImportError as e:
+                logger.error(f"Failed to import CodeActAgent: {e}")
+                # Fallback: try alternative import path
+                try:
+                    from openhands.agenthub.codeact_agent.codeact_agent import CodeActAgent
+                    self._codeact_agent_class = CodeActAgent
+                    logger.info("CodeActAgent loaded successfully (alternative path)")
+                except ImportError:
+                    logger.error("CodeActAgent not found in any expected location")
+                    raise
+
+        return self._codeact_agent_class
+
+    def _get_llm_config(self):
+        """Get LLM config, using default if not provided"""
+        if self.llm_config:
+            return self.llm_config
+
+        # Create default LLM config
+        try:
+            from openhands.core.config import LLMConfig
+            return LLMConfig(
+                model="gpt-4o",
+                api_key=None,  # Will use env var
+            )
+        except Exception as e:
+            logger.error(f"Failed to create default LLM config: {e}")
+            raise
 
     async def run(self, task: Task, context: Context) -> AsyncIterator[ResearchEvent]:
         """
-        Execute code task using CodeActAgent.
+        Execute code task using real OpenHands CodeActAgent.
+
+        Creates a HeadlessAgentSession, starts CodeActAgent, and bridges
+        OpenHands events to ResearchEvents.
 
         Args:
             task: Research task
             context: Execution context
 
         Yields:
-            Research events (Plan, Step, ToolCall, Observation, Summary, Complete)
+            Research events from CodeActAgent execution
 
         Example:
             async for event in adapter.run(
-                task=Task(goal="Run benchmark comparing sorting algorithms"),
-                context=Context()
+                task=Task(goal="Implement quicksort in Python"),
+                context=Context(branch_id="idea-0-hyp-0")
             ):
-                print(f"{event.type}: {event}")
+                await event_bus.publish(event)
         """
         try:
-            self._current_task = task
             self._cancelled = False
 
-            # Emit plan event
+            # Emit initial plan event
             yield PlanEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                plan=f"Code execution: {task.goal}",
                 steps=[
-                    "Understand task requirements",
-                    "Write/modify code as needed",
-                    "Execute code and collect results",
-                    "Analyze output and generate summary",
+                    "Initialize CodeActAgent",
+                    "Execute task in sandboxed environment",
+                    "Stream execution events",
+                    "Collect results and artifacts"
                 ],
+                reasoning=f"Using OpenHands CodeActAgent for: {task.goal}"
             )
 
-            # Execute task
-            async for event in self._execute_code_task(task, context):
-                if self._cancelled:
-                    yield ErrorEvent(
-                        branch_id=context.branch_id,
-                        node_id=task.id,
-                        error="Task cancelled by user",
-                    )
-                    return
+            # Get CodeActAgent class
+            try:
+                agent_class = self._get_codeact_agent_class()
+            except Exception as e:
+                logger.error(f"Failed to load CodeActAgent: {e}")
+                yield ErrorEvent(
+                    branch_id=context.branch_id,
+                    node_id=task.id,
+                    message=f"CodeActAgent not available: {str(e)}"
+                )
+                return
 
-                yield event
+            # Get LLM config
+            try:
+                llm_config = self._get_llm_config()
+            except Exception as e:
+                logger.error(f"Failed to get LLM config: {e}")
+                yield ErrorEvent(
+                    branch_id=context.branch_id,
+                    node_id=task.id,
+                    message=f"LLM configuration error: {str(e)}"
+                )
+                return
+
+            # Create HeadlessAgentSession
+            experiment_id = f"{context.branch_id}-{task.id}-codeact"
+
+            yield StepEvent(
+                branch_id=context.branch_id,
+                node_id=task.id,
+                action="Creating CodeActAgent session",
+                reasoning=f"Session ID: {experiment_id}"
+            )
+
+            try:
+                self._current_session = HeadlessAgentSession(
+                    agent_class=agent_class,
+                    llm_config=llm_config,
+                    agent_config=self.agent_config,
+                    experiment_id=experiment_id,
+                    max_iterations=self.max_iterations
+                )
+            except Exception as e:
+                logger.error(f"Failed to create HeadlessAgentSession: {e}", exc_info=True)
+                yield ErrorEvent(
+                    branch_id=context.branch_id,
+                    node_id=task.id,
+                    message=f"Session creation failed: {str(e)}"
+                )
+                return
+
+            # Create event bridge
+            event_bridge = OpenHandsEventBridge(
+                event_stream=self._current_session.event_stream,
+                branch_id=context.branch_id,
+                node_id=task.id
+            )
+
+            # Start agent execution
+            yield StepEvent(
+                branch_id=context.branch_id,
+                node_id=task.id,
+                action="Starting CodeActAgent execution",
+                reasoning=f"Task: {task.goal}"
+            )
+
+            try:
+                await self._current_session.start(initial_message=task.goal)
+            except Exception as e:
+                logger.error(f"Failed to start session: {e}", exc_info=True)
+                yield ErrorEvent(
+                    branch_id=context.branch_id,
+                    node_id=task.id,
+                    message=f"Failed to start execution: {str(e)}"
+                )
+                await self._cleanup_session()
+                return
+
+            # Stream bridged events
+            event_count = 0
+            try:
+                async for research_event in event_bridge.stream():
+                    # Check cancellation
+                    if self._cancelled:
+                        logger.info(f"CodeAct task cancelled for {task.id}")
+                        await self._current_session.cancel()
+                        yield ErrorEvent(
+                            branch_id=context.branch_id,
+                            node_id=task.id,
+                            message="Task cancelled by user"
+                        )
+                        break
+
+                    event_count += 1
+                    yield research_event
+
+                    # Check if this was a completion event
+                    if isinstance(research_event, CompleteEvent):
+                        logger.info(f"CodeAct task completed for {task.id}")
+                        break
+
+            except Exception as e:
+                logger.error(f"Error streaming events: {e}", exc_info=True)
+                yield ErrorEvent(
+                    branch_id=context.branch_id,
+                    node_id=task.id,
+                    message=f"Event streaming error: {str(e)}"
+                )
+
+            # Cleanup session
+            await self._cleanup_session()
+
+            logger.info(
+                f"CodeAct execution finished for {task.id}: "
+                f"{event_count} events emitted"
+            )
 
         except Exception as e:
             logger.error(f"CodeAct execution failed: {e}", exc_info=True)
             yield ErrorEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                error=str(e),
+                message=f"Unexpected error: {str(e)}"
             )
+            await self._cleanup_session()
 
-    async def _execute_code_task(
-        self, task: Task, context: Context
-    ) -> AsyncIterator[ResearchEvent]:
-        """
-        Execute code task.
-
-        This is a simplified implementation for demonstration.
-        In production, this would integrate with the actual CodeActAgent.
-        """
-        # For now, emit placeholder events
-        # In production, this would:
-        # 1. Initialize CodeActAgent
-        # 2. Stream events from agent execution
-        # 3. Convert OpenHands events to ResearchEvents
-
-        yield StepEvent(
-            branch_id=context.branch_id,
-            node_id=task.id,
-            step_number=1,
-            description=f"Preparing to execute: {task.goal}",
-            artifacts=[],
-        )
-
-        # Simulate code execution
-        await asyncio.sleep(0.5)
-
-        yield ObservationEvent(
-            branch_id=context.branch_id,
-            node_id=task.id,
-            observation="Task analysis complete",
-            artifacts=[
-                Artifact(
-                    type="snippet",
-                    content=f"Task: {task.goal}\nContext: {task.context or 'None'}",
-                    metadata={"language": "text"},
-                )
-            ],
-        )
-
-        yield StepEvent(
-            branch_id=context.branch_id,
-            node_id=task.id,
-            step_number=2,
-            description="Executing code",
-            artifacts=[],
-        )
-
-        # Simulate execution
-        await asyncio.sleep(1.0)
-
-        # Generate mock result
-        result_code = f"""
-# {task.goal}
-
-# This is a placeholder implementation
-# In production, this would be the actual CodeActAgent execution
-
-def main():
-    print("Task: {task.goal}")
-    print("Execution completed successfully")
-
-if __name__ == "__main__":
-    main()
-"""
-
-        yield ObservationEvent(
-            branch_id=context.branch_id,
-            node_id=task.id,
-            observation="Code execution completed",
-            artifacts=[
-                Artifact(
-                    type="code",
-                    content=result_code.strip(),
-                    metadata={"language": "python", "executed": True},
-                )
-            ],
-        )
-
-        # Generate summary
-        summary = f"""# Execution Summary: {task.goal}
-
-## Task
-{task.goal}
-
-## Context
-{task.context or 'None'}
-
-## Result
-Code execution completed successfully.
-
-## Notes
-This is a simplified placeholder implementation.
-In production, this adapter will:
-1. Initialize OpenHands CodeActAgent
-2. Execute the task in a sandboxed environment
-3. Stream real-time events and observations
-4. Collect and return actual execution results
-"""
-
-        yield SummaryEvent(
-            branch_id=context.branch_id,
-            node_id=task.id,
-            summary=summary,
-            artifacts=[
-                Artifact(
-                    type="snippet",
-                    content=summary,
-                    metadata={"format": "markdown"},
-                )
-            ],
-        )
-
-        # Complete
-        yield CompleteEvent(
-            branch_id=context.branch_id,
-            node_id=task.id,
-            summary="Code execution completed (placeholder implementation)",
-            artifacts=[
-                Artifact(
-                    type="code",
-                    content=result_code.strip(),
-                    metadata={"language": "python"},
-                )
-            ],
-        )
+    async def _cleanup_session(self):
+        """Cleanup current session"""
+        if self._current_session:
+            try:
+                await self._current_session.close()
+            except Exception as e:
+                logger.error(f"Error closing session: {e}")
+            finally:
+                self._current_session = None
 
     async def cancel(self):
         """Cancel ongoing execution"""
         self._cancelled = True
-        logger.info("CodeAct task cancelled")
+
+        if self._current_session:
+            await self._current_session.cancel()
+
+        logger.info("CodeAct task cancellation requested")
 
     def supports_task(self, task: Task, context: Context) -> float:
         """
@@ -276,19 +312,31 @@ In production, this adapter will:
             "fix",
             "refactor",
             "experiment",
+            "build",
+            "compile",
+            "analyze code",
         ]
 
         score = 0.0
 
         for keyword in code_keywords:
             if keyword in goal_lower:
-                score += 0.2
+                score += 0.15
 
         # Boost for explicit programming languages
-        languages = ["python", "bash", "shell", "javascript", "java", "c++"]
+        languages = [
+            "python", "bash", "shell", "javascript", "java",
+            "c++", "rust", "go", "typescript"
+        ]
         for lang in languages:
             if lang in goal_lower:
                 score += 0.2
+
+        # File operation indicators
+        file_ops = ["file", "directory", "folder", "edit", "modify"]
+        for op in file_ops:
+            if op in goal_lower:
+                score += 0.1
 
         # Default score for general coding tasks
         if score == 0.0:
@@ -303,38 +351,46 @@ In production, this adapter will:
         Returns:
             Estimated cost in USD
         """
-        # Estimate: ~10-30 LLM calls for typical task
-        # Average ~500 tokens per call
-        # Rough estimate: $0.02-$0.05
-        return 0.03
+        # Real CodeActAgent estimation:
+        # - Typical task: 10-50 iterations
+        # - Average ~1000 tokens per iteration (input + output)
+        # - GPT-4: ~$0.03/1K tokens input, ~$0.06/1K tokens output
+        # - Average: ~$0.05-$0.25 per task
+
+        # Conservative estimate
+        return 0.10
 
 
 # Example usage
 async def test_codeact_adapter():
-    """Test CodeAct adapter"""
+    """Test real CodeAct adapter"""
+    logger.info("Testing CodeActAdapter with real OpenHands integration")
+
+    # Note: This test requires proper OpenHands setup
+    # For basic testing, just verify the adapter loads
+
     adapter = CodeActAdapter()
 
-    task = Task(
-        goal="Run a simple Python script to calculate factorial of 10",
-        context="Use iterative approach",
-    )
+    logger.info(f"✓ CodeActAdapter initialized: {adapter.name}")
+    logger.info(f"  Description: {adapter.description}")
+    logger.info(f"  Max iterations: {adapter.max_iterations}")
 
-    context = Context(branch_id="test-branch")
+    # Test task scoring
+    from ...uagent_research.models.research_tree import Task, Context
 
-    print(f"Running CodeAct adapter for: {task.goal}\n")
+    test_tasks = [
+        Task(id="1", goal="Implement quicksort in Python"),
+        Task(id="2", goal="Run benchmark comparing sorting algorithms"),
+        Task(id="3", goal="Search for neural architecture papers"),
+    ]
 
-    async for event in adapter.run(task, context):
-        print(f"[{event.type}] {event.timestamp}")
+    for task in test_tasks:
+        score = adapter.supports_task(task, Context(branch_id="test"))
+        logger.info(f"  Task '{task.goal[:40]}...': score={score:.2f}")
 
-        if hasattr(event, "description"):
-            print(f"  {event.description}")
-        elif hasattr(event, "observation"):
-            print(f"  {event.observation}")
-        elif hasattr(event, "summary"):
-            print(f"  Summary: {event.summary[:100]}...")
-
-        print()
+    logger.info("✓ CodeActAdapter test completed")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(test_codeact_adapter())

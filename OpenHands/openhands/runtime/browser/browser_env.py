@@ -1,4 +1,6 @@
 import atexit
+import os
+import tempfile
 import json
 import multiprocessing
 import time
@@ -87,6 +89,18 @@ class BrowserEnv:
                 )
             env = gym.make(self.browsergym_eval_env, tags_to_mark='all', timeout=100000)
         else:
+            # Choose a writable downloads path for LocalRuntime (avoid /workspace on host)
+            downloads_base = os.environ.get(
+                'OPENHANDS_DOWNLOADS_DIR',
+                os.path.join(tempfile.gettempdir(), 'openhands_downloads'),
+            )
+            try:
+                os.makedirs(downloads_base, exist_ok=True)
+            except Exception:
+                # Fallback to home directory if temp fails
+                downloads_base = os.path.join(os.path.expanduser('~'), '.openhands_downloads')
+                os.makedirs(downloads_base, exist_ok=True)
+
             env = gym.make(
                 'browsergym/openended',
                 task_kwargs={'start_url': 'about:blank', 'goal': 'PLACEHOLDER_GOAL'},
@@ -96,7 +110,7 @@ class BrowserEnv:
                 tags_to_mark='all',
                 timeout=100000,
                 pw_context_kwargs={'accept_downloads': True},
-                pw_chromium_kwargs={'downloads_path': '/workspace/.downloads/'},
+                pw_chromium_kwargs={'downloads_path': downloads_base},
             )
         obs, info = env.reset()
 

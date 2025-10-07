@@ -79,6 +79,8 @@ class WebSession:
     file_store: FileStore
     user_id: str | None
     logger: LoggerAdapter
+    active_research_experiment_id: str | None = None  # Track active research experiment
+    _progress_reporter_task: asyncio.Task | None = None  # Background progress reporting task
 
     def __init__(
         self,
@@ -345,7 +347,7 @@ class WebSession:
         ):
             # feedback from the environment to agent actions is understood as agent events by the UI
             event_dict = event_to_dict(event)
-            event_dict['source'] = EventSource.AGENT
+            event_dict['source'] = EventSource.AGENT.value
             await self.send(event_dict)
             if (
                 isinstance(event, AgentStateChangedObservation)
@@ -358,13 +360,14 @@ class WebSession:
         elif isinstance(event, ErrorObservation):
             # send error events as agent events to the UI
             event_dict = event_to_dict(event)
-            event_dict['source'] = EventSource.AGENT
+            event_dict['source'] = EventSource.AGENT.value
             await self.send(event_dict)
 
     async def dispatch(self, data: dict) -> None:
         event = event_from_dict(data.copy())
 
         # Check if research should be triggered for this message
+        research_mode_active = False
         if RESEARCH_MIDDLEWARE_AVAILABLE and isinstance(event, MessageAction) and event.content:
             try:
                 result = await research_middleware.process_message(
@@ -374,6 +377,7 @@ class WebSession:
                 )
 
                 if result.get('should_trigger_research'):
+                    research_mode_active = True
                     self.logger.info(
                         f"Research mode triggered for message in conversation {self.sid}",
                         extra={
@@ -383,9 +387,17 @@ class WebSession:
                         }
                     )
 
-                    # Optionally append research context to the message
+                    # Store experiment_id for frontend access
                     if result.get('status') == 'research_started':
                         experiment_id = result.get('experiment_id', 'N/A')
+                        self.active_research_experiment_id = experiment_id
+
+                        # Start progress reporting task
+                        if self._progress_reporter_task is None or self._progress_reporter_task.done():
+                            self._progress_reporter_task = asyncio.create_task(
+                                self._report_research_progress()
+                            )
+
                         research_info = (
                             f"\n\n[System: Research mode activated - "
                             f"Experiment ID: {experiment_id}, "
@@ -411,7 +423,12 @@ class WebSession:
                         'Model does not support image upload, change to a different model or try without an image.'
                     )
                     return
-        self.agent_session.event_stream.add_event(event, EventSource.USER)
+
+        # Only dispatch to regular agent if research mode is NOT active
+        if not research_mode_active:
+            self.agent_session.event_stream.add_event(event, EventSource.USER)
+        else:
+            self.logger.info(f"Blocking regular agent execution - research mode active for experiment {self.active_research_experiment_id}")
 
     async def send(self, data: dict[str, object]) -> None:
         self._publish_queue.put_nowait(data)
@@ -459,6 +476,64 @@ class WebSession:
             self.logger.error(f'Error sending data to websocket: {str(e)}')
             self.is_alive = False
             return False
+
+    async def _report_research_progress(self):
+        """Report research progress every 30 seconds while experiment is running."""
+        try:
+            while self.active_research_experiment_id and self.is_alive:
+                await asyncio.sleep(30)  # Report every 30 seconds
+
+                if not self.active_research_experiment_id:
+                    break
+
+                # Get progress from middleware
+                if RESEARCH_MIDDLEWARE_AVAILABLE:
+                    orchestrator = research_middleware.get_orchestrator(self.active_research_experiment_id)
+
+                    if orchestrator and hasattr(orchestrator, 'tree') and orchestrator.tree:
+                        tree = orchestrator.tree
+
+                        # Calculate statistics
+                        total_nodes = len(tree.nodes) if hasattr(tree, 'nodes') else 0
+                        stats = tree.stats if hasattr(tree, 'stats') else {}
+                        total_cost = stats.get('total_cost', 0.0)
+
+                        # Count nodes by status
+                        completed = sum(1 for node in tree.nodes.values()
+                                      if hasattr(node, 'status') and node.status.value == 'complete')
+                        running = sum(1 for node in tree.nodes.values()
+                                    if hasattr(node, 'status') and node.status.value == 'running')
+                        pending = sum(1 for node in tree.nodes.values()
+                                    if hasattr(node, 'status') and node.status.value == 'pending')
+                        failed = sum(1 for node in tree.nodes.values()
+                                   if hasattr(node, 'status') and node.status.value == 'failed')
+
+                        # Create progress message
+                        progress_msg = (
+                            f"\n\n[Research Progress Update]\n"
+                            f"Experiment ID: {self.active_research_experiment_id}\n"
+                            f"Total Nodes: {total_nodes}\n"
+                            f"Completed: {completed} | Running: {running} | Pending: {pending} | Failed: {failed}\n"
+                            f"Total Cost: ${total_cost:.3f}\n"
+                        )
+
+                        # Send progress message to frontend
+                        observation = MessageAction(content=progress_msg)
+                        event_dict = event_to_dict(observation)
+                        event_dict['source'] = EventSource.AGENT.value
+                        await self.send(event_dict)
+
+                        self.logger.info(f"Research progress reported for experiment {self.active_research_experiment_id}: {total_nodes} nodes")
+                    else:
+                        # Orchestrator finished or not found - stop reporting
+                        self.logger.info(f"Research orchestrator not found or completed for {self.active_research_experiment_id}, stopping progress reports")
+                        self.active_research_experiment_id = None
+                        break
+
+        except asyncio.CancelledError:
+            self.logger.info("Research progress reporting cancelled")
+        except Exception as e:
+            self.logger.error(f"Error in research progress reporting: {str(e)}", exc_info=True)
 
     async def send_error(self, message: str) -> None:
         """Sends an error message to the client."""

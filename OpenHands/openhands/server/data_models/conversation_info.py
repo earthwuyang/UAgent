@@ -27,3 +27,6 @@ class ConversationInfo:
     session_api_key: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     pr_number: list[int] = field(default_factory=list)
+    research_experiment_id: str | None = None  # Active research experiment ID
+    research_goal: str | None = None
+    research_locked: bool = False

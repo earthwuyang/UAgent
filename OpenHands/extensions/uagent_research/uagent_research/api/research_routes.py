@@ -8,11 +8,11 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import select as sql_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
@@ -27,7 +27,147 @@ from ..models.base import get_session
 
 logger = logging.getLogger(__name__)
 
+# Import control and session management
+try:
+    from ...control.control_bus import ControlBus, ControlMessage
+    from ...services.research_session_manager import ResearchSessionManager
+    from ...orchestrator.event_bus import get_event_bus
+    CONTROL_BUS_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Control bus not available: {e}")
+    CONTROL_BUS_AVAILABLE = False
+    ControlBus = None
+    ControlMessage = None
+    ResearchSessionManager = None
+
 router = APIRouter(prefix="/api/research", tags=["research"])
+
+# Import orchestrator and related components for background execution
+try:
+    from extensions.uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
+    from extensions.uagent_research.orchestrator.event_bus import get_event_bus
+    from extensions.uagent_research.uagent_research.models.research_tree import Budget
+    ORCHESTRATOR_AVAILABLE = True
+    print(f"[DEBUG] Orchestrator import successful, ORCHESTRATOR_AVAILABLE={ORCHESTRATOR_AVAILABLE}", flush=True)
+except ImportError as e:
+    logger.warning(f"Orchestrator not available: {e}")
+    print(f"[DEBUG] Orchestrator import failed: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
+    ORCHESTRATOR_AVAILABLE = False
+    TreeSearchOrchestrator = None
+
+# Global storage for active orchestrators
+_active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
+
+
+async def run_experiment_async(experiment_id: str, goal: str, config: Optional[Dict[str, Any]] = None):
+    """
+    Run research experiment in background.
+
+    Args:
+        experiment_id: Experiment ID
+        goal: Research goal
+        config: Optional configuration
+    """
+    print(f"[DEBUG] run_experiment_async called for {experiment_id}", flush=True)
+    if not ORCHESTRATOR_AVAILABLE:
+        logger.error(f"Cannot run experiment {experiment_id}: Orchestrator not available")
+        print(f"[DEBUG] ORCHESTRATOR_AVAILABLE is False, exiting", flush=True)
+        return
+
+    try:
+        logger.info(f"Starting background execution for experiment {experiment_id}")
+        print(f"[DEBUG] Starting background execution for experiment {experiment_id}", flush=True)
+
+        # Get config parameters
+        config = config or {}
+        max_iterations = config.get('max_iterations', 50)
+        max_cost = config.get('max_cost', 10.0)
+        max_parallel = config.get('max_parallel', 3)
+
+        # Create budget
+        budget = Budget(
+            max_iterations=max_iterations,
+            max_cost=max_cost,
+            max_tokens=config.get('max_tokens', 100000),
+            deadline=None,
+        )
+
+        # Get event bus
+        event_bus = get_event_bus()
+
+        # Create orchestrator
+        orchestrator = TreeSearchOrchestrator(
+            max_parallel=max_parallel,
+            budget=budget,
+            event_bus=event_bus,
+        )
+
+        # Store orchestrator
+        _active_orchestrators[experiment_id] = orchestrator
+
+        # Update experiment status to RUNNING
+        async for db_session in get_session():
+            result = await db_session.execute(
+                sql_select(Experiment).where(Experiment.id == experiment_id)
+            )
+            experiment = result.scalar_one_or_none()
+            if experiment:
+                experiment.status = ExperimentStatus.RUNNING
+                experiment.started_at = datetime.utcnow()
+                await db_session.commit()
+            break  # Only need one iteration
+
+        logger.info(f"Running orchestrator for experiment {experiment_id}")
+
+        # Run orchestrator
+        tree = await orchestrator.run(
+            goal=goal,
+            max_iterations=max_iterations,
+            research_id=experiment_id,
+        )
+
+        logger.info(f"Experiment {experiment_id} completed successfully")
+
+        # Update experiment status to COMPLETE
+        async for db_session in get_session():
+            result = await db_session.execute(
+                sql_select(Experiment).where(Experiment.id == experiment_id)
+            )
+            experiment = result.scalar_one_or_none()
+            if experiment:
+                experiment.status = ExperimentStatus.COMPLETE
+                experiment.completed_at = datetime.utcnow()
+                experiment.results = {
+                    'total_nodes': len(tree.nodes) if tree else 0,
+                    'stats': tree.stats if tree and hasattr(tree, 'stats') else {}
+                }
+                await db_session.commit()
+            break
+
+    except Exception as e:
+        logger.error(f"Experiment {experiment_id} failed: {e}", exc_info=True)
+
+        # Update experiment status to FAILED
+        try:
+            async for db_session in get_session():
+                result = await db_session.execute(
+                    sql_select(Experiment).where(Experiment.id == experiment_id)
+                )
+                experiment = result.scalar_one_or_none()
+                if experiment:
+                    experiment.status = ExperimentStatus.FAILED
+                    experiment.error_message = str(e)
+                    experiment.completed_at = datetime.utcnow()
+                    await db_session.commit()
+                break
+        except Exception as db_error:
+            logger.error(f"Failed to update experiment status: {db_error}")
+
+    finally:
+        # Cleanup orchestrator
+        _active_orchestrators.pop(experiment_id, None)
 
 
 # Request/Response Models
@@ -112,8 +252,19 @@ async def start_experiment(
 
     logger.info(f"Created experiment: {experiment_id}")
 
-    # In production, would start experiment in background
-    # background_tasks.add_task(run_experiment_async, experiment_id)
+    # Start experiment in background
+    if ORCHESTRATOR_AVAILABLE:
+        background_tasks.add_task(
+            run_experiment_async,
+            experiment_id,
+            request.goal,
+            request.config
+        )
+        logger.info(f"Background task scheduled for experiment {experiment_id}")
+        print(f"[DEBUG] Background task added for experiment {experiment_id}, ORCHESTRATOR_AVAILABLE={ORCHESTRATOR_AVAILABLE}", flush=True)
+    else:
+        logger.warning(f"Orchestrator not available, experiment {experiment_id} will not execute")
+        print(f"[DEBUG] Orchestrator not available, experiment {experiment_id} NOT executing", flush=True)
 
     return ExperimentResponse(
         id=experiment.id,
@@ -140,7 +291,7 @@ async def get_experiment(
     Get experiment status and results.
     """
     result = await session.execute(
-        select(Experiment).where(Experiment.id == experiment_id)
+        sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
 
@@ -174,7 +325,7 @@ async def list_experiments(
     """
     List experiments with optional filters.
     """
-    query = select(Experiment)
+    query = sql_select(Experiment)
 
     if session_id:
         query = query.where(Experiment.session_id == session_id)
@@ -223,7 +374,7 @@ async def cancel_experiment(
     Cancel running experiment.
     """
     result = await session.execute(
-        select(Experiment).where(Experiment.id == experiment_id)
+        sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
 
@@ -256,7 +407,7 @@ async def get_research_tree(
     """
     try:
         result = await session.execute(
-            select(ResearchSession).where(ResearchSession.id == session_id)
+            sql_select(ResearchSession).where(ResearchSession.id == session_id)
         )
         research_session = result.scalar_one_or_none()
 
@@ -375,6 +526,31 @@ except ImportError:
 # Global storage for active orchestrators (in production, use Redis/DB)
 _active_orchestrators = {}
 
+# Global session manager for research state tracking
+_session_manager: Optional[ResearchSessionManager] = None
+
+def get_session_manager() -> Optional[ResearchSessionManager]:
+    """Get or create global session manager"""
+    global _session_manager
+
+    if not CONTROL_BUS_AVAILABLE:
+        return None
+
+    if _session_manager is None:
+        try:
+            event_bus = get_event_bus()
+            control_bus = ControlBus()
+            _session_manager = ResearchSessionManager(
+                event_bus=event_bus,
+                control_bus=control_bus
+            )
+            logger.info("ResearchSessionManager initialized for API")
+        except Exception as e:
+            logger.error(f"Failed to initialize session manager: {e}")
+            return None
+
+    return _session_manager
+
 
 class TreeNodeResponse(BaseModel):
     """Tree node response"""
@@ -413,7 +589,7 @@ async def get_experiment_tree(
     try:
         # Check experiment exists
         result = await session.execute(
-            select(Experiment).where(Experiment.id == experiment_id)
+            sql_select(Experiment).where(Experiment.id == experiment_id)
         )
         experiment = result.scalar_one_or_none()
 
@@ -534,7 +710,9 @@ async def get_experiment_tree(
 
 class ExperimentControlRequest(BaseModel):
     """Experiment control request"""
-    action: str  # pause, resume, cancel
+    action: str  # pause, resume, cancel, cancel_node, reprioritize, steer, add_node
+    target: Optional[Dict[str, str]] = Field(default_factory=dict)
+    payload: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
 @router.patch("/experiments/{experiment_id}")
@@ -544,48 +722,137 @@ async def control_experiment(
     session: AsyncSession = Depends(get_session)
 ):
     """
-    Control experiment execution (pause, resume, cancel).
+    Control experiment execution.
+
+    Supported actions:
+    - pause: Pause research (stop scheduling new nodes)
+    - resume: Resume paused research
+    - cancel: Cancel entire experiment
+    - cancel_node: Cancel specific node (requires target.node_id)
+    - reprioritize: Adjust priorities (requires target and payload.delta)
+    - steer: Send guidance to adapter (requires target and payload.text)
+    - add_node: Add new research direction (requires payload.parent_id and payload.node)
     """
     # Check experiment exists
     result = await session.execute(
-        select(Experiment).where(Experiment.id == experiment_id)
+        sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
 
     if not experiment:
         raise HTTPException(404, f"Experiment {experiment_id} not found")
 
-    # Get orchestrator
-    orchestrator = _active_orchestrators.get(experiment_id)
+    # Try to use session manager first (if available)
+    session_mgr = get_session_manager()
 
-    if not orchestrator:
-        raise HTTPException(400, f"Experiment {experiment_id} not running")
+    if session_mgr and CONTROL_BUS_AVAILABLE:
+        # Use ControlBus for all control actions
+        try:
+            control_msg = ControlMessage(
+                action=request.action,
+                target=request.target or {},
+                payload=request.payload or {},
+                sender="api"
+            )
 
-    # Execute action
-    if request.action == "pause":
-        # Pause not implemented yet - would need to add pause() to orchestrator
-        raise HTTPException(501, "Pause not implemented")
+            await session_mgr.send_control(experiment_id, control_msg)
 
-    elif request.action == "resume":
-        # Resume not implemented yet
-        raise HTTPException(501, "Resume not implemented")
+            # Update database for terminal actions
+            if request.action == "cancel":
+                experiment.status = ExperimentStatus.CANCELLED
+                experiment.completed_at = datetime.utcnow()
+                await session.commit()
+                _active_orchestrators.pop(experiment_id, None)
 
-    elif request.action == "cancel":
-        # Cancel experiment
-        await orchestrator.cancel()
+            return {
+                "status": "acknowledged",
+                "experiment_id": experiment_id,
+                "action": request.action,
+                "message": f"Control command '{request.action}' sent successfully"
+            }
 
-        # Update experiment status
-        experiment.status = ExperimentStatus.CANCELLED
-        experiment.completed_at = datetime.utcnow()
-        await session.commit()
-
-        # Remove from active orchestrators
-        _active_orchestrators.pop(experiment_id, None)
-
-        return {"status": "cancelled", "experiment_id": experiment_id}
+        except Exception as e:
+            logger.error(f"Error sending control command: {e}", exc_info=True)
+            raise HTTPException(500, f"Failed to send control command: {str(e)}")
 
     else:
-        raise HTTPException(400, f"Invalid action: {request.action}")
+        # Fallback to direct orchestrator control (legacy)
+        orchestrator = _active_orchestrators.get(experiment_id)
+
+        if not orchestrator:
+            raise HTTPException(400, f"Experiment {experiment_id} not running")
+
+        # Only support cancel in legacy mode
+        if request.action == "cancel":
+            await orchestrator.cancel()
+            experiment.status = ExperimentStatus.CANCELLED
+            experiment.completed_at = datetime.utcnow()
+            await session.commit()
+            _active_orchestrators.pop(experiment_id, None)
+
+            return {"status": "cancelled", "experiment_id": experiment_id}
+        else:
+            raise HTTPException(501, f"Action '{request.action}' requires ControlBus (not available)")
+
+
+@router.get("/experiments/{experiment_id}/status")
+async def get_experiment_status(
+    experiment_id: str,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Get real-time experiment status with detailed progress information.
+
+    Returns:
+        - experiment_id: Experiment ID
+        - status: Current status (running/paused/complete/failed)
+        - stats: Node statistics (total, completed, failed, running, etc.)
+        - adapters: Status of each adapter
+        - active_branches: Currently running branches
+        - created_at: Creation timestamp
+        - last_update: Last status update timestamp
+    """
+    # Check experiment exists
+    result = await session.execute(
+        sql_select(Experiment).where(Experiment.id == experiment_id)
+    )
+    experiment = result.scalar_one_or_none()
+
+    if not experiment:
+        raise HTTPException(404, f"Experiment {experiment_id} not found")
+
+    # Try to get status from session manager
+    session_mgr = get_session_manager()
+
+    if session_mgr:
+        try:
+            status = session_mgr.get_status(experiment_id)
+            return status
+        except KeyError:
+            # Experiment not registered in session manager
+            pass
+        except Exception as e:
+            logger.error(f"Error getting status from session manager: {e}")
+
+    # Fallback: return basic status from database
+    return {
+        "experiment_id": experiment_id,
+        "status": experiment.status.value if experiment.status else "unknown",
+        "stats": {
+            "total_nodes": 0,
+            "completed": 0,
+            "failed": 0,
+            "running": 0,
+            "pending": 0,
+            "total_cost": 0.0,
+            "total_tokens": 0
+        },
+        "adapters": {},
+        "active_branches": [],
+        "created_at": experiment.created_at.isoformat() if experiment.created_at else None,
+        "last_update": experiment.updated_at.isoformat() if hasattr(experiment, 'updated_at') and experiment.updated_at else None,
+        "message": "Detailed status not available (session manager not tracking this experiment)"
+    }
 
 
 @router.get("/experiments/{experiment_id}/events")
@@ -603,7 +870,7 @@ async def get_experiment_events(
     """
     # Check experiment exists
     result = await session.execute(
-        select(Experiment).where(Experiment.id == experiment_id)
+        sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
 

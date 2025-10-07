@@ -10,13 +10,14 @@ Streams research events to frontend via SSE/WebSocket with:
 
 import asyncio
 import logging
+import time
 from typing import Dict, Set, Optional, AsyncIterator, List, Callable
 from datetime import datetime
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import json
 
-from ..uagent_research.models.events import ResearchEvent, EventType
+from ..uagent_research.models.events import ResearchEvent, EventType, StepEvent
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +57,16 @@ class EventBus:
         await bus.publish(StepEvent(...))
     """
 
-    def __init__(self, max_buffer_size: int = 1000):
+    def __init__(self, max_buffer_size: int = 1000, heartbeat_interval: int = 5):
         """
         Initialize event bus.
 
         Args:
             max_buffer_size: Maximum events to buffer per subscriber
+            heartbeat_interval: Heartbeat interval in seconds (0 to disable)
         """
         self.max_buffer_size = max_buffer_size
+        self.heartbeat_interval = heartbeat_interval
 
         # Subscriber management
         self._subscribers: Dict[str, EventSubscription] = {}
@@ -74,6 +77,11 @@ class EventBus:
         self._coalesce_buffers: Dict[str, List[ResearchEvent]] = defaultdict(list)
         self._coalesce_tasks: Dict[str, asyncio.Task] = {}
 
+        # Heartbeat tracking
+        self._last_event_time: Dict[str, float] = {}  # branch_id -> timestamp
+        self._heartbeat_tasks: Dict[str, asyncio.Task] = {}  # branch_id -> task
+        self._active_branches: Set[str] = set()
+
         # Statistics
         self.stats = {
             "events_published": 0,
@@ -81,6 +89,7 @@ class EventBus:
             "events_dropped": 0,
             "events_coalesced": 0,
             "active_subscribers": 0,
+            "heartbeats_sent": 0,
         }
 
         self._lock = asyncio.Lock()
@@ -188,6 +197,20 @@ class EventBus:
             ))
         """
         self.stats["events_published"] += 1
+
+        # Update heartbeat tracking
+        if hasattr(event, 'branch_id') and event.branch_id:
+            branch_id = event.branch_id
+            self._last_event_time[branch_id] = time.time()
+            self._active_branches.add(branch_id)
+
+            # Start heartbeat supervisor if not running and heartbeats enabled
+            if (self.heartbeat_interval > 0 and
+                branch_id not in self._heartbeat_tasks):
+                task = asyncio.create_task(
+                    self._heartbeat_supervisor(branch_id)
+                )
+                self._heartbeat_tasks[branch_id] = task
 
         async with self._lock:
             for subscriber_id in list(self._active_subscribers):
@@ -361,6 +384,70 @@ class EventBus:
             except Exception as e:
                 logger.error(f"Error handling backpressure for '{subscriber_id}': {e}")
 
+    async def _heartbeat_supervisor(self, branch_id: str):
+        """
+        Emit heartbeat events when branch is idle.
+
+        Args:
+            branch_id: Branch to monitor
+        """
+        logger.info(f"Starting heartbeat supervisor for branch {branch_id}")
+
+        try:
+            while branch_id in self._active_branches:
+                await asyncio.sleep(self.heartbeat_interval)
+
+                # Check if branch has been idle
+                last_time = self._last_event_time.get(branch_id, 0)
+                idle_time = time.time() - last_time
+
+                if idle_time >= self.heartbeat_interval:
+                    # Emit heartbeat event
+                    heartbeat = StepEvent(
+                        branch_id=branch_id,
+                        node_id="heartbeat",
+                        action="heartbeat",
+                        reasoning=f"Branch {branch_id} still active (idle for {idle_time:.1f}s)"
+                    )
+
+                    # Publish heartbeat (bypass normal publish to avoid recursion)
+                    async with self._lock:
+                        for subscriber_id in list(self._active_subscribers):
+                            if self._matches_subscription(heartbeat, subscriber_id):
+                                await self._deliver_event(subscriber_id, heartbeat)
+
+                    self.stats["heartbeats_sent"] += 1
+                    logger.debug(
+                        f"Sent heartbeat for branch {branch_id} "
+                        f"(idle: {idle_time:.1f}s)"
+                    )
+
+        except asyncio.CancelledError:
+            logger.debug(f"Heartbeat supervisor cancelled for branch {branch_id}")
+        except Exception as e:
+            logger.error(
+                f"Error in heartbeat supervisor for {branch_id}: {e}",
+                exc_info=True
+            )
+
+    def stop_branch_heartbeat(self, branch_id: str):
+        """
+        Stop heartbeat for a branch (when branch completes).
+
+        Args:
+            branch_id: Branch to stop heartbeat for
+        """
+        self._active_branches.discard(branch_id)
+        self._last_event_time.pop(branch_id, None)
+
+        # Cancel heartbeat task
+        if branch_id in self._heartbeat_tasks:
+            task = self._heartbeat_tasks.pop(branch_id)
+            if not task.done():
+                task.cancel()
+
+        logger.debug(f"Stopped heartbeat for branch {branch_id}")
+
     async def broadcast(self, events: List[ResearchEvent]):
         """
         Broadcast multiple events.
@@ -383,6 +470,10 @@ class EventBus:
     async def close(self):
         """Close event bus and cleanup resources"""
         logger.info("Closing event bus...")
+
+        # Cancel all heartbeat tasks
+        for branch_id in list(self._heartbeat_tasks.keys()):
+            self.stop_branch_heartbeat(branch_id)
 
         # Unsubscribe all
         for subscriber_id in list(self._active_subscribers):

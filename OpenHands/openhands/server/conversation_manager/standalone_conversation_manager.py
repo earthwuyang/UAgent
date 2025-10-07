@@ -728,6 +728,9 @@ class StandaloneConversationManager(ConversationManager):
         runtime_status = None if status == ConversationStatus.STOPPED else getattr(
             session.agent_session.runtime, 'runtime_status', None
         )
+        # Get research experiment ID if available
+        research_experiment_id = getattr(session, 'active_research_experiment_id', None)
+
         return AgentLoopInfo(
             conversation_id=session.sid,
             url=self._get_conversation_url(session.sid),
@@ -735,6 +738,7 @@ class StandaloneConversationManager(ConversationManager):
             event_store=session.agent_session.event_stream,
             status=status,
             runtime_status=runtime_status,
+            research_experiment_id=research_experiment_id,
         )
 
     def _get_conversation_url(self, conversation_id: str):
