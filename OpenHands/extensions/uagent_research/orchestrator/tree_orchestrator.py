@@ -517,13 +517,14 @@ class TreeSearchOrchestrator:
                         {
                             "id": node.id,
                             "type": node.type.value,
-                            "title": node.title,
-                            "content": node.content,
-                            "status": node.status.value,
-                            "prior": node.prior,
-                            "visits": node.visits,
-                            "avg_value": node.avg_value,
-                            "cost": node.cost,
+                    "title": node.title,
+                    "content": node.content,
+                    "parent_id": node.parent_id,
+                    "status": node.status.value,
+                    "prior": node.prior,
+                    "visits": node.visits,
+                    "avg_value": node.avg_value,
+                    "cost": node.cost,
                         }
                         for node in self.tree.nodes.values()
                     ],

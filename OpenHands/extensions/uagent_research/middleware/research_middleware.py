@@ -71,6 +71,8 @@ class ResearchMiddleware:
         self.confidence_threshold = confidence_threshold
         self.enable_auto_trigger = enable_auto_trigger
         self.active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
+        # Track goal by session for single-goal mode
+        self._session_goal: Dict[str, str] = {}
 
         # Session manager for progress queries
         self._session_manager = session_manager
@@ -441,8 +443,22 @@ class ResearchMiddleware:
         # Single-goal mode: if goal not yet set, attempt to detect and launch; else do not auto-trigger
         if SINGLE_GOAL_MODE:
             goal_already_set = False
+            # Check explicit metadata first
             if conversation_metadata and isinstance(conversation_metadata, dict):
-                goal_already_set = bool(conversation_metadata.get('research_goal'))
+                goal_already_set = bool(conversation_metadata.get('research_goal')) or bool(conversation_metadata.get('research_locked'))
+            # Fallback to internal tracking and active orchestrators
+            if not goal_already_set:
+                if session_id in self._session_goal:
+                    goal_already_set = True
+                else:
+                    # Also consider background API-started experiments with exp_{session_id}_*
+                    if session_id in self.active_orchestrators:
+                        goal_already_set = True
+                    else:
+                        for exp_id in list(self.active_orchestrators.keys()):
+                            if exp_id.startswith(f"exp_{session_id}_"):
+                                goal_already_set = True
+                                break
             if not goal_already_set:
                 should_trigger, task_type, confidence, reasoning = task_classifier.should_trigger_research(
                     user_message,
@@ -456,6 +472,8 @@ class ResearchMiddleware:
                             research_type='scientific',
                             config=conversation_metadata or {},
                         )
+                        # Record goal for single-goal mode
+                        self._session_goal[session_id] = user_message
                         return {
                             'mode': 'research',
                             'should_trigger_research': True,
@@ -594,6 +612,8 @@ class ResearchMiddleware:
             'session_id': session_id,
             'max_iterations': max_iterations,
         }
+        # Track session goal for single-goal mode
+        self._session_goal[session_id] = goal
         logger.info(f"[RESEARCH_MIDDLEWARE] Stored orchestrator in active_orchestrators, total active: {len(self.active_orchestrators)}")
 
         # Start research in background, pass experiment_id as research_id

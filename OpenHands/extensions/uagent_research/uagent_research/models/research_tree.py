@@ -145,6 +145,8 @@ class ResearchTree(BaseModel):
             actual_parent_id = parent_id
 
         if actual_parent_id:
+            # Persist parent relationship on child node
+            node.parent_id = actual_parent_id
             self.edges.append(ResearchEdge(
                 parent_id=actual_parent_id,
                 child_id=node.id

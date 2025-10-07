@@ -426,6 +426,31 @@ class WebSession:
 
         # Only dispatch to regular agent if research mode is NOT active
         if not research_mode_active:
+            # Intercept research middleware special modes
+            try:
+                # We re-run lightweight detection to see if it's a progress/control request
+                from extensions.uagent_research.middleware.research_middleware import research_middleware
+                result = await research_middleware.process_message(
+                    user_message=event.content,
+                    session_id=self.sid,
+                    conversation_metadata={'source': 'subsequent_message'}
+                )
+                mode = result.get('mode')
+                if mode == 'progress_query':
+                    # Send a concise progress summary as an agent message
+                    summary = result.get('progress_data', {}).get('summary') or 'No active research found for this conversation.'
+                    self.agent_session.event_stream.add_event(
+                        MessageAction(content=summary),
+                        EventSource.AGENT,
+                    )
+                    # Set state to awaiting input and return
+                    if self.agent_session.controller is not None:
+                        await self.agent_session.controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+                    return
+                # Fall-through: normal dispatch if not a progress/control request
+            except Exception:
+                # If extension not available or errors, continue normal flow
+                pass
             self.agent_session.event_stream.add_event(event, EventSource.USER)
         else:
             self.logger.info(f"Blocking regular agent execution - research mode active for experiment {self.active_research_experiment_id}")

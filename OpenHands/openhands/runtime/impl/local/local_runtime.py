@@ -15,7 +15,10 @@ import tenacity
 
 import openhands
 from openhands.core.config import OpenHandsConfig
-from openhands.core.exceptions import AgentRuntimeDisconnectedError
+from openhands.core.exceptions import (
+    AgentRuntimeDisconnectedError,
+    AgentRuntimeUnavailableError,
+)
 from openhands.core.logger import openhands_logger as logger
 from openhands.events import EventStream
 from openhands.events.action import (
@@ -414,12 +417,17 @@ class LocalRuntime(ActionExecutionClient):
     @tenacity.retry(
         wait=tenacity.wait_fixed(2),
         stop=tenacity.stop_after_delay(120) | stop_if_should_exit(),
+        retry=tenacity.retry_if_not_exception_type(AgentRuntimeDisconnectedError),
         before_sleep=lambda retry_state: logger.debug(
             f'Waiting for server to be ready... (attempt {retry_state.attempt_number})'
         ),
     )
     def _wait_until_alive(self) -> bool:
         """Wait until the server is ready to accept requests."""
+        if self._runtime_closed:
+            raise AgentRuntimeDisconnectedError(
+                'Runtime closed while waiting for server readiness'
+            )
         if self.server_process and self.server_process.poll() is not None:
             raise RuntimeError('Server process died')
 
@@ -427,6 +435,10 @@ class LocalRuntime(ActionExecutionClient):
             response = self.session.get(f'{self.api_url}/alive')
             response.raise_for_status()
             return True
+        except httpx.ConnectError as exc:
+            raise AgentRuntimeUnavailableError(
+                f'Failed to reach runtime at {self.api_url}/alive: {exc}'
+            ) from exc
         except Exception as e:
             self.log('debug', f'Server not ready yet: {e}')
             raise
@@ -492,6 +504,9 @@ class LocalRuntime(ActionExecutionClient):
             super().close()
             return
 
+        # Mark the runtime as closed before tearing down to signal background tasks.
+        super().close()
+
         # Signal the log thread to exit
         self._log_thread_exit_event.set()
 
@@ -512,8 +527,6 @@ class LocalRuntime(ActionExecutionClient):
         if self._temp_workspace and not self.attach_to_existing:
             shutil.rmtree(self._temp_workspace)
             self._temp_workspace = None
-
-        super().close()
 
     @classmethod
     async def delete(cls, conversation_id: str) -> None:

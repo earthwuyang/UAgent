@@ -4,6 +4,7 @@ from typing import Any
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from openhands.core.exceptions import AgentRuntimeDisconnectedError
 from openhands.utils.http_session import HttpSession
 from openhands.utils.tenacity_stop import stop_if_should_exit
 
@@ -41,7 +42,12 @@ def send_request(
     timeout: int = 60,
     **kwargs: Any,
 ) -> httpx.Response:
-    response = session.request(method, url, timeout=timeout, **kwargs)
+    try:
+        response = session.request(method, url, timeout=timeout, **kwargs)
+    except httpx.ConnectError as exc:
+        raise AgentRuntimeDisconnectedError(
+            f'Failed to connect to runtime at {url}: {exc}'
+        ) from exc
     try:
         response.raise_for_status()
     except httpx.HTTPError as e:
