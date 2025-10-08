@@ -27,10 +27,23 @@ def ensure_research_adapters_registered() -> bool:
     Returns:
         True if adapters were registered or already registered, False on error
     """
+    global _adapters_registered
+    
+    # Check current registry state
+    from .base.agent_adapter import adapter_registry
+    
+    try:
+        current_adapters = list(adapter_registry.get_all_adapters())
+        logger.info(f"[ADAPTER_REGISTRY] Current state: {len(current_adapters)} adapters")
+        
+        if len(current_adapters) >= 3:
+            logger.info(f"[ADAPTER_REGISTRY] Adapters already registered: {[a.name for a in current_adapters]}")
+            return True
+    except Exception as e:
+        logger.warning(f"[ADAPTER_REGISTRY] Error checking registry: {e}")
     
     logger.info(f"[ADAPTER_REGISTRY] ensure_research_adapters_registered() called")
     logger.info(f"[ADAPTER_REGISTRY] Already registered: {_adapters_registered}")
-    global _adapters_registered
     
     if _adapters_registered:
         logger.debug("Research adapters already registered, skipping")
@@ -73,3 +86,4 @@ def ensure_research_adapters_registered() -> bool:
     except Exception as e:
         logger.error(f"Failed to register research adapters: {e}", exc_info=True)
         return False
+

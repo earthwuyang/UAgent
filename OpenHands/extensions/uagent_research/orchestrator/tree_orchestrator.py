@@ -213,6 +213,16 @@ class TreeSearchOrchestrator:
 
             
             logger.info(f"[ORCHESTRATOR] Starting PUCT loop for {research_id}")
+            
+            # Verify API imports are working
+            try:
+                from ..api.research_routes import update_tree_state
+                from ..api.websocket_routes import broadcast_tree_update
+                logger.info("[ORCHESTRATOR] ✅ API imports verified successfully")
+            except ImportError as e:
+                logger.error(f"[ORCHESTRATOR] ❌ API imports FAILED: {e}", exc_info=True)
+                logger.error("[ORCHESTRATOR] Tree updates will NOT be published to UI!")
+
             from ..adapters.base.agent_adapter import adapter_registry
             if hasattr(adapter_registry, '_adapters'):
                 registered = list(adapter_registry._adapters.keys())
@@ -448,6 +458,53 @@ class TreeSearchOrchestrator:
         }
 
         return max_children_map.get(node_type, 0)
+
+
+    def _generate_placeholder_children(self, node: ResearchNode, goal: str) -> List[ResearchNode]:
+        """Generate placeholder children when LLM unavailable."""
+        children = []
+        
+        if node.type == NodeType.ROOT:
+            # Generate 3 research ideas
+            logger.info(f"Generating 3 placeholder research ideas for root node")
+            for i in range(1, 4):
+                child_id = f"{node.id}_idea_{i}"
+                children.append(ResearchNode(
+                    id=child_id,
+                    type=NodeType.IDEA,
+                    title=f"Research Idea {i}: {goal[:50]}",
+                    content=f"Explore approach {i} for: {goal}",
+                    status=NodeStatus.PENDING,
+                    parent_id=node.id
+                ))
+        elif node.type == NodeType.IDEA:
+            # Generate 2 hypotheses
+            logger.info(f"Generating 2 placeholder hypotheses for idea node {node.id}")
+            for i in range(1, 3):
+                child_id = f"{node.id}_hyp_{i}"
+                children.append(ResearchNode(
+                    id=child_id,
+                    type=NodeType.HYPOTHESIS,
+                    title=f"Hypothesis {i} for {node.title}",
+                    content=f"Test hypothesis {i}",
+                    status=NodeStatus.PENDING,
+                    parent_id=node.id
+                ))
+        elif node.type == NodeType.HYPOTHESIS:
+            # Generate 1 experiment
+            logger.info(f"Generating 1 placeholder experiment for hypothesis node {node.id}")
+            child_id = f"{node.id}_exp_1"
+            children.append(ResearchNode(
+                id=child_id,
+                type=NodeType.EXPERIMENT,
+                title=f"Experiment for {node.title}",
+                content=f"Run experiment to validate hypothesis",
+                status=NodeStatus.PENDING,
+                parent_id=node.id
+            ))
+        
+        logger.info(f"Generated {len(children)} placeholder children for {node.id}")
+        return children
 
     async def _expand_node(
         self, node: ResearchNode, goal: str, context: Optional[str]
@@ -840,6 +897,7 @@ class TreeSearchOrchestrator:
             # Fix: Use relative import instead of absolute
             from ..api.research_routes import update_tree_state
             from ..api.websocket_routes import broadcast_tree_update
+            logger.info(f"[PUBLISH] Successfully imported API functions")
             
             # Create tree snapshot
             tree_data = self.tree.to_dict() if hasattr(self.tree, 'to_dict') else {}
@@ -862,19 +920,31 @@ class TreeSearchOrchestrator:
             update_tree_state(experiment_id, tree_snapshot)
             logger.info(f"✅ Tree state updated for {experiment_id}")
             
-            # Broadcast to WebSocket clients
+            # Broadcast to WebSocket clients with fallback for no running loop
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
+                # Try to get the running loop
+                try:
+                    loop = asyncio.get_running_loop()
+                    # We have a running loop, schedule the broadcast
                     asyncio.create_task(broadcast_tree_update(
                         experiment_id,
                         {"type": "tree_snapshot", **tree_snapshot}
                     ))
                     logger.info(f"✅ Tree broadcast scheduled for {experiment_id}")
-                else:
-                    logger.debug("Event loop not running, skipping WebSocket broadcast")
-            except RuntimeError as e:
-                logger.warning(f"Could not broadcast tree update: {e}")
+                except RuntimeError:
+                    # No running loop - use anyio fallback from thread
+                    logger.info(f"📡 No running loop, using anyio fallback for broadcast")
+                    try:
+                        import anyio
+                        anyio.from_thread.run(
+                            broadcast_tree_update,
+                            experiment_id,
+                            {"type": "tree_snapshot", **tree_snapshot}
+                        )
+                        logger.info(f"✅ Tree broadcast sent via anyio fallback for {experiment_id}")
+                    except Exception as anyio_err:
+                        logger.warning(f"⚠️ Anyio fallback also failed: {anyio_err}")
+                        logger.debug("Skipping WebSocket broadcast (no event loop available)")
             except Exception as e:
                 logger.warning(f"Could not broadcast tree update: {e}")
             

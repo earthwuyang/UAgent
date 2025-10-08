@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, Tuple
 
 from ..classifier.task_classifier import task_classifier, TaskType
 from ..orchestrator.tree_orchestrator import TreeSearchOrchestrator
-from ..uagent_research.models.research_tree import Budget
+from ..models.research_tree import Budget
 
 try:
     from ..config import (
@@ -627,7 +627,6 @@ class ResearchMiddleware:
         """
         
         logger.info(f"[MIDDLEWARE] start_research called: session_id={session_id}, goal={goal[:100] if goal else 'N/A'}")
-        logger.info(f"[MIDDLEWARE] Config: max_iterations={max_iterations}, max_cost={max_cost}, max_parallel={max_parallel}")
         import time
         import uuid
 
@@ -647,6 +646,7 @@ class ResearchMiddleware:
         max_cost = config.get('max_cost', 10.0)
         max_parallel = config.get('max_parallel', 3)
 
+        logger.info(f"[MIDDLEWARE] Config: max_iterations={max_iterations}, max_cost={max_cost}, max_parallel={max_parallel}")
         budget = Budget(
             max_iterations=max_iterations,
             max_cost=max_cost,
@@ -747,8 +747,11 @@ class ResearchMiddleware:
         self,
         experiment_id: str,
     ):
+        """Run research in background.
+
+        Args:
+            experiment_id: Experiment ID
         """
-        
         # DIAGNOSTIC: Log background task start
         import asyncio
         import threading
@@ -756,13 +759,7 @@ class ResearchMiddleware:
         logger.info(f"[DIAGNOSTIC]   Experiment ID: {experiment_id}")
         logger.info(f"[DIAGNOSTIC]   Thread: {threading.current_thread().name}")
         logger.info(f"[DIAGNOSTIC]   Event loop: {id(asyncio.get_event_loop())}")
-        Run research in background.
 
-        Args:
-            experiment_id: Experiment ID
-        """
-        
-        import threading
         logger.info(f"[MIDDLEWARE] _run_research started for {experiment_id}")
         logger.info(f"[MIDDLEWARE] Thread: {threading.current_thread().name}, Event loop: {id(asyncio.get_event_loop())}")
 

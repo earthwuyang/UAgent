@@ -347,14 +347,29 @@ async def start_experiment(
 
 
 @router.get("/experiments/{experiment_id}/tree")
-async def get_experiment_tree_snapshot(experiment_id: str) -> dict:
+async def get_experiment_tree_snapshot(experiment_id: str, session: AsyncSession = Depends(get_session)) -> dict:
     """Return the latest research tree snapshot for the given experiment.
 
     The orchestrator publishes snapshots via update_tree_state(). If no snapshot
-    is available yet, return an empty tree with version 0.
+    is available yet, try to build from database.
     """
     snap = _active_tree_snapshots.get(experiment_id)
     if not snap:
+        # Try to build from database
+        logger.info(f"No snapshot in memory for {experiment_id}, building from database")
+        tree_data = await build_tree_from_database(session, experiment_id)
+        if tree_data:
+            snap = {
+                'version': 1,
+                'timestamp': datetime.utcnow().isoformat(),
+                'experiment_id': experiment_id,
+                'data': tree_data
+            }
+            # Cache it for future requests
+            _active_tree_snapshots[experiment_id] = snap
+            return snap
+        
+        # Return empty tree if no data
         return {
             'version': 0,
             'timestamp': datetime.utcnow().isoformat(),
@@ -674,7 +689,155 @@ class TreeSnapshotResponse(BaseModel):
     data: dict
 
 
-@router.get("/experiments/{experiment_id}/tree", response_model=TreeSnapshotResponse)
+
+
+async def build_tree_from_database(session: AsyncSession, experiment_id: str) -> dict:
+    """Build tree structure from database data."""
+    logger.info(f"build_tree_from_database called for experiment_id: {experiment_id}")
+    try:
+        # First get the experiment to find its session_id
+        exp_result = await session.execute(
+            sql_select(Experiment).where(Experiment.id == experiment_id)
+        )
+        experiment = exp_result.scalar_one_or_none()
+        
+        if not experiment:
+            logger.warning(f"No experiment found with id: {experiment_id}")
+            return None
+            
+        session_id = experiment.session_id
+        logger.info(f"Found experiment with session_id: {session_id}")
+        
+        # Get ideas for this session
+        ideas_result = await session.execute(
+            sql_select(Idea).where(
+                Idea.session_id == session_id
+            ).order_by(Idea.created_at)
+        )
+        ideas = ideas_result.scalars().all()
+        
+        # Get hypotheses
+        hyp_result = await session.execute(
+            sql_select(Hypothesis).where(
+                Hypothesis.session_id == session_id
+            ).order_by(Hypothesis.created_at)
+        )
+        hypotheses = hyp_result.scalars().all()
+        
+        if not ideas and not hypotheses:
+            logger.info(f"No ideas or hypotheses found for experiment_id: {experiment_id}")
+            return None
+        
+        logger.info(f"Found {len(ideas)} ideas and {len(hypotheses)} hypotheses")
+            
+        nodes = []
+        edges = []
+        
+        # Add root node
+        root_id = f"root_{experiment_id[:8]}"
+        nodes.append({
+            "id": root_id,
+            "type": "root",
+            "position": {"x": 400, "y": 50},
+            "data": {
+                "id": root_id,
+                "type": "root",
+                "title": "Research Tree",
+                "description": "Research exploration tree",
+                "status": "active",
+                "visit_count": 1,
+                "avg_value": 0.0,
+                "prior": 1.0,
+                "puct_score": 0.0
+            }
+        })
+        
+        # Add idea nodes
+        y_offset = 200
+        x_start = 100
+        x_spacing = 250
+        
+        for i, idea in enumerate(ideas):
+            node_id = f"idea_{idea.id[:8]}"
+            nodes.append({
+                "id": node_id,
+                "type": "idea",
+                "position": {"x": x_start + (i * x_spacing), "y": y_offset},
+                "data": {
+                    "id": node_id,
+                    "type": "idea",
+                    "title": idea.title,
+                    "description": idea.description,
+                    "status": idea.status or "active",
+                    "visit_count": 1,
+                    "avg_value": (idea.novelty_score or 0.5) * 0.3 + (idea.feasibility_score or 0.5) * 0.3 + (idea.impact_score or 0.5) * 0.4,
+                    "prior": (idea.novelty_score or 0.5) * (idea.impact_score or 0.5),
+                    "puct_score": 0.0,
+                    "metadata": {
+                        "novelty_score": idea.novelty_score,
+                        "feasibility_score": idea.feasibility_score,
+                        "impact_score": idea.impact_score
+                    }
+                }
+            })
+            
+            # Add edge from root to idea
+            edges.append({
+                "id": f"edge_root_{node_id}",
+                "source": root_id,
+                "target": node_id,
+                "type": "smoothstep"
+            })
+            
+            # Add hypotheses for this idea
+            idea_hyps = [h for h in hypotheses if h.idea_id == idea.id]
+            for j, hyp in enumerate(idea_hyps):
+                hyp_node_id = f"hyp_{hyp.id[:8]}"
+                nodes.append({
+                    "id": hyp_node_id,
+                    "type": "hypothesis",
+                    "position": {"x": x_start + (i * x_spacing), "y": y_offset + 150 + (j * 100)},
+                    "data": {
+                        "id": hyp_node_id,
+                        "type": "hypothesis",
+                        "title": hyp.statement[:50] + "..." if len(hyp.statement) > 50 else hyp.statement,
+                        "description": hyp.expected_outcome or "",
+                        "status": "testing" if not hyp.tested else "completed",
+                        "visit_count": 1,
+                        "avg_value": (hyp.confidence or 0.5) * (hyp.testability_score or 0.5),
+                        "prior": hyp.testability_score or 0.5,
+                        "puct_score": 0.0,
+                        "metadata": {
+                            "confidence": hyp.confidence,
+                            "testability": hyp.testability_score
+                        }
+                    }
+                })
+                
+                # Add edge from idea to hypothesis
+                edges.append({
+                    "id": f"edge_{node_id}_{hyp_node_id}",
+                    "source": node_id,
+                    "target": hyp_node_id,
+                    "type": "smoothstep"
+                })
+        
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_nodes": len(nodes),
+                "ideas": len(ideas),
+                "hypotheses": len(hypotheses)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error building tree from database: {e}", exc_info=True)
+        return None
+
+
+# DUPLICATE - @router.get("/experiments/{experiment_id}/tree", response_model=TreeSnapshotResponse)
 async def get_experiment_tree(
     experiment_id: str,
     session: AsyncSession = Depends(get_session)
@@ -693,6 +856,7 @@ async def get_experiment_tree(
 
         # Even if experiment doesn't exist yet, return empty tree for graceful handling
         # This prevents 404 errors when accessing research tree before experiment starts
+        logger.info(f"Checking experiment {experiment_id}: found={experiment is not None}")
         if not experiment:
             return TreeSnapshotResponse(
                 version=0,
@@ -712,7 +876,18 @@ async def get_experiment_tree(
         if not orchestrator:
             orchestrator = _active_orchestrators.get(experiment_id)
 
+        logger.info(f"Orchestrator check: orchestrator={orchestrator is not None}, has_tree={hasattr(orchestrator, 'tree') if orchestrator else False}")
         if not orchestrator or not hasattr(orchestrator, 'tree') or not orchestrator.tree:
+            # Try to build tree from database
+            tree_data = await build_tree_from_database(session, experiment_id)
+            if tree_data:
+                return TreeSnapshotResponse(
+                    version=1,
+                    timestamp=datetime.utcnow().isoformat(),
+                    experiment_id=experiment_id,
+                    data=tree_data
+                )
+            
             # Return empty tree
             return TreeSnapshotResponse(
                 version=0,
@@ -949,14 +1124,25 @@ async def control_experiment(
     # Type-based validation (Pydantic validators already enforce action-specific constraints)
     # No manual validation needed - discriminated union handles it automatically
     
-    # Check experiment exists
+    # Check experiment exists - try by ID first, then by session_id
     result = await session.execute(
         sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
+    
+    # If not found by ID, try by session_id (for when frontend passes conversation ID)
+    if not experiment:
+        result = await session.execute(
+            sql_select(Experiment).where(Experiment.session_id == experiment_id)
+            .order_by(Experiment.created_at.desc())
+        )
+        experiment = result.scalar_one_or_none()
 
     if not experiment:
         raise HTTPException(404, f"Experiment {experiment_id} not found")
+    
+    # Use the actual experiment ID for lookups
+    actual_experiment_id = experiment.id
 
     # Try to use session manager first (if available)
     session_mgr = get_session_manager()
@@ -1077,14 +1263,25 @@ async def get_experiment_status(
             "last_update": "2025-01-06T10:30:05"
         }
     """
-    # Check experiment exists
+    # Check experiment exists - try by ID first, then by session_id
     result = await session.execute(
         sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
+    
+    # If not found by ID, try by session_id (for when frontend passes conversation ID)
+    if not experiment:
+        result = await session.execute(
+            sql_select(Experiment).where(Experiment.session_id == experiment_id)
+            .order_by(Experiment.created_at.desc())
+        )
+        experiment = result.scalar_one_or_none()
 
     if not experiment:
         raise HTTPException(404, f"Experiment {experiment_id} not found")
+    
+    # Use the actual experiment ID for lookups
+    actual_experiment_id = experiment.id
 
     # Try to get status from session manager
     session_mgr = get_session_manager()
@@ -1101,7 +1298,7 @@ async def get_experiment_status(
 
     # Fallback: return basic status from database
     return {
-        "experiment_id": experiment_id,
+        "experiment_id": actual_experiment_id,
         "status": experiment.status.value if experiment.status else "unknown",
         "stats": {
             "total_nodes": 0,
@@ -1177,14 +1374,25 @@ async def get_experiment_events(
             "has_gap": false
         }
     """
-    # Check experiment exists
+    # Check experiment exists - try by ID first, then by session_id
     result = await session.execute(
         sql_select(Experiment).where(Experiment.id == experiment_id)
     )
     experiment = result.scalar_one_or_none()
+    
+    # If not found by ID, try by session_id (for when frontend passes conversation ID)
+    if not experiment:
+        result = await session.execute(
+            sql_select(Experiment).where(Experiment.session_id == experiment_id)
+            .order_by(Experiment.created_at.desc())
+        )
+        experiment = result.scalar_one_or_none()
 
     if not experiment:
         raise HTTPException(404, f"Experiment {experiment_id} not found")
+    
+    # Use the actual experiment ID for lookups
+    actual_experiment_id = experiment.id
 
     # Get event bus
     try:

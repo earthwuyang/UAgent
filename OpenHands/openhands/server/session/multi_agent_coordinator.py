@@ -211,13 +211,13 @@ class MultiAgentCoordinator:
                 research_type='scientific',
                 config=config
             )
-        logger.info(f"[COORDINATOR] Middleware returned experiment_id: {experiment_id}")
+            logger.info(f"[COORDINATOR] Middleware returned experiment_id: {experiment_id}")
             
             # Track the experiment in coordinator
             if self.track_existing_experiment(experiment_id):
-            logger.info(f"[COORDINATOR] Experiment {experiment_id} tracked successfully")
-        else:
-            logger.error(f"[COORDINATOR] Failed to track experiment {experiment_id}")
+                logger.info(f"[COORDINATOR] Experiment {experiment_id} tracked successfully")
+            else:
+                logger.error(f"[COORDINATOR] Failed to track experiment {experiment_id}")
         
         if
                 self.logger.info(f"Research experiment {experiment_id} spawned and tracked")

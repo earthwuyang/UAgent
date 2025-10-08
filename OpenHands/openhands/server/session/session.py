@@ -223,16 +223,40 @@ class WebSession:
         Args:
             experiment_id: The experiment/sub-agent ID to register
         """
+        self.logger.info(f"🔬 Registering experiment {experiment_id} for session {self.sid}")
+        
         if self.active_research_experiments is None:
             self.active_research_experiments = set()
+            self.logger.debug("📝 Initialized active_research_experiments set")
+        
+        # Check if already registered
+        if experiment_id in self.active_research_experiments:
+            self.logger.warning(f"⚠️ Experiment {experiment_id} already registered")
+            return
         
         self.active_research_experiments.add(experiment_id)
         
         # Set active_research_experiment_id if not set (backward compatibility)
         if not self.active_research_experiment_id:
             self.active_research_experiment_id = experiment_id
+            self.logger.debug(f"📌 Set primary experiment ID to {experiment_id}")
         
-        self.logger.info(f"Registered experiment {experiment_id}. Active experiments: {len(self.active_research_experiments)}")
+        self.logger.info(
+            f"✅ Registered experiment {experiment_id}. "
+            f"Active experiments: {len(self.active_research_experiments)}, "
+            f"IDs: {list(self.active_research_experiments)}"
+        )
+        
+    def get_research_diagnostics(self) -> dict:
+        """Get diagnostic information about research experiments in this session."""
+        return {
+            "session_id": self.sid,
+            "active_research_experiment_id": self.active_research_experiment_id,
+            "active_research_experiments": list(self.active_research_experiments) if self.active_research_experiments else [],
+            "total_active": len(self.active_research_experiments) if self.active_research_experiments else 0,
+            "has_coordinator": self.research_coordinator is not None,
+            "progress_reporter_active": self._progress_reporter_task is not None and not self._progress_reporter_task.done(),
+        }
 
     async def close(self) -> None:
         """Close the session."""
@@ -502,7 +526,7 @@ class WebSession:
 
                 if result.get('should_trigger_research'):
                     self.logger.info(
-                        "Research mode triggered",
+                        "🔬 Research mode triggered",
                         extra={
                             'session_id': self.sid,
                             'task_type': result.get('task_type'),
@@ -512,27 +536,35 @@ class WebSession:
                     )
 
                     experiment_id = result.get('experiment_id', 'N/A')
+                    self.logger.debug(f"📋 Experiment ID: {experiment_id}")
+                    
                     self.active_research_experiment_id = experiment_id
                     self._last_progress_broadcast = 0.0
 
                     # Register with coordinator for proper tracking
                     coordinator = self.get_or_create_coordinator()
                     try:
+                        self.logger.debug(f"🔍 Attempting to track experiment {experiment_id} in coordinator")
                         # Track the existing experiment in coordinator
                         if coordinator.track_existing_experiment(experiment_id):
-                            self.logger.info(f"Research experiment {experiment_id} tracked by coordinator")
+                            self.logger.info(f"✅ Research experiment {experiment_id} tracked by coordinator")
                         else:
-                            self.logger.warning(f"Failed to track experiment {experiment_id} in coordinator")
+                            self.logger.warning(f"⚠️ Failed to track experiment {experiment_id} in coordinator")
                         
                         # Register in session state
+                        self.logger.debug(f"📝 Registering experiment {experiment_id} in session")
                         self.register_experiment(experiment_id)
+                        self.logger.debug(f"✅ Experiment {experiment_id} registered in session")
                     except Exception as e:
-                        self.logger.error(f"Failed to register research with coordinator: {e}", exc_info=True)
+                        self.logger.error(f"❌ Failed to register research with coordinator: {e}", exc_info=True)
 
                     if self._progress_reporter_task is None or self._progress_reporter_task.done():
+                        self.logger.info(f"📊 Starting progress reporter for {experiment_id}")
                         self._progress_reporter_task = asyncio.create_task(
                             self._report_research_progress()
                         )
+                    else:
+                        self.logger.debug("📊 Progress reporter already active")
 
                     research_info = (
                         "\n\n[System: Research mode activated - "

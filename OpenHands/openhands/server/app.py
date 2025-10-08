@@ -36,17 +36,27 @@ from openhands.server.types import AppMode
 
 # UAgent Research Extension - Import directly from source
 try:
+    import os
     import sys
     from pathlib import Path
 
     # Add extension to Python path
     extension_dir = Path(__file__).parent.parent.parent / 'extensions' / 'uagent_research'
     if extension_dir.exists():
-        sys.path.insert(0, str(extension_dir))
+        # Use append to avoid shadowing installed packages
+        # Guard with idempotency check
+        extension_dir_str = str(extension_dir)
+        if extension_dir_str not in sys.path:
+            # Honor environment flag for loading from source
+            use_source = os.getenv('USE_UAGENT_RESEARCH_FROM_SOURCE', 'true').lower() == 'true'
+            if use_source:
+                sys.path.append(extension_dir_str)
+                print(f"📦 UAgent Research: Loading from source at {extension_dir}")
+            else:
+                print(f"📦 UAgent Research: Using installed package (USE_UAGENT_RESEARCH_FROM_SOURCE=false)")
 
         # Import from source (not installed package)
-        from uagent_research.api import router as research_router
-        from uagent_research.api import ws_router as research_ws_router
+        from uagent_research.api import router as research_router, ws_router as research_ws_router
         from uagent_research.models.base import init_database, close_database
 
         RESEARCH_EXTENSION_AVAILABLE = True
@@ -142,14 +152,38 @@ app.include_router(trajectory_router)
 # Include UAgent Research Extension routes if available
 if RESEARCH_EXTENSION_AVAILABLE and research_router is not None:
     app.include_router(research_router)
-    print("✅ UAgent Research Extension routes registered")
-    print(f"Research router prefix: {research_router.prefix}")
-    print(f"Research router routes: {[route.path for route in research_router.routes]}")
-
     if research_ws_router is not None:
         app.include_router(research_ws_router)
-        print("✅ UAgent Research Extension WebSocket routes registered")
-        print(f"Research WS router prefix: {getattr(research_ws_router, 'prefix', 'N/A')}")
-        print(f"Research WS router routes: {[route.path for route in research_ws_router.routes]}")
+    print("✅ UAgent Research Extension routes registered")
+    
+    # Add research extension health endpoint
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    @app.get("/api/research/health")
+    async def research_health_check():
+        """Health check endpoint for research extension."""
+        from datetime import datetime
+        return {
+            "status": "healthy",
+            "extension": "uagent_research",
+            "version": "0.1.0",
+            "timestamp": datetime.utcnow().isoformat(),
+            "routes_registered": True,
+            "api_prefix": research_router.prefix if research_router else None,
+            "ws_prefix": getattr(research_ws_router, 'prefix', None) if research_ws_router else None
+        }
+    
+    # Log registered routes at startup
+    logger.info("=" * 80)
+    logger.info("RESEARCH EXTENSION STARTUP DIAGNOSTICS")
+    logger.info(f"Extension available: {RESEARCH_EXTENSION_AVAILABLE}")
+    if research_router:
+        logger.info(f"REST API prefix: {research_router.prefix}")
+        logger.info(f"REST API routes: {[route.path for route in research_router.routes]}")
+    if research_ws_router:
+        logger.info(f"WebSocket prefix: {getattr(research_ws_router, 'prefix', 'N/A')}")
+        logger.info(f"WebSocket routes: {[route.path for route in research_ws_router.routes]}")
+    logger.info("=" * 80)
 
 add_health_endpoints(app)
