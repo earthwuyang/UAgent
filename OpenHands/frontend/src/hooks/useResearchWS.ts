@@ -14,6 +14,18 @@ interface UseResearchWSOptions {
   onClose?: (event: CloseEvent) => void;
 }
 
+const sharedConnection: {
+  socket: WebSocket | null;
+  reconnectTimeout: ReturnType<typeof setTimeout> | null;
+  experimentId: string | null;
+} = {
+  socket: null,
+  reconnectTimeout: null,
+  experimentId: null,
+};
+
+const reconnectDelayMs = 3000;
+
 export function useResearchWS({
   experimentId,
   autoConnect = true,
@@ -21,160 +33,199 @@ export function useResearchWS({
   onClose,
 }: UseResearchWSOptions) {
   const ws = useRef<WebSocket | null>(null);
-  const reconnectTimeout = useRef<NodeJS.Timeout | null>(null);
-  const store = useResearchTreeStore();
+  const connectRef = useRef<(options?: { skipAcquire?: boolean }) => void>();
+  const isConnected = useResearchTreeStore((state) => state.isConnected);
 
-  const connect = useCallback(() => {
-    if (!experimentId) {
-      console.warn('[Research WS] No experimentId provided, skipping connection');
-      return;
+  const cleanupReconnect = useCallback(() => {
+    if (sharedConnection.reconnectTimeout) {
+      clearTimeout(sharedConnection.reconnectTimeout);
+      sharedConnection.reconnectTimeout = null;
     }
+  }, []);
 
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      return; // Already connected
-    }
+const scheduleReconnect = useCallback(() => {
+  cleanupReconnect();
 
-    // Clear any pending reconnect
-    if (reconnectTimeout.current) {
-      clearTimeout(reconnectTimeout.current);
-      reconnectTimeout.current = null;
-    }
+  const { activeConnectionRefs } = useResearchTreeStore.getState();
+  if (activeConnectionRefs === 0) {
+    return;
+  }
 
-    // Determine WebSocket URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/research/ws/experiment/${experimentId}`;
-
-    console.log(`[Research WS] Connecting to ${wsUrl}`);
-
-    try {
-      ws.current = new WebSocket(wsUrl);
-    } catch (error) {
-      console.error('[Research WS] Failed to create WebSocket connection:', error);
-      if (onError) {
-        onError(error as Event);
+  sharedConnection.reconnectTimeout = setTimeout(() => {
+    sharedConnection.reconnectTimeout = null;
+    // Only attempt reconnect if there are still listeners for this experiment
+    const state = useResearchTreeStore.getState();
+    if (state.activeConnectionRefs > 0 && state.activeConnectionId === experimentId) {
+      state.setConnected(false);
+      const reconnectFn = connectRef.current;
+      if (reconnectFn) {
+        reconnectFn({ skipAcquire: true });
       }
-      return;
     }
+  }, reconnectDelayMs);
+}, [cleanupReconnect, experimentId]);
 
-    ws.current.onopen = () => {
-      console.log('[Research WS] Connected');
-      store.setConnected(true);
-    };
-
-    ws.current.onclose = (event) => {
+  const handleClose = useCallback(
+    (event: CloseEvent) => {
       console.log('[Research WS] Closed:', event.code, event.reason);
+      const store = useResearchTreeStore.getState();
       store.setConnected(false);
+
+      sharedConnection.socket = null;
 
       if (onClose) {
         onClose(event);
       }
 
-      // Attempt reconnect if not a normal closure
-      if (event.code !== 1000 && event.code !== 1001) {
-        console.log('[Research WS] Reconnecting in 3s...');
-        reconnectTimeout.current = setTimeout(() => {
-          connect();
-        }, 3000);
+      const shouldRetry = event.code !== 1000 && event.code !== 1001;
+      if (shouldRetry) {
+        scheduleReconnect();
       }
-    };
+    },
+    [onClose, scheduleReconnect]
+  );
 
-    ws.current.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
+  const connect = useCallback(
+    (options?: { skipAcquire?: boolean }) => {
+      if (!experimentId) {
+        console.warn('[Research WS] No experimentId provided, skipping connection');
+        return;
+      }
 
-        console.log('[Research WS] Message:', message.type, message.version);
+      const store = useResearchTreeStore.getState();
 
-        // Route message to store based on type
-        switch (message.type) {
-          case 'tree_snapshot':
-            store.setSnapshot(message);
-            break;
+      let shouldOpen = options?.skipAcquire ? true : store.acquireConnection(experimentId);
+      const existingSocket = sharedConnection.socket;
 
-          case 'node_added':
-            store.applyNodeAdded(message);
-            break;
-
-          case 'node_updated':
-            store.applyNodeUpdated(message);
-            break;
-
-          case 'edge_added':
-            store.applyEdgeAdded(message);
-            break;
-
-          case 'stats_updated':
-            store.applyStatsUpdated(message);
-            break;
-
-          case 'event_log':
-            store.applyEventLog(message);
-            break;
-
-          case 'error':
-            console.error('[Research WS] Error message:', message.data.error);
-            break;
-
-          case 'complete':
-            console.log('[Research WS] Complete:', message.data.summary);
-            break;
-
-          default:
-            console.warn('[Research WS] Unknown message type:', message.type);
+      if (!shouldOpen) {
+        if (!existingSocket || existingSocket.readyState === WebSocket.CLOSED) {
+          shouldOpen = true;
+        } else if (sharedConnection.experimentId === experimentId) {
+          ws.current = existingSocket;
+          if (existingSocket.readyState === WebSocket.OPEN) {
+            store.setConnected(true);
+          }
+          return;
         }
-      } catch (err) {
-        console.error('[Research WS] Failed to parse message:', err);
-      }
-    };
-
-    ws.current.onerror = (error) => {
-      console.error('[Research WS] Error:', error);
-      store.setConnected(false);
-      if (onError) {
-        onError(error);
-      }
-    };
-
-    ws.current.onclose = (event) => {
-      console.log('[Research WS] Closed:', event.code, event.reason);
-      store.setConnected(false);
-
-      if (onClose) {
-        onClose(event);
       }
 
-      // Attempt reconnect if not a normal closure
-      if (event.code !== 1000 && event.code !== 1001) {
-        console.log('[Research WS] Reconnecting in 3s...');
-        reconnectTimeout.current = setTimeout(() => {
-          connect();
-        }, 3000);
+      cleanupReconnect();
+
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/api/research/ws/experiment/${experimentId}`;
+
+      console.log(`[Research WS] Connecting to ${wsUrl}`);
+
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch (error) {
+        console.error('[Research WS] Failed to create WebSocket connection:', error);
+        if (!options?.skipAcquire) {
+          store.releaseConnection(experimentId);
+        }
+        if (onError) {
+          onError(error as Event);
+        }
+        return;
       }
-    };
-  }, [experimentId, store, onError, onClose]);
+
+      sharedConnection.socket = socket;
+      sharedConnection.experimentId = experimentId;
+      ws.current = socket;
+
+      socket.onopen = () => {
+        console.log('[Research WS] Connected');
+        const latestStore = useResearchTreeStore.getState();
+        latestStore.setConnected(true);
+        latestStore.setLoading(false);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          const latestStore = useResearchTreeStore.getState();
+
+          switch (message.type) {
+            case 'tree_snapshot':
+              latestStore.setSnapshot(message);
+              break;
+            case 'node_added':
+              latestStore.applyNodeAdded(message);
+              break;
+            case 'node_updated':
+              latestStore.applyNodeUpdated(message);
+              break;
+            case 'edge_added':
+              latestStore.applyEdgeAdded(message);
+              break;
+            case 'stats_updated':
+              latestStore.applyStatsUpdated(message);
+              break;
+            case 'event_log':
+              latestStore.applyEventLog(message);
+              break;
+            case 'error':
+              console.error('[Research WS] Error message:', message.data?.error);
+              latestStore.setError(message.data?.error ?? 'Unknown websocket error');
+              break;
+            case 'complete':
+              console.log('[Research WS] Complete:', message.data?.summary);
+              break;
+            default:
+              console.warn('[Research WS] Unknown message type:', message.type);
+          }
+        } catch (err) {
+          console.error('[Research WS] Failed to parse message:', err);
+        }
+      };
+
+      socket.onerror = (error) => {
+        console.error('[Research WS] Error:', error);
+        useResearchTreeStore.getState().setConnected(false);
+        if (onError) {
+          onError(error);
+        }
+      };
+
+      socket.onclose = handleClose;
+    },
+    [cleanupReconnect, experimentId, handleClose, onError]
+  );
 
   const disconnect = useCallback(() => {
-    if (reconnectTimeout.current) {
-      clearTimeout(reconnectTimeout.current);
-      reconnectTimeout.current = null;
+    if (!experimentId) {
+      return;
     }
 
-    if (ws.current) {
-      ws.current.close(1000, 'User disconnected');
-      ws.current = null;
+    cleanupReconnect();
+
+    const store = useResearchTreeStore.getState();
+    const shouldClose = store.releaseConnection(experimentId);
+
+    if (shouldClose && sharedConnection.socket) {
+      sharedConnection.socket.close(1000, 'User disconnected');
+      sharedConnection.socket = null;
+      sharedConnection.experimentId = null;
     }
 
+    ws.current = null;
     store.setConnected(false);
-  }, [store]);
+  }, [cleanupReconnect, experimentId]);
 
-  const send = useCallback((data: any) => {
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify(data));
+  const send = useCallback((data: unknown) => {
+    const socket = sharedConnection.socket ?? ws.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(data));
     } else {
       console.warn('[Research WS] Cannot send, not connected');
     }
   }, []);
 
-  // Auto-connect on mount
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
   useEffect(() => {
     if (autoConnect) {
       connect();
@@ -183,10 +234,10 @@ export function useResearchWS({
     return () => {
       disconnect();
     };
-  }, [experimentId, autoConnect]); // Only reconnect if experimentId changes
+  }, [connect, disconnect, autoConnect, experimentId]);
 
   return {
-    isConnected: store.isConnected,
+    isConnected,
     connect,
     disconnect,
     send,

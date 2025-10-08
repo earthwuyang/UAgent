@@ -316,8 +316,12 @@ class ResearchSessionManager:
         logger.info("Starting EventBus subscription for status updates")
 
         try:
-            # Subscribe to all events
-            async for event in self.event_bus.subscribe():
+            # Subscribe to all events using a stable subscriber id
+            async for event in self.event_bus.subscribe(
+                subscriber_id="research-session-manager",
+                event_types=None,
+                branch_ids=None,
+            ):
                 await self._handle_event(event)
         except asyncio.CancelledError:
             logger.info("EventBus subscription cancelled")
@@ -364,6 +368,37 @@ class ResearchSessionManager:
             # Update current step from event
             if event_type == 'StepEvent' and hasattr(event, 'action'):
                 adapter.current_step = event.action
+
+        # Update active branches tracking
+        if hasattr(event, 'branch_id') and event.branch_id:
+            branch_id = event.branch_id
+            branch = next((b for b in state.active_branches if b.branch_id == branch_id), None)
+
+            if not branch:
+                branch = BranchStatus(
+                    branch_id=branch_id,
+                    title=getattr(event, 'title', branch_id),
+                    adapter=getattr(event, 'adapter_name', ''),
+                    status='running',
+                )
+                state.active_branches.append(branch)
+
+            branch.adapter = getattr(event, 'adapter_name', branch.adapter)
+            branch.status = 'running'
+            branch.progress = getattr(event, 'action', branch.progress)
+            if hasattr(event, 'cost') and event.cost:
+                branch.cost += event.cost
+
+            if event_type == 'CompleteEvent':
+                branch.status = 'complete'
+                branch.progress = getattr(event, 'summary', branch.progress)
+            elif event_type == 'ErrorEvent':
+                branch.status = 'failed'
+                branch.progress = getattr(event, 'message', branch.progress)
+
+            # Remove completed/failed branches from active list
+            if branch.status in {'complete', 'failed'}:
+                state.active_branches = [b for b in state.active_branches if b.status == 'running']
 
         # Update node statistics
         if hasattr(event, 'node_id'):

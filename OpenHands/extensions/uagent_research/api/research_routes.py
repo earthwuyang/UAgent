@@ -91,17 +91,38 @@ async def control_experiment(
     """
     logger.info(f"Control request for experiment {experiment_id}: {request.action}")
 
-    if experiment_id not in _active_trees:
-        raise HTTPException(status_code=404, detail="Experiment not found")
-
-    # TODO: Implement actual control logic
-    # For now, just acknowledge the request
-    valid_actions = {"pause", "resume", "cancel"}
+    valid_actions = {"start", "pause", "resume", "cancel"}
     if request.action not in valid_actions:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid action. Must be one of: {valid_actions}"
         )
+
+    if experiment_id not in _active_trees:
+        if request.action == "start":
+            logger.info(
+                "Initializing empty tree for experiment %s on start action",
+                experiment_id,
+            )
+            _active_trees[experiment_id] = {
+                "version": 0,
+                "timestamp": datetime.utcnow().isoformat(),
+                "experiment_id": experiment_id,
+                "data": {
+                    "nodes": [],
+                    "edges": [],
+                    "stats": {
+                        "total_nodes": 0,
+                        "total_edges": 0,
+                        "total_cost": 0.0,
+                        "total_tokens": 0,
+                        "completed_nodes": 0,
+                        "failed_nodes": 0,
+                    },
+                },
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Experiment not found")
 
     return {
         "experiment_id": experiment_id,

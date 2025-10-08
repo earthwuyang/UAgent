@@ -1,139 +1,276 @@
-import React from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ReactFlowProvider } from "reactflow";
 import { useConversationId } from "#/hooks/use-conversation-id";
-import { ResearchTreeView } from "#/components/research/ResearchTreeView";
+import { useActiveConversation } from "#/hooks/query/use-active-conversation";
+import {
+  ExperimentControls,
+  ExperimentProgress,
+  ExperimentStatus,
+  ResearchTreeView,
+} from "#/components/research";
+import { Loader } from "#/components/shared/loader";
+import {
+  getExperimentStatus,
+  ExperimentStatus as ExperimentState,
+  ResearchAPIError,
+} from "#/api/research-api";
 import { useResearchWS } from "#/hooks/useResearchWS";
 import { useResearchTreeStore } from "#/state/research-tree-store";
 
-/**
- * Research Tree Tab Component
- *
- * Displays the research tree visualization for the current conversation.
- * Uses ReactFlow for interactive graph visualization and Zustand for state management.
- * Connects via WebSocket for real-time updates as the research progresses.
- */
+const TREE_POLL_INTERVAL = 5000;
+const STATUS_POLL_INTERVAL = 5000;
+
 export default function ResearchTab() {
   const { conversationId } = useConversationId();
-  const { nodes, edges, stats } = useResearchTreeStore();
-  const [isConnected, setIsConnected] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  const { data: activeConversation } = useActiveConversation();
 
-  // For now, we'll use conversationId as experimentId
-  // In the future, you may want to fetch the actual experimentId from the conversation
-  const experimentId = conversationId;
-  console.log('[ResearchTab] conversationId:', conversationId);
+  const resolvedExperimentId =
+    activeConversation?.research_experiment_id ?? conversationId ?? null;
+  const researchGoal = activeConversation?.title ?? undefined;
 
-  // Connect to WebSocket for real-time updates (if available)
-  // const { isConnected, error } = useResearchWS({
-  //   experimentId: experimentId || "",
-  //   autoConnect: !!experimentId,
-  // });
+  const [isClient, setIsClient] = useState(false);
+  const [experimentStatus, setExperimentStatus] = useState<ExperimentState>("idle");
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [treeError, setTreeError] = useState<string | null>(null);
 
-  // Set connected status to true since we're polling
-  React.useEffect(() => {
-    if (experimentId) {
-      setIsConnected(true);
-    } else {
-      setIsConnected(false);
+  const statusPollRef = useRef<NodeJS.Timeout | null>(null);
+
+  const { nodes, edges, stats, setLoading } = useResearchTreeStore((state) => ({
+    nodes: state.nodes,
+    edges: state.edges,
+    stats: state.stats,
+    setLoading: state.setLoading,
+  }));
+
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  const experimentId = isClient ? resolvedExperimentId : null;
+
+  const clearStatusPolling = useCallback(() => {
+    if (statusPollRef.current) {
+      clearInterval(statusPollRef.current);
+      statusPollRef.current = null;
     }
-  }, [experimentId]);
+  }, []);
 
-  // Fetch initial tree snapshot when component mounts
-  React.useEffect(() => {
-    if (experimentId) {
-      fetch(`/api/research/experiments/${experimentId}/tree`)
-        .then(async (res) => {
-          if (!res.ok) {
-            // If experiment doesn't exist yet, initialize with empty tree
-            return {
-              version: 0,
-              timestamp: new Date().toISOString(),
-              experiment_id: experimentId,
-              data: {
-                nodes: [],
-                edges: [],
-                stats: {}
-              }
-            };
-          }
-          const data = await res.json();
-          // Validate response structure
-          if (!data || typeof data !== 'object') {
-            throw new Error('Invalid response format');
-          }
-          return data;
-        })
-        .then((snapshot) => {
-          // Ensure snapshot has required structure
-          const validSnapshot = {
-            version: snapshot.version || 0,
-            timestamp: snapshot.timestamp || new Date().toISOString(),
-            experiment_id: snapshot.experiment_id || experimentId,
-            data: {
-              nodes: Array.isArray(snapshot.data?.nodes) ? snapshot.data.nodes : [],
-              edges: Array.isArray(snapshot.data?.edges) ? snapshot.data.edges : [],
-              stats: snapshot.data?.stats || {}
-            }
-          };
-          useResearchTreeStore.getState().setSnapshot(validSnapshot);
-        })
-        .catch((err) => {
-          console.error("Failed to fetch research tree:", err);
-          // Initialize with empty tree on error
-          useResearchTreeStore.getState().setSnapshot({
-            version: 0,
-            timestamp: new Date().toISOString(),
-            experiment_id: experimentId,
-            data: {
-              nodes: [],
-              edges: [],
-              stats: {}
-            }
-          });
-        });
-    }
-  }, [experimentId]);
+  const fetchTreeSnapshot = useCallback(
+    async (showSpinner = false) => {
+      if (!experimentId) return;
 
-  // Poll for updates as a fallback for WebSocket
-  React.useEffect(() => {
+      const emptySnapshot = {
+        version: 0,
+        timestamp: new Date().toISOString(),
+        experiment_id: experimentId,
+        data: {
+          nodes: [],
+          edges: [],
+          stats: {
+            total_nodes: 0,
+            total_edges: 0,
+            total_cost: 0,
+            total_tokens: 0,
+            completed_nodes: 0,
+            failed_nodes: 0,
+          },
+        },
+      };
+
+      try {
+        if (showSpinner) {
+          setLoading(true);
+        }
+
+        const response = await fetch(
+          `/api/research/experiments/${experimentId}/tree`,
+        );
+
+        if (response.status === 404) {
+          useResearchTreeStore.getState().setSnapshot(emptySnapshot);
+          setTreeError(null);
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch tree: ${response.statusText}`);
+        }
+
+        const snapshot = await response.json();
+        useResearchTreeStore.getState().setSnapshot(snapshot);
+        setTreeError(null);
+      } catch (error) {
+        console.error("Failed to fetch research tree:", error);
+        setTreeError(
+          error instanceof Error
+            ? error.message
+            : "Failed to fetch research tree",
+        );
+      } finally {
+        if (showSpinner) {
+          setLoading(false);
+        }
+      }
+    },
+    [experimentId, setLoading],
+  );
+
+  const fetchStatus = useCallback(async () => {
     if (!experimentId) return;
 
-    const pollInterval = setInterval(() => {
-      fetch(`/api/research/experiments/${experimentId}/tree`)
-        .then(async (res) => {
-          if (!res.ok) return null;
-          return await res.json();
-        })
-        .then((snapshot) => {
-          if (snapshot) {
-            // Ensure snapshot has required structure
-            const validSnapshot = {
-              version: snapshot.version || 0,
-              timestamp: snapshot.timestamp || new Date().toISOString(),
-              experiment_id: snapshot.experiment_id || experimentId,
-              data: {
-                nodes: Array.isArray(snapshot.data?.nodes) ? snapshot.data.nodes : [],
-                edges: Array.isArray(snapshot.data?.edges) ? snapshot.data.edges : [],
-                stats: snapshot.data?.stats || {}
-              }
-            };
-            useResearchTreeStore.getState().setSnapshot(validSnapshot);
-          }
-        })
-        .catch((err) => {
-          console.error("Failed to poll research tree:", err);
-        });
-    }, 5000); // Poll every 5 seconds
+    try {
+      const statusResponse = await getExperimentStatus(experimentId);
+      setExperimentStatus(statusResponse.status);
+      setStatusError(null);
 
-    return () => clearInterval(pollInterval);
-  }, [experimentId]);
+      if (
+        statusResponse.status === "complete" ||
+        statusResponse.status === "failed" ||
+        statusResponse.status === "cancelled"
+      ) {
+        clearStatusPolling();
+      }
+    } catch (error) {
+      if (
+        error instanceof ResearchAPIError &&
+        (error.statusCode === 404 || error.statusCode === 410)
+      ) {
+        setExperimentStatus("idle");
+        setStatusError(null);
+        clearStatusPolling();
+      } else {
+        const message =
+          error instanceof Error ? error.message : "Failed to fetch status";
+        setStatusError(message);
+      }
+    }
+  }, [experimentId, clearStatusPolling]);
+
+  useEffect(() => {
+    if (!experimentId) {
+      setExperimentStatus("idle");
+      setStatusError(null);
+      setTreeError(null);
+      return;
+    }
+
+    useResearchTreeStore.getState().setExperimentId(experimentId);
+    fetchTreeSnapshot(true);
+    fetchStatus();
+  }, [experimentId, fetchTreeSnapshot, fetchStatus]);
+
+  useEffect(() => {
+    if (!experimentId) {
+      clearStatusPolling();
+      return;
+    }
+
+    if (experimentStatus !== "running" && experimentStatus !== "paused") {
+      clearStatusPolling();
+      return;
+    }
+
+    if (statusPollRef.current) {
+      return;
+    }
+
+    fetchStatus();
+    statusPollRef.current = setInterval(() => {
+      fetchStatus();
+    }, STATUS_POLL_INTERVAL);
+
+    return () => {
+      clearStatusPolling();
+    };
+  }, [experimentId, experimentStatus, fetchStatus, clearStatusPolling]);
+
+  useEffect(() => {
+    if (!experimentId) {
+      return;
+    }
+
+    if (experimentStatus !== "running" && experimentStatus !== "paused") {
+      return;
+    }
+
+    fetchTreeSnapshot(false);
+    const interval = setInterval(() => {
+      fetchTreeSnapshot(false);
+    }, TREE_POLL_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [experimentId, experimentStatus, fetchTreeSnapshot]);
+
+  const { isConnected } = useResearchWS({
+    experimentId: experimentId ?? "",
+    autoConnect: Boolean(experimentId && experimentStatus !== "idle"),
+  });
+
+  const handleControlAction = useCallback(
+    (action: string) => {
+      switch (action) {
+        case "start":
+        case "resume":
+          setExperimentStatus("running");
+          fetchStatus();
+          fetchTreeSnapshot(false);
+          break;
+        case "pause":
+          setExperimentStatus("paused");
+          break;
+        case "cancel":
+          setExperimentStatus("cancelled");
+          fetchStatus();
+          break;
+        default:
+          break;
+      }
+    },
+    [fetchStatus, fetchTreeSnapshot],
+  );
+
+  const headerStats = useMemo(
+    () => [
+      { label: "Nodes", value: nodes.size.toString() },
+      { label: "Edges", value: edges.length.toString() },
+      {
+        label: "Cost",
+        value:
+          stats?.total_cost !== undefined
+            ? `$${stats.total_cost.toFixed(3)}`
+            : "--",
+      },
+      {
+        label: "Tokens",
+        value:
+          stats?.total_tokens !== undefined
+            ? stats.total_tokens.toLocaleString()
+            : "--",
+      },
+    ],
+    [nodes.size, edges.length, stats?.total_cost, stats?.total_tokens],
+  );
+
+  if (!isClient) {
+    return (
+      <div className="flex h-full items-center justify-center bg-slate-950 text-slate-100">
+        <Loader size="large" />
+      </div>
+    );
+  }
 
   if (!experimentId) {
     return (
-      <div className="flex items-center justify-center h-full p-8 text-center">
-        <div className="max-w-md">
-          <h3 className="text-lg font-semibold mb-2">No Active Research</h3>
-          <p className="text-sm text-gray-500">
+      <div className="flex h-full items-center justify-center bg-slate-950 p-8 text-center text-slate-200">
+        <div className="max-w-md space-y-2">
+          <h3 className="text-lg font-semibold">No Active Research</h3>
+          <p className="text-sm text-slate-400">
             Start a research session to see the research tree visualization here.
           </p>
         </div>
@@ -142,45 +279,65 @@ export default function ResearchTab() {
   }
 
   return (
-    <div className="h-full w-full flex flex-col bg-gray-900">
-      {/* Header with connection status and stats */}
-      <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                isConnected ? "bg-green-500 animate-pulse" : "bg-yellow-500"
+    <div className="flex h-full flex-col gap-4 overflow-hidden bg-slate-950 p-4 text-slate-100">
+      <div className="grid gap-4 lg:grid-cols-[2fr,3fr]">
+        <ExperimentStatus
+          experimentId={experimentId}
+          status={experimentStatus}
+          showCost
+          showDuration
+          showTokens
+        />
+        <ExperimentControls
+          experimentId={experimentId}
+          status={experimentStatus}
+          onAction={handleControlAction}
+          goal={researchGoal}
+        />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[2fr,3fr]">
+        <ExperimentProgress experimentId={experimentId} />
+        <div className="rounded-lg border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-300">
+          <div className="flex items-center justify-between">
+            <span className="font-medium">Connection</span>
+            <span
+              className={`flex items-center gap-2 text-xs ${
+                isConnected ? "text-emerald-400" : "text-amber-400"
               }`}
-            />
-            <span className="text-sm text-gray-300">
-              {isConnected ? "Polling" : "Disconnected"}
+            >
+              <span className="h-2 w-2 rounded-full bg-current" />
+              {isConnected ? "Connected" : "Disconnected"}
             </span>
           </div>
-          <div className="text-sm text-gray-400">
-            Nodes: {nodes.size} | Edges: {edges.length}
+          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-400">
+            {headerStats.map((item) => (
+              <div key={item.label} className="flex justify-between">
+                <span>{item.label}</span>
+                <span className="text-slate-200">{item.value}</span>
+              </div>
+            ))}
           </div>
-          {stats?.total_cost !== undefined && (
-            <div className="text-sm text-gray-400">
-              Cost: ${stats.total_cost.toFixed(3)}
-            </div>
-          )}
         </div>
       </div>
 
-      {/* Tree visualization */}
-      <div className="flex-1 relative">
+      {statusError && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          {statusError}
+        </div>
+      )}
+
+      {treeError && (
+        <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+          {treeError}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
         <ReactFlowProvider>
           <ResearchTreeView />
         </ReactFlowProvider>
       </div>
-
-      {/* Error display */}
-      {error && (
-        <div className="absolute bottom-4 left-4 right-4 bg-red-500/90 text-white px-4 py-2 rounded-lg shadow-lg">
-          <p className="text-sm font-semibold">Connection Error</p>
-          <p className="text-xs">{error}</p>
-        </div>
-      )}
     </div>
   );
 }

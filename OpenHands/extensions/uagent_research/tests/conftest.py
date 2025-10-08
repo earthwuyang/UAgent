@@ -276,6 +276,156 @@ def mock_llm_registry(mock_llm: MockLLM) -> MockLLMRegistry:
     return MockLLMRegistry(mock_llm)
 
 
+@pytest.fixture
+def mock_control_bus():
+    """Provide a ControlBus instance with automatic cleanup."""
+
+    from ..control.control_bus import ControlBus
+
+    bus = ControlBus()
+    try:
+        yield bus
+    finally:
+        for experiment_id in list(getattr(bus, "_active_experiments", set())):
+            bus.unsubscribe_all(experiment_id)
+
+
+@pytest.fixture
+async def mock_event_bus():
+    """Provide an EventBus configured for deterministic tests."""
+
+    from ..orchestrator.event_bus import EventBus
+
+    class TestEventBus(EventBus):
+        async def subscribe(
+            self,
+            subscriber_id: str,
+            event_types=None,
+            branch_ids=None,
+            buffer_size: int = 100,
+            coalesce_window_ms: int = 100,
+        ):
+            async for event in super().subscribe(
+                subscriber_id=subscriber_id,
+                event_types=event_types,
+                branch_ids=branch_ids,
+                buffer_size=buffer_size,
+                coalesce_window_ms=coalesce_window_ms,
+            ):
+                yield event
+
+    bus = TestEventBus(heartbeat_interval=0)
+    try:
+        yield bus
+    finally:
+        await bus.close()
+
+
+@pytest.fixture
+async def mock_research_session_manager(mock_event_bus, mock_control_bus):
+    """Yield a ResearchSessionManager wired to mock buses."""
+
+    from ..services.research_session_manager import ResearchSessionManager
+
+    manager = ResearchSessionManager(
+        event_bus=mock_event_bus,
+        control_bus=mock_control_bus,
+    )
+    try:
+        yield manager
+    finally:
+        await manager.close()
+
+
+@pytest.fixture
+def mock_orchestrator():
+    """Minimal orchestrator used for registration tests."""
+
+    class MockOrchestrator:
+        def __init__(self) -> None:
+            self.tree = None
+            self.status = "running"
+            self.cancelled = False
+            self.paused = False
+
+        async def run(self, goal, context=None, max_iterations=10):  # pragma: no cover - helper
+            return goal, context, max_iterations
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def pause(self) -> None:
+            self.paused = True
+
+        def resume(self) -> None:
+            self.paused = False
+
+    return MockOrchestrator()
+
+
+@pytest.fixture
+def sample_research_events():
+    """Factory helpers for creating common research events."""
+
+    from ..uagent_research.models.events import (
+        StepEvent,
+        CompleteEvent,
+        ErrorEvent,
+        Artifact,
+        ArtifactType,
+    )
+
+    def create_step_event(
+        branch_id: str = "branch-1",
+        node_id: str = "node-1",
+        *,
+        action: str = "Running tests",
+        adapter_name: str = "codeact",
+        cost: float = 0.0,
+        tokens: int = 0,
+    ):
+        event = StepEvent(branch_id=branch_id, node_id=node_id, action=action)
+        setattr(event, "adapter_name", adapter_name)
+        setattr(event, "cost", cost)
+        setattr(event, "tokens", tokens)
+        return event
+
+    def create_complete_event(
+        branch_id: str = "branch-1",
+        node_id: str = "node-1",
+        *,
+        summary: str = "Completed successfully",
+    ):
+        return CompleteEvent(
+            branch_id=branch_id,
+            node_id=node_id,
+            summary=summary,
+            artifacts=[Artifact(kind=ArtifactType.SUMMARY, locator="summary.md", content=summary)],
+            success=True,
+        )
+
+    def create_error_event(
+        branch_id: str = "branch-1",
+        node_id: str = "node-1",
+        *,
+        message: str = "Something went wrong",
+        recoverable: bool = False,
+    ):
+        return ErrorEvent(
+            branch_id=branch_id,
+            node_id=node_id,
+            message=message,
+            recoverable=recoverable,
+        )
+
+    return {
+        "step": create_step_event,
+        "complete": create_complete_event,
+        "error": create_error_event,
+    }
+
+
+
 @pytest.fixture(scope='function')
 async def test_db() -> None:
     """Initialise an in-memory SQLite database for each test."""
