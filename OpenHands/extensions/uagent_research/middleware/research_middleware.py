@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from typing import Optional, Dict, Any, Tuple
 
 from ..classifier.task_classifier import task_classifier, TaskType
@@ -39,6 +40,9 @@ except ImportError:
 # Enforce single-goal per conversation: do not auto-trigger new research from chat
 SINGLE_GOAL_MODE = True
 
+# Initialize logger early to avoid usage before definition
+logger = logging.getLogger(__name__)
+
 # Import control components
 try:
     from ..control.control_bus import ControlMessage
@@ -54,8 +58,6 @@ except ImportError as e:
     ControlMessage = None
     ResearchSessionManager = None
     ExperimentStatus = None
-
-logger = logging.getLogger(__name__)
 
 
 class ResearchMiddleware:
@@ -140,20 +142,8 @@ class ResearchMiddleware:
 
     def _register_adapters(self):
         """Register all agent adapters with the adapter registry"""
-        try:
-            from ..adapters.base.agent_adapter import adapter_registry
-            from ..adapters.deepresearch.adapter import DeepResearchAdapter
-            from ..adapters.repomaster.adapter import RepoMasterAdapter
-            from ..adapters.codeact.adapter import CodeActAdapter
-
-            # Register adapters with default configs (name comes from class attribute)
-            adapter_registry.register(DeepResearchAdapter(config={}))
-            adapter_registry.register(RepoMasterAdapter(config={}))
-            adapter_registry.register(CodeActAdapter(config={}))
-
-            logger.info("Research adapters registered successfully: deepresearch, repomaster, codeact")
-        except Exception as e:
-            logger.error(f"Failed to register adapters: {e}", exc_info=True)
+        from ..adapters.ensure_adapters import ensure_research_adapters_registered
+        ensure_research_adapters_registered()
 
     def get_session_manager(self) -> Optional['ResearchSessionManager']:
         """Get or create session manager"""
@@ -626,15 +616,30 @@ class ResearchMiddleware:
 
         Returns:
             experiment_id: ID of the created experiment
+            
+        Notes:
+            This method is designed to work with MultiAgentCoordinator.
+            The coordinator can access the orchestrator via:
+            middleware.active_orchestrators[experiment_id]['orchestrator']
+            
+            The background task runs independently, but coordinator can monitor
+            completion by checking if experiment_id is still in active_orchestrators.
         """
+        
+        logger.info(f"[MIDDLEWARE] start_research called: session_id={session_id}, goal={goal[:100] if goal else 'N/A'}")
+        logger.info(f"[MIDDLEWARE] Config: max_iterations={max_iterations}, max_cost={max_cost}, max_parallel={max_parallel}")
         import time
         import uuid
 
         logger.info(f"[RESEARCH_MIDDLEWARE] start_research called: session_id={session_id}, goal={goal[:100]}")
 
         # Use the conversation/session id as experiment id so the frontend URL matches
-        experiment_id = session_id
-        logger.info(f"[RESEARCH_MIDDLEWARE] Using experiment_id = session_id: {experiment_id}")
+        experiment_id = f"exp_{session_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        logger.info(f"🔬 Starting research for session {session_id}")
+        logger.info(f"📋 Experiment ID: {experiment_id}")
+        logger.info(f"🎯 Goal: {goal[:100]}...")
+
+        experiment_id = f"exp_{session_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
         # Create orchestrator configuration
         config = config or {}
@@ -661,15 +666,46 @@ class ResearchMiddleware:
             except Exception:
                 logger.debug('Unable to acquire global research event bus', exc_info=True)
 
+        # Try to get LLM instance for intelligent node expansion
+        llm = None
+        try:
+            # Try to get LLM from session manager
+            if session_mgr and hasattr(session_mgr, 'llm'):
+                llm = session_mgr.llm
+                logger.info("[RESEARCH_MIDDLEWARE] Acquired LLM from session manager")
+            else:
+                # Try to construct LLM using OpenHands' registry
+                try:
+                    from openhands.llm.llm import LLM
+                    from openhands.core.config import LLMConfig
+                    logger.info("[RESEARCH_MIDDLEWARE] Attempting to create default LLM instance")
+                    
+                    # Try to create default LLM config
+                    llm_config = LLMConfig()
+                    llm = LLM(config=llm_config)
+                    logger.info("[RESEARCH_MIDDLEWARE] Successfully created default LLM instance")
+                except Exception as e:
+                    logger.warning(f"[RESEARCH_MIDDLEWARE] Could not create default LLM: {e}")
+                    llm = None
+        except Exception as e:
+            logger.warning(f"[RESEARCH_MIDDLEWARE] Failed to acquire LLM: {e}")
+            llm = None
+        
         logger.info(
-            f"[RESEARCH_MIDDLEWARE] Creating TreeSearchOrchestrator with max_parallel={max_parallel}"
+            f"[RESEARCH_MIDDLEWARE] Creating TreeSearchOrchestrator with max_parallel={max_parallel}, llm={'available' if llm else 'unavailable'}"
         )
         orchestrator = TreeSearchOrchestrator(
+            
+            # DIAGNOSTIC: Log orchestrator creation (will add after creation completes)
             max_parallel=max_parallel,
             budget=budget,
             event_bus=event_bus,
             control_bus=control_bus,
+            llm=llm,
         )
+        logger.info(f"✅ TreeSearchOrchestrator created for {experiment_id}")
+        logger.info(f"⚙️ Config: max_parallel={max_parallel}, max_iterations={max_iterations}, max_cost={max_cost}")
+
         logger.info(f"[RESEARCH_MIDDLEWARE] TreeSearchOrchestrator created successfully")
 
         # Store orchestrator and goal
@@ -679,6 +715,9 @@ class ResearchMiddleware:
             'session_id': session_id,
             'max_iterations': max_iterations,
         }
+        logger.info(f"📦 Orchestrator stored in active_orchestrators")
+        logger.info(f"📊 Total active experiments: {len(self.active_orchestrators)}")
+
         # Track session goal for single-goal mode
         self._session_goal[session_id] = goal
         logger.info(f"[RESEARCH_MIDDLEWARE] Stored orchestrator in active_orchestrators, total active: {len(self.active_orchestrators)}")
@@ -697,6 +736,9 @@ class ResearchMiddleware:
         # Start research in background, pass experiment_id as research_id
         logger.info(f"[RESEARCH_MIDDLEWARE] Creating background task for experiment {experiment_id}")
         asyncio.create_task(self._run_research(experiment_id))
+
+        logger.info(f"🚀 Background research task created for {experiment_id}")
+        logger.info(f"⏳ Research will run asynchronously in background")
         logger.info(f"[RESEARCH_MIDDLEWARE] Background task created, returning experiment_id")
 
         return experiment_id
@@ -706,11 +748,26 @@ class ResearchMiddleware:
         experiment_id: str,
     ):
         """
+        
+        # DIAGNOSTIC: Log background task start
+        import asyncio
+        import threading
+        logger.info(f"[DIAGNOSTIC] Background research task started")
+        logger.info(f"[DIAGNOSTIC]   Experiment ID: {experiment_id}")
+        logger.info(f"[DIAGNOSTIC]   Thread: {threading.current_thread().name}")
+        logger.info(f"[DIAGNOSTIC]   Event loop: {id(asyncio.get_event_loop())}")
         Run research in background.
 
         Args:
             experiment_id: Experiment ID
         """
+        
+        import threading
+        logger.info(f"[MIDDLEWARE] _run_research started for {experiment_id}")
+        logger.info(f"[MIDDLEWARE] Thread: {threading.current_thread().name}, Event loop: {id(asyncio.get_event_loop())}")
+
+        logger.info(f"🏃 Research execution started for {experiment_id}")
+
         session_mgr = self.get_session_manager()
 
         try:
@@ -724,13 +781,20 @@ class ResearchMiddleware:
             orchestrator = exp_data['orchestrator']
             goal = exp_data['goal']
             max_iterations = exp_data['max_iterations']
+            logger.info(f"🎯 Goal: {goal[:100]}...")
+            logger.info(f"🔢 Max iterations: {max_iterations}")
 
             # Run orchestrator
+            logger.info(f"🌳 Starting tree search orchestrator for {experiment_id}")
             tree = await orchestrator.run(
                 goal=goal,
                 max_iterations=max_iterations,
                 research_id=experiment_id,
             )
+
+            logger.info(f"✅ Tree search completed for {experiment_id}")
+            logger.info(f"📊 Final stats: {tree.stats if hasattr(tree, 'stats') else 'N/A'}")
+
 
             logger.info(f"Research completed: {experiment_id}")
             logger.info(f"Tree stats: {tree.stats if hasattr(tree, 'stats') else 'N/A'}")
@@ -759,8 +823,10 @@ class ResearchMiddleware:
                     )
 
         finally:
+            logger.info(f"[MIDDLEWARE] Cleaning up experiment {experiment_id}")
             # Cleanup
             if experiment_id in self.active_orchestrators:
+                logger.info(f"[COORDINATOR] Cleaning up experiment {experiment_id} from active_orchestrators")
                 del self.active_orchestrators[experiment_id]
             self._progress_cache.pop(experiment_id, None)
             if session_mgr:
@@ -776,6 +842,30 @@ class ResearchMiddleware:
         """Get active orchestrator by experiment ID"""
         exp_data = self.active_orchestrators.get(experiment_id)
         return exp_data['orchestrator'] if exp_data else None
+    
+    def get_orchestrator_for_tracking(self, experiment_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get orchestrator and metadata for coordinator tracking.
+        
+        Args:
+            experiment_id: Experiment ID
+            
+        Returns:
+            Dict with orchestrator, goal, session_id, max_iterations, or None if not found
+        """
+        return self.active_orchestrators.get(experiment_id)
+    
+    def is_experiment_running(self, experiment_id: str) -> bool:
+        """
+        Check if experiment is still running.
+        
+        Args:
+            experiment_id: Experiment ID
+            
+        Returns:
+            True if experiment is in active_orchestrators, False otherwise
+        """
+        return experiment_id in self.active_orchestrators
 
     def cancel_research(self, experiment_id: str) -> bool:
         """

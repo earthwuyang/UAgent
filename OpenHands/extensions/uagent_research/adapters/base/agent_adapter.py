@@ -151,6 +151,10 @@ class AdapterRegistry:
         """List all registered adapters"""
         return list(self._adapters.keys())
 
+    def get_all_adapters(self) -> list:
+        """Get all registered adapter instances"""
+        return list(self._adapters.values())
+
     def select_best(self, task: Task, context: Context) -> Optional[AgentAdapter]:
         """
         Select best adapter for task.

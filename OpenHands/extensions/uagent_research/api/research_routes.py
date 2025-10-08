@@ -31,6 +31,7 @@ class ExperimentControlRequest(BaseModel):
 
 @router.get("/experiments/{experiment_id}/tree")
 async def get_experiment_tree(experiment_id: str) -> TreeSnapshotResponse:
+    logger.info(f"📡 Tree requested for experiment {experiment_id}")
     """
     Get research tree snapshot for an experiment.
 
@@ -170,16 +171,27 @@ async def get_experiment_events(
 
 # Helper function to update tree state (used by orchestrator)
 def update_tree_state(experiment_id: str, tree_data: dict):
-    """
-    Update the tree state for an experiment.
-
-    This should be called by the tree orchestrator when tree state changes.
-    """
+    """Update the tree state for an experiment."""
+    if not experiment_id:
+        logger.error("❌ Cannot update tree state: experiment_id is empty")
+        return
+    
+    if not tree_data or not isinstance(tree_data, dict):
+        logger.error(f"❌ Cannot update tree state for {experiment_id}: invalid tree_data")
+        return
+    
     _active_trees[experiment_id] = tree_data
-    logger.debug(f"Updated tree state for experiment {experiment_id}")
+    
+    # Log summary
+    nodes_count = len(tree_data.get('data', {}).get('nodes', []))
+    edges_count = len(tree_data.get('data', {}).get('edges', []))
+    version = tree_data.get('version', 0)
+    
+    logger.info(
+        f"✅ Tree state updated for {experiment_id}: "
+        f"version={version}, nodes={nodes_count}, edges={edges_count}"
+    )
 
-
-# Helper function to clear tree state
 def clear_tree_state(experiment_id: str):
     """Remove tree state when experiment completes."""
     if experiment_id in _active_trees:

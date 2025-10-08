@@ -58,3 +58,16 @@ class ObservationType(str, Enum):
 
     TASK_TRACKING = 'task_tracking'
     """Result of a task tracking operation"""
+    SUB_AGENT_SPAWNED = 'sub_agent_spawned'
+    """A sub-agent was spawned"""
+
+    SUB_AGENT_PROGRESS = 'sub_agent_progress'
+    """Progress update from a sub-agent"""
+
+    SUB_AGENT_COMPLETED = 'sub_agent_completed'
+    DEPENDENCY_ANALYSIS = 'dependency_analysis'
+    """Dependency analysis event"""
+
+    DEPENDENCY_GRAPH = 'dependency_graph'
+    """Dependency graph event"""
+    """A sub-agent completed its task"""

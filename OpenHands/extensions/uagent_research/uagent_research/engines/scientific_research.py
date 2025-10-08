@@ -17,7 +17,7 @@ from enum import Enum
 
 # OpenHands imports
 from openhands.llm.llm import LLM
-from openhands.runtime.runtime import Runtime
+from openhands.runtime.base import Runtime
 from openhands.events.stream import EventStream
 from ...orchestrator.event_bus import EventBus, get_event_bus
 from ...uagent_research.models.events import StepEvent, CompleteEvent, ErrorEvent

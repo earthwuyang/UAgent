@@ -20,6 +20,15 @@ from dataclasses import dataclass
 import json
 
 from ..uagent_research.models.events import ResearchEvent, EventType, StepEvent
+try:
+    from ..api.websocket_routes import broadcast_tree_update
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+    logger = None  # Will be set later
+    if logger:
+        logger.warning("WebSocket routes not available for event broadcasting")
+
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +267,25 @@ class EventBus:
                     self._heartbeat_supervisor(branch_id)
                 )
                 self._heartbeat_tasks[branch_id] = task
+
+        # Bridge to WebSocket if available and experiment_id is present
+        if WEBSOCKET_AVAILABLE and experiment_id:
+            try:
+                # Create event message for WebSocket clients
+                event_message = {
+                    "type": "event",
+                    "event_type": event.type.value if hasattr(event.type, 'value') else str(event.type),
+                    "experiment_id": experiment_id,
+                    "branch_id": getattr(event, 'branch_id', None),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": self._serialize_event(event)
+                }
+                
+                # Schedule broadcast without blocking (fire and forget)
+                asyncio.create_task(broadcast_tree_update(experiment_id, event_message))
+            except Exception as e:
+                # Log but don't fail event publishing if WebSocket broadcast fails
+                logger.debug(f"Failed to broadcast event to WebSocket: {e}")
 
         async with self._lock:
             for subscriber_id in list(self._active_subscribers):

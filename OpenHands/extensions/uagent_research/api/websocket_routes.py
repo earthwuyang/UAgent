@@ -27,8 +27,10 @@ class ConnectionManager:
             self.active_connections[experiment_id] = set()
 
         self.active_connections[experiment_id].add(websocket)
-        logger.info(f"WebSocket connected for experiment {experiment_id}. "
-                    f"Total connections: {len(self.active_connections[experiment_id])}")
+        logger.info(
+            f"✅ WebSocket client connected for experiment {experiment_id}. "
+            f"Total connections for this experiment: {len(self.active_connections[experiment_id])}"
+        )
 
         # Send initial connection confirmation
         await websocket.send_json({
@@ -36,6 +38,21 @@ class ConnectionManager:
             "experiment_id": experiment_id,
             "timestamp": asyncio.get_event_loop().time()
         })
+        
+        # Send initial tree snapshot if available
+        try:
+            from .research_routes import _active_trees
+            if experiment_id in _active_trees:
+                tree_snapshot = _active_trees[experiment_id]
+                await websocket.send_json({
+                    "type": "tree_snapshot",
+                    **tree_snapshot
+                })
+                logger.info(f"✅ Sent initial tree snapshot to new client for {experiment_id}")
+            else:
+                logger.debug(f"No active tree found for {experiment_id} to send to new client")
+        except Exception as e:
+            logger.warning(f"Could not send initial tree snapshot: {e}")
 
     def disconnect(self, websocket: WebSocket, experiment_id: str):
         """Remove a WebSocket connection."""
@@ -148,17 +165,20 @@ async def websocket_experiment_endpoint(
 
 # Helper function for orchestrator to send updates
 async def broadcast_tree_update(experiment_id: str, message: dict):
-    """
-    Broadcast a tree update to all connected clients.
-
-    This should be called by the tree orchestrator when tree state changes.
-
-    Args:
-        experiment_id: The experiment ID
-        message: The update message (will be broadcast as JSON)
-    """
-    await manager.broadcast(message, experiment_id)
-
-
-# Export manager for use by other modules
-__all__ = ['ws_router', 'manager', 'broadcast_tree_update']
+    """Broadcast a tree update to all connected clients."""
+    if not experiment_id:
+        logger.warning("❌ Cannot broadcast: experiment_id is empty")
+        return
+    
+    if experiment_id not in manager.active_connections:
+        logger.debug(f"ℹ️ No WebSocket clients connected for {experiment_id}")
+        return
+    
+    client_count = len(manager.active_connections[experiment_id])
+    logger.info(f"📡 Broadcasting tree update to {client_count} client(s) for {experiment_id}")
+    
+    try:
+        await manager.broadcast(message, experiment_id)
+        logger.debug(f"✅ Broadcast completed for {experiment_id}")
+    except Exception as e:
+        logger.error(f"❌ Broadcast failed for {experiment_id}: {e}", exc_info=True)

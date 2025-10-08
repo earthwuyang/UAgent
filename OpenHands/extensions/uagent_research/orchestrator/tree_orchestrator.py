@@ -8,7 +8,7 @@ Coordinates multiple adapters to explore different branches concurrently.
 import asyncio
 import logging
 import math
-from typing import Dict, List, Optional, AsyncIterator, Set
+from typing import Dict, List, Optional, AsyncIterator, Set, Any
 from datetime import datetime
 from collections import defaultdict
 import uuid
@@ -27,6 +27,9 @@ from ..adapters.base.agent_adapter import AgentAdapter, adapter_registry
 from ..router.skill_router import SkillRouter
 from .event_bus import EventBus
 from ..control.control_bus import ControlBus, ControlMessage
+from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
+from ..services.idea_generation_service import IdeaGenerationService
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,9 @@ class TreeSearchOrchestrator:
         router: Optional[SkillRouter] = None,
         event_bus: Optional[EventBus] = None,
         control_bus: Optional[ControlBus] = None,
+        llm = None,
+        idea_service: Optional[IdeaGenerationService] = None,
+        message_bus: Optional[Any] = None,  # MessageBus for inter-agent communication
     ):
         """
         Initialize tree search orchestrator.
@@ -76,6 +82,40 @@ class TreeSearchOrchestrator:
         self.router = router or SkillRouter()
         self.event_bus = event_bus or EventBus()
         self.control_bus = control_bus or ControlBus()
+
+        # MessageBus for inter-agent communication
+        self.message_bus = message_bus
+
+        # Intelligent node expansion
+        self.llm = llm
+        self.idea_service = idea_service
+        if self.idea_service is None and self.llm is not None and ENABLE_INTELLIGENT_EXPANSION:
+            try:
+                from ..config import (
+                    ENABLE_INTELLIGENT_EXPANSION,
+                    MAX_RESEARCH_IDEAS,
+                    MAX_HYPOTHESES_PER_IDEA,
+                    MAX_EXPERIMENTS_PER_HYPOTHESIS,
+                    IDEA_GENERATION_RETRY_COUNT,
+                )
+                config = {
+                    'max_ideas': MAX_RESEARCH_IDEAS,
+                    'max_hypotheses': MAX_HYPOTHESES_PER_IDEA,
+                    'max_experiments': MAX_EXPERIMENTS_PER_HYPOTHESIS,
+                    'retry_count': IDEA_GENERATION_RETRY_COUNT,
+                }
+                self.idea_service = IdeaGenerationService(llm=self.llm, config=config)
+                logger.info("Created IdeaGenerationService for intelligent node expansion")
+            except Exception as e:
+                logger.warning(f"Failed to create IdeaGenerationService: {e}")
+                self.idea_service = None
+        
+        self.use_intelligent_expansion = (self.idea_service is not None)
+        if self.use_intelligent_expansion:
+            logger.info(f"[EXPAND] Using LLM to generate children for {node.id}")
+            logger.info("Intelligent node expansion ENABLED")
+        else:
+            logger.warning("Intelligent node expansion DISABLED (using fallback placeholders)")
 
         # Execution state
         self.tree: Optional[ResearchTree] = None
@@ -97,6 +137,10 @@ class TreeSearchOrchestrator:
             "total_tokens": 0,
             "iterations": 0,
         }
+
+        # Debounce for broadcast flood prevention (500ms threshold)
+        self._last_broadcast_ts = 0.0
+        self._broadcast_debounce_ms = 500
 
     async def run(
         self,
@@ -122,6 +166,10 @@ class TreeSearchOrchestrator:
                 max_iterations=5
             )
         """
+        
+        logger.info(f"[ORCHESTRATOR] run() called with goal={goal[:100]}, max_iterations={max_iterations}, research_id={research_id}")
+        logger.info(f"[ORCHESTRATOR] Budget: max_cost={self.budget.max_cost}, max_iterations={self.budget.max_iterations}")
+        logger.info(f"[ORCHESTRATOR] Concurrency: max_parallel={self.max_parallel}")
         try:
             # Initialize tree with research_id; allow caller to override for UI mapping
             if research_id is None:
@@ -143,13 +191,45 @@ class TreeSearchOrchestrator:
             # Add root node to tree
             self.tree.add_node(root_node)
 
+            # Register orchestrator with MessageBus
+            if self.message_bus:
+                self.message_bus.register_agent(
+                    agent_id=research_id,
+                    agent_type="research_orchestrator",
+                    capabilities=["tree_search", "parallel_execution", "budget_management"]
+                )
+
             # Publish initial tree state so UI reflects activity immediately
             self._update_tree_stats()
 
             self._cancelled = False
             self._paused = False
 
+
             logger.info(f"Starting tree search for: {goal} (research_id: {research_id})")
+            # Ensure adapters are registered
+            from ..adapters.ensure_adapters import ensure_research_adapters_registered
+            ensure_research_adapters_registered()
+
+            
+            logger.info(f"[ORCHESTRATOR] Starting PUCT loop for {research_id}")
+            from ..adapters.base.agent_adapter import adapter_registry
+            if hasattr(adapter_registry, '_adapters'):
+                registered = list(adapter_registry._adapters.keys())
+            else:
+                registered = 'unknown'
+            logger.info(f"[ORCHESTRATOR] Adapter registry status: {registered}")
+
+            # DIAGNOSTIC: Log adapter registry state
+            registered_adapters = list(adapter_registry.get_all_adapters())
+            logger.info(f"[DIAGNOSTIC] Adapter Registry State:")
+            logger.info(f"[DIAGNOSTIC] Total registered adapters: {len(registered_adapters)}")
+            if len(registered_adapters) == 0:
+                logger.error(f"[DIAGNOSTIC] ERROR: No adapters registered! Parallel research will fail.")
+            else:
+                for adapter in registered_adapters:
+                    logger.info(f"[DIAGNOSTIC]   - {adapter.name}: {adapter.description}")
+
 
             # Start control loop in background (concurrent with PUCT loop)
             self._control_task = asyncio.create_task(self._control_loop())
@@ -175,27 +255,51 @@ class TreeSearchOrchestrator:
                     self.stats["iterations"] = iteration + 1
 
                     logger.info(f"\n=== Iteration {iteration + 1}/{max_iterations} ===")
+                    
+                    logger.info(f"[ORCHESTRATOR] PUCT iteration {iteration + 1}/{max_iterations}")
+                    logger.info(f"[ORCHESTRATOR] Tree state: {len(self.tree.nodes)} nodes, {len(self.tree.edges)} edges")
+                    logger.info(f"[ORCHESTRATOR] Budget check: cost={self.stats['total_cost']:.3f}/{self.budget.max_cost}, iterations={iteration + 1}/{max_iterations}")
+
+                    # DIAGNOSTIC: Log iteration state
+                    logger.info(f"[DIAGNOSTIC] PUCT Iteration {iteration + 1}/{max_iterations}")
+                    logger.info(f"[DIAGNOSTIC] Tree state: {len(self.tree.nodes)} nodes, {len(self.tree.edges)} edges")
+                    logger.info(f"[DIAGNOSTIC] Budget: cost=${self.stats['total_cost']:.3f}, tokens={self.stats['total_tokens']}, iterations={self.stats['iterations']}")
+
 
                     # Select best node using PUCT
+                    logger.info(f"[ORCHESTRATOR] Selecting best node for expansion...")
                     node = self._select_best_node()
+                    if node:
+                        logger.info(f"[ORCHESTRATOR] Selected node: {node.id} (type={node.type}, visits={node.visits})")
+                    else:
+                        logger.warning(f"[ORCHESTRATOR] No expandable node found! Tree may be exhausted.")
 
                     if node is None:
                         logger.info("No more nodes to explore")
                         break
 
                     # Expand node (generate children)
+                    logger.info(f"[ORCHESTRATOR] Expanding node {node.id}...")
                     children = await self._expand_node(node, goal, context)
+                    logger.info(f"[ORCHESTRATOR] Expansion generated {len(children)} children")
+                    for i, child in enumerate(children):
+                        logger.info(f"[ORCHESTRATOR]   - Child {i+1}: {child.id} (type={child.type})")
 
                     if not children:
                         logger.info(f"No children generated for node {node.id}")
                         continue
 
                     # Execute children in parallel
+                    logger.info(f"[ORCHESTRATOR] Starting parallel execution of {len(children)} children (max_parallel={self.max_parallel})")
                     await self._execute_children_parallel(children)
+                    logger.info(f"[ORCHESTRATOR] Parallel execution completed")
 
                     # Update tree statistics
                     self._update_tree_stats()
 
+                logger.info(f"[ORCHESTRATOR] PUCT loop finished")
+                logger.info(f"[ORCHESTRATOR] Final tree: {len(self.tree.nodes)} nodes, {len(self.tree.edges)} edges")
+                logger.info(f"[ORCHESTRATOR] Final cost: ${self.stats['total_cost']:.3f}")
                 logger.info(f"\nTree search completed: {self.stats}")
 
             finally:
@@ -206,6 +310,10 @@ class TreeSearchOrchestrator:
                         await self._control_task
                     except asyncio.CancelledError:
                         pass
+
+                # Unregister from MessageBus
+                if self.message_bus and self.tree:
+                    self.message_bus.unregister_agent(self.tree.research_id)
 
                 # Unsubscribe from control bus
                 self.control_bus.unsubscribe_all(research_id)
@@ -249,11 +357,8 @@ class TreeSearchOrchestrator:
         expandable_nodes = []
 
         for node in self.tree.nodes.values():
-            if node.type == NodeType.ROOT:
-                # Always expandable
-                expandable_nodes.append(node)
-            elif node.status == NodeStatus.COMPLETE:
-                # Check if has unexplored action space
+            # Apply max_children check to all nodes including ROOT
+            if node.status == NodeStatus.COMPLETE or node.type == NodeType.ROOT:
                 child_count = len(self.tree.get_children(node.id))
                 max_children = self._get_max_children(node.type)
 
@@ -302,14 +407,41 @@ class TreeSearchOrchestrator:
             f"Selected node {best_node.id} (score={best_score:.3f}, type={best_node.type})"
         )
 
+        # DIAGNOSTIC: Log node selection details
+        if best_node:
+            logger.info(f"[DIAGNOSTIC] Node selected: ID={best_node.id}, Type={best_node.type}, Status={best_node.status}")
+            logger.info(f"[DIAGNOSTIC]   PUCT score={best_score:.3f}, Children={len(self.tree.get_children(best_node.id))}/{self._get_max_children(best_node.type)}")
+        else:
+            node_statuses = {}
+            for node in self.tree.nodes.values():
+                status = node.status.value if hasattr(node.status, 'value') else str(node.status)
+                node_statuses[status] = node_statuses.get(status, 0) + 1
+            logger.warning(f"[DIAGNOSTIC] No node selected! Total nodes: {len(self.tree.nodes)}, Statuses: {node_statuses}")
+
         return best_node
 
     def _get_max_children(self, node_type: NodeType) -> int:
-        """Get maximum children for node type"""
+        """Get maximum children for node type, reading from config."""
+        # Try to import config values
+        try:
+            from ..config import (
+                MAX_RESEARCH_IDEAS,
+                MAX_HYPOTHESES_PER_IDEA,
+                MAX_EXPERIMENTS_PER_HYPOTHESIS,
+            )
+            max_ideas = MAX_RESEARCH_IDEAS
+            max_hypotheses = MAX_HYPOTHESES_PER_IDEA
+            max_experiments = MAX_EXPERIMENTS_PER_HYPOTHESIS
+        except ImportError:
+            # Fallback to defaults if config not available
+            max_ideas = 3
+            max_hypotheses = 2
+            max_experiments = 1
+        
         max_children_map = {
-            NodeType.ROOT: 3,  # Generate 3 ideas
-            NodeType.IDEA: 2,  # Generate 2 hypotheses per idea
-            NodeType.HYPOTHESIS: 1,  # Generate 1 experiment per hypothesis
+            NodeType.ROOT: max_ideas,
+            NodeType.IDEA: max_hypotheses,
+            NodeType.HYPOTHESIS: max_experiments,
             NodeType.WEB_SEARCH: 0,  # Leaf node
             NodeType.CODE_SEARCH: 0,  # Leaf node
             NodeType.EXPERIMENT: 0,  # Leaf node
@@ -323,6 +455,9 @@ class TreeSearchOrchestrator:
         """
         Expand node by generating children.
 
+        Uses IdeaGenerationService for intelligent LLM-based expansion when available,
+        falls back to hardcoded placeholders otherwise.
+
         Args:
             node: Node to expand
             goal: Research goal
@@ -331,59 +466,113 @@ class TreeSearchOrchestrator:
         Returns:
             List of child nodes
         """
+        logger.info(f"[EXPAND] Expanding node {node.id} (type={node.type})")
+        logger.info(f"[EXPAND] Intelligent expansion enabled: {self.use_intelligent_expansion}")
+        
         logger.info(f"Expanding node {node.id} (type={node.type})")
+
+        # DIAGNOSTIC: Log node expansion details
+        logger.info(f"[DIAGNOSTIC] Expanding node: ID={node.id}, Type={node.type}, Title='{node.title}'")
+        logger.info(f"[DIAGNOSTIC]   Content preview: {(node.content or '')[:100]}...")
+        logger.info(f"[DIAGNOSTIC]   Intelligent expansion enabled: {self.use_intelligent_expansion}")
 
         children = []
 
-        if node.type == NodeType.ROOT:
-            # Generate research ideas
-            children = [
-                ResearchNode(
-                    id=f"idea-{i}",
-                    type=NodeType.IDEA,
-                    title=f"Idea {i+1}: Web Research",
-                    content=f"Search web for: {goal}",
-                    status=NodeStatus.PENDING,
-                    prior=0.8,
-                )
-                for i in range(2)
-            ] + [
-                ResearchNode(
-                    id=f"idea-2",
-                    type=NodeType.IDEA,
-                    title="Idea 3: Code Research",
-                    content=f"Search GitHub for implementations of: {goal}",
-                    status=NodeStatus.PENDING,
-                    prior=0.7,
-                )
-            ]
+        # Try intelligent expansion first
+        if self.use_intelligent_expansion:
+            logger.info(f"[EXPAND] Using LLM to generate children for {node.id}")
+            try:
+                if node.type == NodeType.ROOT:
+                    logger.info(f"Using intelligent expansion for ROOT node")
+                    children = await self.idea_service.generate_ideas(
+                        goal=goal,
+                        context=context
+                    )
+                    if children:
+                        logger.info(f"Intelligent expansion generated {len(children)} ideas")
+                    else:
+                        logger.warning("Intelligent expansion returned no ideas, using fallback")
+                
+                elif node.type == NodeType.IDEA:
+                    logger.info(f"Using intelligent expansion for IDEA node: {node.title[:50]}")
+                    children = await self.idea_service.generate_hypotheses(
+                        idea_content=node.content,
+                        parent_node=node
+                    )
+                    if children:
+                        logger.info(f"Intelligent expansion generated {len(children)} hypotheses")
+                    else:
+                        logger.warning("Intelligent expansion returned no hypotheses, using fallback")
+                
+                elif node.type == NodeType.HYPOTHESIS:
+                    logger.info(f"Using intelligent expansion for HYPOTHESIS node: {node.title[:50]}")
+                    children = await self.idea_service.generate_experiments(
+                        hypothesis_content=node.content,
+                        parent_node=node
+                    )
+                    if children:
+                        logger.info(f"Intelligent expansion generated {len(children)} experiments")
+                    else:
+                        logger.warning("Intelligent expansion returned no experiments, using fallback")
+            
+            except Exception as e:
+                logger.error(f"Intelligent expansion failed: {e}", exc_info=True)
+                logger.warning("Falling back to hardcoded node generation")
+                children = []
 
-        elif node.type == NodeType.IDEA:
-            # Generate hypotheses
-            children = [
-                ResearchNode(
-                    id=f"{node.id}-hyp-{i}",
-                    type=NodeType.HYPOTHESIS,
-                    title=f"Hypothesis {i+1}",
-                    content=f"Test hypothesis for: {node.content}",
-                    status=NodeStatus.PENDING,
-                    prior=0.6,
-                )
-                for i in range(2)
-            ]
+        # Fallback to hardcoded expansion if intelligent expansion unavailable or failed
+        if not children:
+            logger.info(f"Using fallback placeholder expansion for {node.type}")
+            
+            if node.type == NodeType.ROOT:
+                # Generate research ideas
+                children = [
+                    ResearchNode(
+                        id=f"idea-{i}",
+                        type=NodeType.IDEA,
+                        title=f"Idea {i+1}: Web Research",
+                        content=f"Search web for: {goal}",
+                        status=NodeStatus.PENDING,
+                        prior=0.8,
+                    )
+                    for i in range(2)
+                ] + [
+                    ResearchNode(
+                        id=f"idea-2",
+                        type=NodeType.IDEA,
+                        title="Idea 3: Code Research",
+                        content=f"Search GitHub for implementations of: {goal}",
+                        status=NodeStatus.PENDING,
+                        prior=0.7,
+                    )
+                ]
 
-        elif node.type == NodeType.HYPOTHESIS:
-            # Generate experiment
-            children = [
-                ResearchNode(
-                    id=f"{node.id}-exp",
-                    type=NodeType.EXPERIMENT,
-                    title="Run Experiment",
-                    content=f"Execute experiment for: {node.content}",
-                    status=NodeStatus.PENDING,
-                    prior=0.5,
-                )
-            ]
+            elif node.type == NodeType.IDEA:
+                # Generate hypotheses
+                children = [
+                    ResearchNode(
+                        id=f"{node.id}-hyp-{i}",
+                        type=NodeType.HYPOTHESIS,
+                        title=f"Hypothesis {i+1}",
+                        content=f"Test hypothesis for: {node.content}",
+                        status=NodeStatus.PENDING,
+                        prior=0.6,
+                    )
+                    for i in range(2)
+                ]
+
+            elif node.type == NodeType.HYPOTHESIS:
+                # Generate experiment
+                children = [
+                    ResearchNode(
+                        id=f"{node.id}-exp",
+                        type=NodeType.EXPERIMENT,
+                        title="Run Experiment",
+                        content=f"Execute experiment for: {node.content}",
+                        status=NodeStatus.PENDING,
+                        prior=0.5,
+                    )
+                ]
 
         # Add children to tree
         for child in children:
@@ -407,6 +596,14 @@ class TreeSearchOrchestrator:
         Args:
             children: Child nodes to execute
         """
+        
+        logger.info(f"[EXECUTE] Starting parallel execution of {len(children)} children")
+        logger.info(f"[EXECUTE] Concurrency limit: {self.max_parallel}")
+        # DIAGNOSTIC: Log parallel execution start
+        logger.info(f"[DIAGNOSTIC] Starting parallel execution of {len(children)} children")
+        for child in children:
+            logger.info(f"[DIAGNOSTIC]   Queuing: ID={child.id}, Type={child.type}, Title='{child.title}'")
+        
         tasks = []
 
         for child in children:
@@ -417,11 +614,23 @@ class TreeSearchOrchestrator:
             )
             tasks.append(task)
 
+
+        # DIAGNOSTIC: Log task creation
+        logger.info(f"[DIAGNOSTIC] Created {len(tasks)} asyncio tasks for parallel execution")
+        logger.info(f"[DIAGNOSTIC] Active task IDs: {list(self._running_tasks.keys())}")
+        
         try:
             # Wait for all to complete
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            logger.info(f"[EXECUTE] All {len(tasks)} tasks completed")
 
-            # Log any exceptions
+            # DIAGNOSTIC: Log gather results
+            success_count = sum(1 for r in results if not isinstance(r, Exception))
+            failure_count = len(results) - success_count
+            logger.info(f"[DIAGNOSTIC] Parallel execution complete: {success_count} succeeded, {failure_count} failed")
+            
+                        # Log any exceptions
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Child {children[i].id} failed: {result}")
@@ -440,6 +649,12 @@ class TreeSearchOrchestrator:
             try:
                 logger.info(f"Executing node {node.id} (type={node.type})")
 
+
+                # DIAGNOSTIC: Log node execution details
+                logger.info(f"[DIAGNOSTIC] Executing node: ID={node.id}, Type={node.type}")
+                logger.info(f"[DIAGNOSTIC]   Goal/Title: {node.title}")
+                logger.info(f"[DIAGNOSTIC]   Acquiring semaphore (max_parallel={self.max_parallel})")
+                
                 node.status = NodeStatus.RUNNING
 
                 # Create task for node
@@ -505,6 +720,27 @@ class TreeSearchOrchestrator:
                 logger.info(
                     f"Node {node.id} completed ({events_received} events received)"
                 )
+                
+                # Emit NodeCompleteEvent via MessageBus
+                if self.message_bus and self.tree:
+                    try:
+                        asyncio.create_task(
+                            self.message_bus.send_message(
+                                from_agent_id=self.tree.research_id,
+                                to_agent_id=None,  # Broadcast
+                                message=NodeCompleteEvent(
+                                    from_agent_id=self.tree.research_id,
+                                    node_id=node.id,
+                                    branch_id=node.id,
+                                    experiment_id=self.tree.research_id,
+                                    result=node.content,
+                                    cost=node.cost,
+                                    artifacts=node.artifacts
+                                )
+                            )
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to emit NodeCompleteEvent: {e}")
 
             except Exception as e:
                 logger.error(f"Node {node.id} execution failed: {e}", exc_info=True)
@@ -574,54 +810,78 @@ class TreeSearchOrchestrator:
             return False
 
     def _publish_tree_to_api(self):
-        """Publish tree state to API endpoint for frontend consumption"""
+        """
+        Publish tree state to API and broadcast to WebSocket clients.
+        
+        This method:
+        1. Creates a snapshot of the current tree state
+        2. Updates the in-memory state in research_routes (_active_trees)
+        3. Broadcasts the update to all connected WebSocket clients
+        4. Logs all steps for debugging
+        
+        Debouncing: Skips broadcast if less than 500ms since last broadcast
+        to prevent flooding WebSocket clients with too many updates.
+        """
         if not self.tree:
             return
-
+        
+        # Debounce: skip if we broadcasted too recently
+        import time
+        now = time.time()
+        time_since_last = (now - self._last_broadcast_ts) * 1000  # convert to ms
+        
+        if time_since_last < self._broadcast_debounce_ms:
+            logger.debug(f"Skipping broadcast (debounce): {time_since_last:.0f}ms since last")
+            return
+        
+        self._last_broadcast_ts = now
+        
         try:
-            # Import the server-exposed API route that backs the frontend
-            # Use absolute import to ensure we hit the package used by app.py
-            from uagent_research.api.research_routes import update_tree_state
-
-            # Serialize tree to dict
+            # Fix: Use relative import instead of absolute
+            from ..api.research_routes import update_tree_state
+            from ..api.websocket_routes import broadcast_tree_update
+            
+            # Create tree snapshot
+            tree_data = self.tree.to_dict() if hasattr(self.tree, 'to_dict') else {}
+            
+            # Ensure stats are inside data, not at top level
+            if 'stats' not in tree_data:
+                tree_data['stats'] = {}
+            tree_data['stats'].update(self.stats)
+            
             tree_snapshot = {
-                "version": self.stats.get("iterations", 0),
-                "timestamp": datetime.now().isoformat(),
-                "experiment_id": self.tree.research_id,
-                "data": {
-                    "nodes": [
-                        {
-                            "id": node.id,
-                            "type": node.type.value,
-                    "title": node.title,
-                    "content": node.content,
-                    "parent_id": node.parent_id,
-                    "status": node.status.value,
-                    "prior": node.prior,
-                    "visits": node.visits,
-                    "avg_value": node.avg_value,
-                    "cost": node.cost,
-                        }
-                        for node in self.tree.nodes.values()
-                    ],
-                    "edges": [
-                        {
-                            "source": edge.parent_id,
-                            "target": edge.child_id,
-                            "type": edge.relation,
-                        }
-                        for edge in self.tree.edges
-                    ],
-                    "stats": self.tree.stats if hasattr(self.tree, "stats") else {},
-                }
+                "version": getattr(self.tree, 'version', 0),
+                "experiment_id": getattr(self.tree, 'research_id', 'unknown'),
+                "data": tree_data,
+                "timestamp": datetime.utcnow().isoformat()
             }
-
-            # Update API endpoint
-            update_tree_state(self.tree.research_id, tree_snapshot)
-            logger.debug(f"Published tree state for experiment {self.tree.research_id}")
-
+            
+            experiment_id = tree_snapshot["experiment_id"]
+            
+            # Update in-memory state (for REST API endpoint)
+            update_tree_state(experiment_id, tree_snapshot)
+            logger.info(f"✅ Tree state updated for {experiment_id}")
+            
+            # Broadcast to WebSocket clients
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(broadcast_tree_update(
+                        experiment_id,
+                        {"type": "tree_snapshot", **tree_snapshot}
+                    ))
+                    logger.info(f"✅ Tree broadcast scheduled for {experiment_id}")
+                else:
+                    logger.debug("Event loop not running, skipping WebSocket broadcast")
+            except RuntimeError as e:
+                logger.warning(f"Could not broadcast tree update: {e}")
+            except Exception as e:
+                logger.warning(f"Could not broadcast tree update: {e}")
+            
+        except ImportError as e:
+            logger.error(f"❌ Failed to import API functions: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Failed to publish tree state: {e}", exc_info=True)
+            logger.error(f"❌ Failed to publish tree state: {e}", exc_info=True)
 
     def _update_tree_stats(self):
         """Update tree-level statistics"""
@@ -639,6 +899,29 @@ class TreeSearchOrchestrator:
 
         # Publish tree state to API endpoint
         self._publish_tree_to_api()
+        
+        # Emit ProgressUpdateEvent via MessageBus
+        if self.message_bus and self.tree:
+            try:
+                total_nodes = self.tree.stats.get("total_nodes", 0)
+                iterations = self.stats.get("iterations", 0)
+                max_iterations = getattr(self, '_max_iterations', 50)
+                progress = min(iterations / max(max_iterations, 1), 1.0)
+                
+                asyncio.create_task(
+                    self.message_bus.send_message(
+                        from_agent_id=self.tree.research_id,
+                        to_agent_id=None,  # Broadcast
+                        message=ProgressUpdateEvent(
+                            from_agent_id=self.tree.research_id,
+                            progress=progress,
+                            current_task=f"Iteration {iterations}/{max_iterations}",
+                            stats=dict(self.stats)
+                        )
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Failed to emit ProgressUpdateEvent: {e}")
 
     async def _control_loop(self):
         """
@@ -660,6 +943,59 @@ class TreeSearchOrchestrator:
 
         logger.info(f"Starting control loop for research {self.tree.research_id}")
 
+        try:
+            # Create tasks for both ControlBus and MessageBus subscriptions
+            control_bus_task = asyncio.create_task(self._handle_control_bus())
+            message_bus_task = asyncio.create_task(self._handle_message_bus())
+            
+            # Wait for either task to complete (or both to be cancelled)
+            await asyncio.gather(control_bus_task, message_bus_task, return_exceptions=True)
+        except asyncio.CancelledError:
+            logger.info("Control loop cancelled")
+        except Exception as e:
+            logger.error(f"Error in control loop: {e}", exc_info=True)
+    
+    
+    async def _handle_message_bus(self):
+        """Handle MessageBus CommandEvents."""
+        if not self.message_bus or not self.tree:
+            return
+        
+        try:
+            async for message in self.message_bus.subscribe(self.tree.research_id):
+                if isinstance(message, CommandEvent):
+                    logger.info(
+                        f"Received MessageBus command: {message.command_type} "
+                        f"(from={message.from_agent_id})"
+                    )
+                    
+                    # Map CommandEvent to ControlMessage actions
+                    if message.command_type == "pause":
+                        self._paused = True
+                        logger.info("Research paused via MessageBus")
+                    
+                    elif message.command_type == "resume":
+                        self._paused = False
+                        logger.info("Research resumed via MessageBus")
+                    
+                    elif message.command_type == "cancel":
+                        self._cancelled = True
+                        logger.info("Research cancelled via MessageBus")
+                    
+                    elif message.command_type == "steer":
+                        # Handle steering commands
+                        logger.info(f"Steering command received: {message.payload}")
+        
+        except asyncio.CancelledError:
+            logger.info("MessageBus handler cancelled")
+        except Exception as e:
+            logger.error(f"Error in MessageBus handler: {e}", exc_info=True)
+
+    async def _handle_control_bus(self):
+        """Handle ControlBus commands."""
+        if not self.tree:
+            return
+        
         try:
             async for cmd in self.control_bus.subscribe(self.tree.research_id):
                 logger.info(

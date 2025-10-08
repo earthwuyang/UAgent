@@ -268,3 +268,84 @@ async def get_microagents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={'error': f'Error getting microagents: {e}'},
         )
+
+
+@app.get('/sub-agents')
+async def get_sub_agents(
+    conversation: ServerConversation = Depends(get_conversation),
+) -> JSONResponse:
+    """Get status of all sub-agents in this conversation.
+    
+    Returns a list of sub-agent status objects with fields:
+    - id: Sub-agent unique identifier
+    - type: Sub-agent type (research, code, analysis)
+    - status: Current status (running, paused, complete, failed, cancelled)
+    - progress: Progress percentage (0.0 to 1.0)
+    - current_task: Description of current task
+    - goal: Research goal/objective
+    - session_id: Parent session ID
+    - created_at: Unix timestamp of creation
+    - completed_at: Unix timestamp of completion (if completed)
+    - max_iterations: Max iterations configured
+    - tree_stats: Tree statistics dict
+    - is_running: Boolean indicating if still running
+    """
+    try:
+        agent_session = conversation.agent_session
+        if not agent_session:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={'error': 'Agent session not found'},
+            )
+        
+        sub_agents = agent_session.get_sub_agents_status()
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={'sub_agents': sub_agents},
+        )
+    except Exception as e:
+        logger.error(f'Error getting sub-agents: {e}', exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={'error': f'Error getting sub-agents: {str(e)}'},
+        )
+
+
+@app.get('/sub-agents/{sub_agent_id}')
+async def get_sub_agent(
+    sub_agent_id: str,
+    conversation: ServerConversation = Depends(get_conversation),
+) -> JSONResponse:
+    """Get status of a specific sub-agent.
+    
+    Args:
+        sub_agent_id: The unique identifier of the sub-agent
+        
+    Returns a sub-agent status object with all status fields,
+    or 404 if not found.
+    """
+    try:
+        agent_session = conversation.agent_session
+        if not agent_session:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={'error': 'Agent session not found'},
+            )
+        
+        sub_agent_status = agent_session.get_sub_agent_status(sub_agent_id)
+        if not sub_agent_status:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={'error': f'Sub-agent {sub_agent_id} not found'},
+            )
+        
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=sub_agent_status,
+        )
+    except Exception as e:
+        logger.error(f'Error getting sub-agent {sub_agent_id}: {e}', exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={'error': f'Error getting sub-agent: {str(e)}'},
+        )

@@ -46,6 +46,14 @@ except Exception:
     RESEARCH_MIDDLEWARE_AVAILABLE = False
 
 
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from openhands.server.session.multi_agent_coordinator import MultiAgentCoordinator
+from openhands.events.agent_event import AgentSpawnedEvent, ProgressUpdateEvent, NodeCompleteEvent
+from openhands.events.action import MessageAction
+
+
 class WebSession:
     """Web server-bound session wrapper.
 
@@ -80,6 +88,8 @@ class WebSession:
     user_id: str | None
     logger: LoggerAdapter
     active_research_experiment_id: str | None = None  # Track active research experiment
+    active_research_experiments: set[str] = None  # Track all active research experiments
+    research_coordinator: Optional['MultiAgentCoordinator'] = None  # Coordinator for research sub-agents
     _progress_reporter_task: asyncio.Task | None = None  # Background progress reporting task
 
     def __init__(
@@ -128,7 +138,121 @@ class WebSession:
         self._wait_websocket_initial_complete: bool = True
         self._last_progress_broadcast: float = 0.0
 
+    def get_or_create_coordinator(self) -> 'MultiAgentCoordinator':
+        """Get or create the research coordinator for this session."""
+        if self.research_coordinator is None:
+            from openhands.server.session.multi_agent_coordinator import MultiAgentCoordinator
+            self.research_coordinator = MultiAgentCoordinator(
+                session_id=self.sid,
+                logger=self.logger,
+                session=self
+            )
+            self.logger.info(f"Created MultiAgentCoordinator for session {self.sid}")
+            
+            # Register session as agent in MessageBus
+            self.research_coordinator.message_bus.register_agent(
+                self.sid,
+                "session",
+                ["ui", "status"]
+            )
+            
+            # Subscribe to MessageBus events
+            asyncio.create_task(self._monitor_agent_events())
+        return self.research_coordinator
+
+    
+
+    async def _monitor_agent_events(self):
+        """Monitor MessageBus for agent events and forward to event stream."""
+        if not self.research_coordinator or not self.research_coordinator.message_bus:
+            return
+        
+        try:
+            async for message in self.research_coordinator.message_bus.subscribe(self.sid):
+                # Forward relevant events to main event stream
+                if isinstance(message, AgentSpawnedEvent):
+                    self.agent_session.event_stream.add_event(
+                        MessageAction(
+                            content=f"🤖 Research sub-agent spawned: {message.sub_agent_id}\n"
+                                    f"Goal: {message.goal}\n"
+                                    f"Type: {message.agent_type}"
+                        ),
+                        EventSource.AGENT
+                    )
+                elif isinstance(message, ProgressUpdateEvent):
+                    # Progress updates already handled by _report_research_progress
+                    pass
+                elif isinstance(message, NodeCompleteEvent):
+                    # Optionally notify user of node completion
+                    pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"Error monitoring agent events: {e}", exc_info=True)
+
+    def get_sub_agents_status(self) -> list[dict]:
+        """
+        Get status of all sub-agents in this session.
+        
+        Returns:
+            List of sub-agent status dicts
+        """
+        coord = self.get_or_create_coordinator()
+        return coord.get_all_sub_agents()
+    
+    def get_sub_agent_status(self, sub_agent_id: str) -> dict | None:
+        """
+        Get status of a specific sub-agent.
+        
+        Args:
+            sub_agent_id: Sub-agent ID
+            
+        Returns:
+            Sub-agent status dict, or None if not found
+        """
+        coord = self.get_or_create_coordinator()
+        return coord.get_sub_agent_status(sub_agent_id)
+
+    def register_experiment(self, experiment_id: str) -> None:
+        """
+        Register an experiment as active in this session.
+        
+        Adds the experiment ID to active_research_experiments set and sets
+        active_research_experiment_id if not already set (for backward compatibility).
+        
+        Args:
+            experiment_id: The experiment/sub-agent ID to register
+        """
+        if self.active_research_experiments is None:
+            self.active_research_experiments = set()
+        
+        self.active_research_experiments.add(experiment_id)
+        
+        # Set active_research_experiment_id if not set (backward compatibility)
+        if not self.active_research_experiment_id:
+            self.active_research_experiment_id = experiment_id
+        
+        self.logger.info(f"Registered experiment {experiment_id}. Active experiments: {len(self.active_research_experiments)}")
+
     async def close(self) -> None:
+        """Close the session."""
+        # Close MessageBus
+        if self.research_coordinator and self.research_coordinator.message_bus:
+            try:
+                await self.research_coordinator.message_bus.close()
+                self.logger.info("MessageBus closed successfully")
+            except Exception as e:
+                self.logger.error(f"Error closing MessageBus: {e}", exc_info=True)
+        
+        # Cleanup research coordinator and all sub-agents
+        if self.research_coordinator:
+            try:
+                await self.research_coordinator.cleanup_all_sub_agents()
+                self.logger.info("Research coordinator cleaned up successfully")
+            except Exception as e:
+                self.logger.error(f"Error cleaning up research coordinator: {e}", exc_info=True)
+        
+        self.is_alive = False
         if self.sio:
             await self.sio.emit(
                 'oh_event',
@@ -390,6 +514,20 @@ class WebSession:
                     experiment_id = result.get('experiment_id', 'N/A')
                     self.active_research_experiment_id = experiment_id
                     self._last_progress_broadcast = 0.0
+
+                    # Register with coordinator for proper tracking
+                    coordinator = self.get_or_create_coordinator()
+                    try:
+                        # Track the existing experiment in coordinator
+                        if coordinator.track_existing_experiment(experiment_id):
+                            self.logger.info(f"Research experiment {experiment_id} tracked by coordinator")
+                        else:
+                            self.logger.warning(f"Failed to track experiment {experiment_id} in coordinator")
+                        
+                        # Register in session state
+                        self.register_experiment(experiment_id)
+                    except Exception as e:
+                        self.logger.error(f"Failed to register research with coordinator: {e}", exc_info=True)
 
                     if self._progress_reporter_task is None or self._progress_reporter_task.done():
                         self._progress_reporter_task = asyncio.create_task(

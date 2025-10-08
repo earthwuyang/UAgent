@@ -124,6 +124,8 @@ class BingSearchTool(Tool):
         Returns:
             List of search results with title, url, snippet
         """
+        
+        logger.info(f"[BING_TOOL] _search_bing() called for query: {query}")
         pool = await get_browser_pool()
 
         async with pool.get_page() as page:
@@ -132,8 +134,12 @@ class BingSearchTool(Tool):
                 logger.info(f"Searching Bing for: {query}")
                 await page.goto("https://www.bing.com", wait_until="domcontentloaded")
 
-                # Wait for search box
-                await page.wait_for_selector('input[name="q"]', state="visible")
+                # DIAGNOSTIC: Log search box wait
+            logger.info(f"[DIAGNOSTIC] Waiting for Bing search box")
+            
+                        # Wait for search box
+            logger.info(f"[BING_TOOL] Waiting for search box")
+            await page.wait_for_selector('input[name="q"]', state="visible")
 
                 # Type query with human-like delays
                 search_box = await page.query_selector('input[name="q"]')
@@ -142,14 +148,22 @@ class BingSearchTool(Tool):
                 # Submit search
                 await search_box.press("Enter")
 
-                # Wait for results
-                await page.wait_for_selector('li.b_algo', state="visible", timeout=10000)
+                # DIAGNOSTIC: Log results wait
+            logger.info(f"[DIAGNOSTIC] Waiting for search results to load")
+            
+                        # Wait for results
+            logger.info(f"[BING_TOOL] Waiting for search results")
+            await page.wait_for_selector('li.b_algo', state="visible", timeout=10000)
 
                 # Small delay to mimic human reading
                 await asyncio.sleep(1)
 
-                # Extract results
-                results = await page.evaluate(f"""
+                # DIAGNOSTIC: Log results extraction
+            logger.info(f"[DIAGNOSTIC] Extracting search results from page")
+            
+                        # Extract results
+            logger.info(f"[BING_TOOL] Extracting search results")
+            results = await page.evaluate(f"""
                     () => {{
                         const items = Array.from(document.querySelectorAll('li.b_algo'));
                         const maxResults = {num_results};

@@ -180,6 +180,91 @@ The extension integrates with OpenHands at multiple levels:
 4. **API Level**: FastAPI routes integrate with OpenHands server
 5. **LLM Level**: Use OpenHands LLM infrastructure
 
+## Intelligent Research Tree Generation
+
+The research tree orchestrator now uses LLM-based engines to generate meaningful research nodes instead of hardcoded placeholders.
+
+### How It Works
+
+When research mode is activated, the orchestrator:
+
+1. **ROOT → IDEAS**: Calls the LLM to generate 3 specific research ideas based on your goal
+2. **IDEA → HYPOTHESES**: For each idea, generates testable hypotheses  
+3. **HYPOTHESIS → EXPERIMENTS**: For each hypothesis, designs concrete experiments
+
+This is powered by the `IdeaGenerationService`, which wraps the existing `ScientificResearchEngine` and provides a clean interface for the tree orchestrator.
+
+### Example Flow
+
+```
+User Goal: "Implement efficient vector search in PostgreSQL"
+
+↓ (LLM generates ideas)
+
+IDEA 1: "Use pgvector extension with HNSW indexing"
+IDEA 2: "Implement custom GiST index for cosine similarity"  
+IDEA 3: "Leverage PostgreSQL's built-in tsvector with embeddings"
+
+↓ (LLM generates hypotheses for IDEA 1)
+
+HYPOTHESIS: "HNSW indexes provide O(log n) search with 95%+ recall"
+
+↓ (LLM generates experiment)
+
+EXPERIMENT: "Benchmark pgvector HNSW vs IVFFlat on 1M vectors"
+```
+
+### Configuration
+
+Control intelligent expansion via environment variables:
+
+```bash
+# Enable/disable intelligent expansion (default: true)
+export RESEARCH_ENABLE_INTELLIGENT_EXPANSION=true
+
+# Maximum ideas to generate from root (default: 3)
+export RESEARCH_MAX_IDEAS=3
+
+# Maximum hypotheses per idea (default: 2)
+export RESEARCH_MAX_HYPOTHESES=2
+
+# Maximum experiments per hypothesis (default: 1)
+export RESEARCH_MAX_EXPERIMENTS=1
+
+# Retry count for failed LLM calls (default: 2)
+export RESEARCH_IDEA_RETRY_COUNT=2
+```
+
+### Fallback Behavior
+
+If the LLM is unavailable or intelligent expansion is disabled, the orchestrator automatically falls back to generating placeholder nodes:
+
+- "Idea 1: Web Research"
+- "Idea 2: Code Research"
+- etc.
+
+This ensures the research tree always has structure, even without LLM access.
+
+### Troubleshooting
+
+**Q: My research tree only shows placeholder nodes like "Idea 1: Web Research"**
+
+A: This means intelligent expansion is not active. Check:
+1. LLM is properly configured (API key, model, etc.)
+2. `RESEARCH_ENABLE_INTELLIGENT_EXPANSION=true` is set
+3. Check logs for "Intelligent node expansion ENABLED" message
+
+**Q: How do I verify intelligent expansion is working?**
+
+A: Look for these log messages:
+```
+[TreeSearchOrchestrator] Intelligent node expansion ENABLED
+[TreeSearchOrchestrator] Using intelligent expansion for ROOT node
+[IdeaGenerationService] Successfully generated 3 ideas
+```
+
+And verify node titles are specific, not generic (e.g., "Neural Architecture Search with Evolutionary Algorithms" vs "Idea 1: Web Research").
+
 ## Agent Coordination Mode
 
 Research agents now operate as conversation coordinators instead of blocking the main chat while experiments run. When a research goal is detected, the agent:
@@ -290,6 +375,13 @@ LITELLM_API_KEY=your_key
 RESEARCH_MAX_RETRIES=3
 RESEARCH_VALIDATION_STRICT=true
 RESEARCH_MAX_ITERATIONS=10
+
+# Intelligent node expansion
+RESEARCH_ENABLE_INTELLIGENT_EXPANSION=true
+RESEARCH_MAX_IDEAS=3
+RESEARCH_MAX_HYPOTHESES=2
+RESEARCH_MAX_EXPERIMENTS=1
+RESEARCH_IDEA_RETRY_COUNT=2
 ```
 
 ### Python Configuration
@@ -1068,4 +1160,97 @@ curl -X PATCH http://localhost:3000/api/research/experiments/exp_123 \
 - **Validation**: Request payloads are validated using Pydantic discriminated unions. Invalid requests return 400 with detailed error messages.
 
 ---
+
+
+---
+
+## Troubleshooting
+
+### Research Tree Shows "Disconnected" and No Tree Appears
+
+**Symptoms:**
+- Research tree panel shows "Disconnected" status
+- No nodes or edges appear in the tree visualization
+- Research appears to be running but no progress is visible
+
+**Root Causes:**
+1. Tree orchestrator not publishing state to API
+2. WebSocket connection not established
+3. Import errors preventing tree state updates
+4. Research orchestrator not starting properly
+
+**Debugging Steps:**
+
+1. **Enable Debug Logging**
+   ```bash
+   export RESEARCH_DEBUG_LOGGING=true
+   export RESEARCH_LOG_TREE_UPDATES=true
+   export RESEARCH_LOG_WEBSOCKET=true
+   ```
+   Restart the server and check logs for:
+   - `✅ Tree state updated for exp_...` (tree is being published)
+   - `📡 Broadcasting tree update to N client(s)` (WebSocket is working)
+   - `🔌 WebSocket endpoint connected` (frontend connected)
+
+2. **Check API Endpoint Manually**
+   ```bash
+   # Replace {experiment_id} with your actual experiment ID
+   curl http://localhost:3000/api/research/experiments/{experiment_id}/tree
+   ```
+   Should return JSON with nodes and edges, not an empty tree.
+
+3. **Verify Research Started**
+   Look for these log messages:
+   - `🔬 Starting research for session ...`
+   - `✅ TreeSearchOrchestrator created`
+   - `🚀 Background research task created`
+   - `🌳 Starting tree search orchestrator`
+
+4. **Check for Import Errors**
+   Look for error messages like:
+   - `❌ Failed to import API functions`
+   - `ImportError: No module named 'uagent_research'`
+   
+   If you see these, the import paths are incorrect.
+
+5. **Verify WebSocket Connection**
+   Open browser DevTools → Network → WS tab
+   Should see connection to: `ws://localhost:3000/api/research/ws/experiment/{experiment_id}`
+   Status should be "101 Switching Protocols" (success)
+
+6. **Check Research Extension Loaded**
+   On server startup, look for:
+   - `✅ UAgent Research Extension loaded from source`
+   - `✅ UAgent Research Extension routes registered`
+   
+   If you see `⚠️ UAgent Research Extension not found`, the extension isn't loaded.
+
+**Common Fixes:**
+
+- **Import Error**: Ensure you're running from the correct directory and Python path is set
+- **No Tree Data**: Check that `_publish_tree_to_api()` is being called (look for logs)
+- **WebSocket Not Connecting**: Verify WebSocket routes are registered in FastAPI app
+- **Research Not Starting**: Check that research middleware is properly integrated
+
+### Understanding Log Messages
+
+**Research Startup:**
+- `🔬 Starting research` - Research triggered by user message
+- `✅ TreeSearchOrchestrator created` - Orchestrator initialized successfully
+- `🚀 Background research task created` - Research running in background
+
+**Tree State Updates:**
+- `✅ Tree state updated` - Tree data stored in API
+- `📡 Broadcasting tree update` - Sending update to WebSocket clients
+- `📊 Tree state published after iteration N` - Tree updated after PUCT iteration
+
+**WebSocket:**
+- `🔌 WebSocket endpoint connected` - Frontend connected to WebSocket
+- `✅ WebSocket client connected` - Client registered for updates
+- `📡 Tree requested for experiment` - Frontend polling for tree data
+
+**Errors:**
+- `❌ Failed to import API functions` - Import path error (critical)
+- `❌ Failed to publish tree state` - Tree publishing failed
+- `⚠️ No active tree for experiment` - Tree data not found in API
 

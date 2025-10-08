@@ -34,6 +34,9 @@ from openhands.events.observation import (
     FileReadObservation,
     IPythonRunCellObservation,
     TaskTrackingObservation,
+    SubAgentSpawnedObservation,
+    SubAgentProgressObservation,
+    SubAgentCompletedObservation,
     UserRejectObservation,
 )
 from openhands.events.observation.agent import (
@@ -660,6 +663,11 @@ class ConversationMemory:
             # If prompt extensions are disabled, we don't add any additional info
             # TODO: test this
             return []
+        elif isinstance(obs, (SubAgentSpawnedObservation, SubAgentProgressObservation, SubAgentCompletedObservation)):
+            # Sub-agent observations - include as system messages for context
+            message = Message(role='user', content=[
+                TextContent(text=f"[System] {obs.message}")
+            ])
         else:
             # If an observation message is not returned, it will cause an error
             # when the LLM tries to return the next message

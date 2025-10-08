@@ -27,6 +27,15 @@ from ..models.base import get_session
 
 logger = logging.getLogger(__name__)
 
+# Import for accessing OpenHands conversation/session manager
+try:
+    from openhands.server.shared import conversation_manager as conv_mgr_module
+    OPENHANDS_INTEGRATION_AVAILABLE = True
+except ImportError:
+    OPENHANDS_INTEGRATION_AVAILABLE = False
+    conv_mgr_module = None
+
+
 # Import control and session management
 try:
     from ...control.control_bus import ControlBus, ControlMessage
@@ -292,6 +301,20 @@ async def start_experiment(
     await session.refresh(experiment)
 
     logger.info(f"Created experiment: {experiment_id}")
+
+    # Update OpenHands WebSession with research_experiment_id
+    if OPENHANDS_INTEGRATION_AVAILABLE and conv_mgr_module:
+        try:
+            conv_mgr = conv_mgr_module.conversation_manager
+            if conv_mgr and hasattr(conv_mgr, 'get_session'):
+                session_obj = await conv_mgr.get_session(request.session_id)
+                if session_obj:
+                    session_obj.active_research_experiment_id = experiment_id
+                    logger.info(f"Set active_research_experiment_id={experiment_id} on session {request.session_id}")
+                else:
+                    logger.warning(f"Session {request.session_id} not found in conversation manager")
+        except Exception as e:
+            logger.warning(f"Failed to update session with research_experiment_id: {e}")
 
     # Start experiment in background
     if ORCHESTRATOR_AVAILABLE:

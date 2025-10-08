@@ -27,6 +27,25 @@ from openhands.events.observation.observation import Observation
 from openhands.events.observation.reject import UserRejectObservation
 from openhands.events.observation.success import SuccessObservation
 from openhands.events.observation.task_tracking import TaskTrackingObservation
+from openhands.events.observation.sub_agent import (
+    SubAgentSpawnedObservation,
+    SubAgentProgressObservation,
+    SubAgentCompletedObservation,
+)
+
+# Import OCC observation events
+from openhands.events.observation.occ import (
+    OCCTrackingStartedObservation,
+    OCCFileAccessObservation,
+    OCCValidationStartedObservation,
+    OCCValidationCompletedObservation,
+    OCCConflictDetectedObservation,
+    OCCAutoRebaseStartedObservation,
+    OCCAutoRebaseCompletedObservation,
+    OCCRegionAnalysisObservation,
+    OCCCacheHitObservation,
+    OCC_OBSERVATION_EVENTS,
+)
 
 __all__ = [
     'Observation',
@@ -50,4 +69,19 @@ __all__ = [
     'MCPObservation',
     'FileDownloadObservation',
     'TaskTrackingObservation',
+    'SubAgentSpawnedObservation',
+    'SubAgentProgressObservation',
+    'SubAgentCompletedObservation',
+    
+    # OCC observation events
+    'OCCTrackingStartedObservation',
+    'OCCFileAccessObservation',
+    'OCCValidationStartedObservation',
+    'OCCValidationCompletedObservation',
+    'OCCConflictDetectedObservation',
+    'OCCAutoRebaseStartedObservation',
+    'OCCAutoRebaseCompletedObservation',
+    'OCCRegionAnalysisObservation',
+    'OCCCacheHitObservation',
+    'OCC_OBSERVATION_EVENTS',
 ]

@@ -76,6 +76,12 @@ class DeepResearchAdapter(AgentAdapter):
 
     async def run(self, task: Task, context: Context) -> AsyncIterator[ResearchEvent]:
         """
+        
+        # DIAGNOSTIC: Log task reception
+        logger.info(f"[DIAGNOSTIC] DeepResearchAdapter received task")
+        logger.info(f"[DIAGNOSTIC]   Task ID: {task.id}")
+        logger.info(f"[DIAGNOSTIC]   Task goal: {task.goal}")
+        logger.info(f"[DIAGNOSTIC]   Branch ID: {context.branch_id if context else 'N/A'}")
         Execute web research task using DeepResearch.
 
         Args:
@@ -92,6 +98,9 @@ class DeepResearchAdapter(AgentAdapter):
             ):
                 print(f"{event.type}: {event}")
         """
+        
+        logger.info(f"[DEEPRESEARCH] run() called for task {task.id}")
+        logger.info(f"[DEEPRESEARCH] Task goal: {task.goal[:100] if task.goal else 'N/A'}")
         try:
             self._current_task = task
             self._cancelled = False
@@ -252,6 +261,7 @@ class DeepResearchAdapter(AgentAdapter):
         )
 
         # Complete
+        logger.info(f"[DEEPRESEARCH] Adapter execution completed for task {task.id}")
         yield CompleteEvent(
             branch_id=context.branch_id,
             node_id=task.id,

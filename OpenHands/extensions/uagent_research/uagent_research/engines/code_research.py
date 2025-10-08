@@ -13,7 +13,7 @@ from pathlib import Path
 
 # OpenHands imports
 from openhands.llm.llm import LLM
-from openhands.runtime.runtime import Runtime
+from openhands.runtime.base import Runtime
 from openhands.events.stream import EventStream
 from openhands.events.action import CmdRunAction
 from openhands.events.observation import CmdOutputObservation

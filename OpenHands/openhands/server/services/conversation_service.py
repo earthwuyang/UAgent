@@ -191,6 +191,11 @@ async def start_conversation(
                     }
                 )
 
+                # Note: The middleware already started research in process_message()
+                # In future, we should move the spawning logic here to coordinator
+                # For now, just log that research was triggered
+                logger.info(f"Research experiment {experiment_id} started by middleware")
+
                 # Persist goal in single-goal mode if not set yet
                 if result.get('status') == 'research_started' and not conversation_metadata.research_locked:
                     conversation_metadata.research_goal = initial_user_msg.strip()
@@ -221,17 +226,49 @@ async def start_conversation(
                 f"Starting single-goal research for conversation {conversation_id}",
                 extra={'session_id': conversation_id},
             )
-            exp_id = await research_middleware.start_research(
-                goal=conversation_metadata.research_goal,
-                session_id=conversation_id,
-            )
-            research_triggered = True
-            # Optionally, annotate the initial message for UX if present
-            if initial_message_action:
-                initial_message_action.content += (
-                    f"\n\n[System: Research mode activated - Experiment ID: {exp_id}. "
-                    f"Check the Research Tree tab for progress.]"
+            
+            # Get session to access coordinator
+            session = conversation_manager.get_agent_session(conversation_id)
+            if session:
+                # Use coordinator for proper tracking
+                coordinator = session.get_or_create_coordinator()
+                
+                # Spawn research via coordinator
+                sub_agent_id = await coordinator.spawn_research_agent(
+                    goal=conversation_metadata.research_goal,
+                    config={
+                        'session_id': conversation_id,
+                        'user_id': user_id,
+                        'repository': conversation_metadata.selected_repository,
+                        'branch': conversation_metadata.selected_branch,
+                    }
                 )
+                
+                # Register experiment in session
+                session.register_experiment(sub_agent_id)
+                
+                research_triggered = True
+                logger.info(f"Research sub-agent spawned and registered: {sub_agent_id}")
+                
+                # Optionally, annotate the initial message for UX if present
+                if initial_message_action:
+                    initial_message_action.content += (
+                        f"\n\n[System: Research mode activated - Sub-agent ID: {sub_agent_id}. "
+                        f"Check the Research Tree tab for progress.]"
+                    )
+            else:
+                logger.warning(f"Session not found for {conversation_id}, falling back to middleware")
+                # Fallback to old method if session not available yet
+                exp_id = await research_middleware.start_research(
+                    goal=conversation_metadata.research_goal,
+                    session_id=conversation_id,
+                )
+                research_triggered = True
+                if initial_message_action:
+                    initial_message_action.content += (
+                        f"\n\n[System: Research mode activated - Experiment ID: {exp_id}. "
+                        f"Check the Research Tree tab for progress.]"
+                    )
         except Exception as e:
             logger.error(
                 f"Failed to start single-goal research for {conversation_id}: {e}",

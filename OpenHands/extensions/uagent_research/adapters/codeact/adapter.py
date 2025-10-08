@@ -82,9 +82,14 @@ class CodeActAdapter(AgentAdapter):
                 logger.info("CodeActAgent loaded successfully")
             except ImportError as e:
                 logger.error(f"Failed to import CodeActAgent: {e}")
+                # DIAGNOSTIC: Log import failure
+                logger.error(f"[DIAGNOSTIC] CodeActAgent import failed:")
+                logger.error(f"[DIAGNOSTIC]   Error: {str(e)}", exc_info=True)
                 # Fallback: try alternative import path
                 try:
                     from openhands.agenthub.codeact_agent.codeact_agent import CodeActAgent
+                # DIAGNOSTIC: Log successful import
+                logger.info(f"[DIAGNOSTIC] Successfully loaded CodeActAgent")
                     self._codeact_agent_class = CodeActAgent
                     logger.info("CodeActAgent loaded successfully (alternative path)")
                 except ImportError:
@@ -130,6 +135,9 @@ class CodeActAdapter(AgentAdapter):
             ):
                 await event_bus.publish(event)
         """
+        
+        logger.info(f"[CODEACT] run() called for task {task.id}")
+        logger.info(f"[CODEACT] Task goal: {task.goal[:100] if task.goal else 'N/A'}")
         try:
             self._cancelled = False
 
@@ -171,6 +179,7 @@ class CodeActAdapter(AgentAdapter):
                 return
 
             # Create HeadlessAgentSession
+        logger.info(f"[CODEACT] Creating HeadlessAgentSession for task {task.id}")
             experiment_id = f"{context.branch_id}-{task.id}-codeact"
 
             yield StepEvent(
@@ -240,6 +249,9 @@ class CodeActAdapter(AgentAdapter):
                         break
 
                     event_count += 1
+                
+                # DIAGNOSTIC: Log total event count
+                logger.info(f"[DIAGNOSTIC] Event streaming complete. Total events: {event_count}")
                     yield research_event
 
                     # Check if this was a completion event
