@@ -6,12 +6,14 @@ Streams research events to frontend via SSE/WebSocket with:
 - Backpressure handling (drop old events if buffer full)
 - Multiple subscriber support
 - Type-safe event routing
+- Event storage for retrieval
 """
 
 import asyncio
 import logging
+import os
 import time
-from typing import Dict, Set, Optional, AsyncIterator, List, Callable
+from typing import Dict, Set, Optional, AsyncIterator, List, Callable, Any
 from datetime import datetime
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -41,6 +43,7 @@ class EventBus:
     - Event coalescing (combine rapid similar events)
     - Backpressure handling (drop old events if subscriber slow)
     - SSE/WebSocket streaming
+    - Event storage for retrieval via REST API
     - Graceful shutdown
 
     Example:
@@ -55,18 +58,29 @@ class EventBus:
 
         # Publish events
         await bus.publish(StepEvent(...))
+        
+        # Retrieve stored events
+        result = bus.get_events("exp_123", since_version=10, limit=50)
     """
 
-    def __init__(self, max_buffer_size: int = 1000, heartbeat_interval: int = 5):
+    def __init__(self, max_buffer_size: int = 1000, heartbeat_interval: int = int(os.getenv('RESEARCH_HEARTBEAT_INTERVAL', '5'))):
         """
         Initialize event bus.
 
         Args:
             max_buffer_size: Maximum events to buffer per subscriber
-            heartbeat_interval: Heartbeat interval in seconds (0 to disable)
+            heartbeat_interval: Heartbeat interval in seconds (0 to disable).
+                              Defaults to RESEARCH_HEARTBEAT_INTERVAL env var (default: 5)
         """
         self.max_buffer_size = max_buffer_size
         self.heartbeat_interval = heartbeat_interval
+        
+        # Validate and adjust heartbeat interval
+        if self.heartbeat_interval < 0:
+            self.heartbeat_interval = 0  # Disable heartbeats
+        elif self.heartbeat_interval > 10:
+            logger.warning(f"Heartbeat interval {self.heartbeat_interval}s exceeds recommended maximum of 10s, capping at 10s")
+            self.heartbeat_interval = 10
 
         # Subscriber management
         self._subscribers: Dict[str, EventSubscription] = {}
@@ -81,6 +95,11 @@ class EventBus:
         self._last_event_time: Dict[str, float] = {}  # branch_id -> timestamp
         self._heartbeat_tasks: Dict[str, asyncio.Task] = {}  # branch_id -> task
         self._active_branches: Set[str] = set()
+
+        # Event storage for retrieval via /events endpoint
+        self._event_logs: Dict[str, deque] = {}  # experiment_id -> deque of (version, timestamp, event_dict)
+        self._event_versions: Dict[str, int] = defaultdict(int)  # experiment_id -> current version
+        self._max_log_size = 1000  # Max events per experiment
 
         # Statistics
         self.stats = {
@@ -184,7 +203,7 @@ class EventBus:
 
     async def publish(self, event: ResearchEvent):
         """
-        Publish event to all matching subscribers.
+        Publish event to all matching subscribers and store in event log.
 
         Args:
             event: Research event to publish
@@ -197,6 +216,34 @@ class EventBus:
             ))
         """
         self.stats["events_published"] += 1
+
+        # Extract experiment ID - check explicit field first, then parse from branch_id
+        experiment_id = getattr(event, 'experiment_id', None)
+        if not experiment_id and hasattr(event, 'branch_id') and event.branch_id:
+            # Try to extract experiment ID from branch_id prefix
+            parts = event.branch_id.split('-')
+            if parts:
+                experiment_id = parts[0]  # Use first part as experiment ID
+        
+        # Store event in log
+        if experiment_id:
+            if experiment_id not in self._event_logs:
+                self._event_logs[experiment_id] = deque(maxlen=self._max_log_size)
+            
+            # Increment version
+            self._event_versions[experiment_id] += 1
+            version = self._event_versions[experiment_id]
+            
+            # Serialize event to dict
+            event_dict = {
+                "type": event.type.value if hasattr(event.type, 'value') else str(event.type),
+                "branch_id": getattr(event, 'branch_id', None),
+                "data": self._serialize_event(event)
+            }
+            
+            # Store as tuple: (version, timestamp, event_dict)
+            timestamp = event.timestamp if hasattr(event, 'timestamp') else datetime.utcnow().isoformat()
+            self._event_logs[experiment_id].append((version, timestamp, event_dict))
 
         # Update heartbeat tracking
         if hasattr(event, 'branch_id') and event.branch_id:
@@ -225,6 +272,120 @@ class EventBus:
                     await self._add_to_coalesce_buffer(subscriber_id, event)
                 else:
                     await self._deliver_event(subscriber_id, event)
+    
+    def _serialize_event(self, event: ResearchEvent) -> dict:
+        """
+        Serialize event to dictionary.
+        
+        Args:
+            event: Event to serialize
+        
+        Returns:
+            Dictionary representation
+        """
+        # Try using event's dict method if available
+        if hasattr(event, 'dict'):
+            try:
+                return event.dict()
+            except:
+                pass
+        
+        # Manual serialization
+        result = {}
+        for attr in dir(event):
+            if not attr.startswith('_') and not callable(getattr(event, attr)):
+                value = getattr(event, attr)
+                # Skip type and timestamp as they're stored separately
+                if attr not in ['type', 'timestamp']:
+                    try:
+                        # Try to serialize, skip if not JSON-serializable
+                        json.dumps(value)
+                        result[attr] = value
+                    except (TypeError, ValueError):
+                        result[attr] = str(value)
+        
+        return result
+
+    def get_events(
+        self,
+        experiment_id: str,
+        since_version: int = 0,
+        limit: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Get events for experiment since version.
+        
+        Args:
+            experiment_id: Experiment ID to retrieve events for
+            since_version: Only return events with version > this value
+            limit: Maximum number of events to return
+        
+        Returns:
+            Dictionary with:
+            - events: List of event dicts with version, timestamp, type, data
+            - current_version: Latest version number
+            - earliest_available_version: Oldest version still in buffer
+            - has_more: True if more events available beyond limit
+            - has_gap: True if since_version < earliest_available_version (data loss)
+        """
+        if experiment_id not in self._event_logs:
+            return {
+                "events": [],
+                "current_version": 0,
+                "earliest_available_version": 0,
+                "has_more": False,
+                "has_gap": False
+            }
+        
+        event_log = self._event_logs[experiment_id]
+        current_version = self._event_versions[experiment_id]
+        
+        # Determine earliest available version (oldest event in buffer)
+        earliest_available_version = event_log[0][0] if event_log else 0
+        
+        # Check for gap (requested version older than available)
+        has_gap = since_version > 0 and since_version < earliest_available_version
+        
+        # Filter events by version
+        filtered_events = [
+            event_tuple for event_tuple in event_log
+            if event_tuple[0] > since_version
+        ]
+        
+        # Apply limit
+        has_more = len(filtered_events) > limit
+        filtered_events = filtered_events[:limit]
+        
+        # Serialize events
+        events = []
+        for version, timestamp, event_dict in filtered_events:
+            events.append({
+                "version": version,
+                "timestamp": timestamp,
+                **event_dict
+            })
+        
+        return {
+            "events": events,
+            "current_version": current_version,
+            "earliest_available_version": earliest_available_version,
+            "has_more": has_more,
+            "has_gap": has_gap
+        }
+
+    def clear_event_log(self, experiment_id: str):
+        """
+        Clear event log for an experiment.
+        
+        Args:
+            experiment_id: Experiment ID to clear logs for
+        """
+        if experiment_id in self._event_logs:
+            del self._event_logs[experiment_id]
+            logger.info(f"Cleared event log for experiment {experiment_id}")
+        
+        if experiment_id in self._event_versions:
+            del self._event_versions[experiment_id]
 
     def _matches_subscription(self, event: ResearchEvent, subscriber_id: str) -> bool:
         """
@@ -391,7 +552,10 @@ class EventBus:
         Args:
             branch_id: Branch to monitor
         """
-        logger.info(f"Starting heartbeat supervisor for branch {branch_id}")
+        logger.debug(
+            f"Heartbeat supervisor started for {branch_id} "
+            f"(interval={self.heartbeat_interval}s)"
+        )
 
         try:
             while branch_id in self._active_branches:
@@ -411,15 +575,18 @@ class EventBus:
                     )
 
                     # Publish heartbeat (bypass normal publish to avoid recursion)
+                    subscriber_count = 0
+
                     async with self._lock:
+                        subscriber_count = len(self._active_subscribers)
                         for subscriber_id in list(self._active_subscribers):
                             if self._matches_subscription(heartbeat, subscriber_id):
                                 await self._deliver_event(subscriber_id, heartbeat)
 
                     self.stats["heartbeats_sent"] += 1
                     logger.debug(
-                        f"Sent heartbeat for branch {branch_id} "
-                        f"(idle: {idle_time:.1f}s)"
+                        f"Emitting heartbeat for {branch_id} "
+                        f"(idle={idle_time:.1f}s) to {subscriber_count} subscribers"
                     )
 
         except asyncio.CancelledError:
@@ -437,6 +604,9 @@ class EventBus:
         Args:
             branch_id: Branch to stop heartbeat for
         """
+        last_event_ts = self._last_event_time.get(branch_id, time.time())
+        duration = time.time() - last_event_ts
+
         self._active_branches.discard(branch_id)
         self._last_event_time.pop(branch_id, None)
 
@@ -446,7 +616,10 @@ class EventBus:
             if not task.done():
                 task.cancel()
 
-        logger.debug(f"Stopped heartbeat for branch {branch_id}")
+        logger.info(
+            f"Stopped heartbeat for {branch_id} "
+            f"(active ~{duration:.1f}s, sent {self.stats['heartbeats_sent']})"
+        )
 
     async def broadcast(self, events: List[ResearchEvent]):
         """
@@ -458,14 +631,18 @@ class EventBus:
         for event in events:
             await self.publish(event)
 
-    def get_stats(self) -> Dict[str, int]:
+    def get_stats(self) -> Dict[str, Any]:
         """
         Get event bus statistics.
 
         Returns:
             Dictionary of statistics
         """
-        return self.stats.copy()
+        s = self.stats.copy()
+        s["active_heartbeats"] = len(self._heartbeat_tasks)
+        s["heartbeat_branches"] = list(self._active_branches)
+        s["stored_experiment_logs"] = len(self._event_logs)
+        return s
 
     async def close(self):
         """Close event bus and cleanup resources"""
@@ -474,6 +651,10 @@ class EventBus:
         # Cancel all heartbeat tasks
         for branch_id in list(self._heartbeat_tasks.keys()):
             self.stop_branch_heartbeat(branch_id)
+
+        # Clear all event logs
+        self._event_logs.clear()
+        self._event_versions.clear()
 
         # Unsubscribe all
         for subscriber_id in list(self._active_subscribers):

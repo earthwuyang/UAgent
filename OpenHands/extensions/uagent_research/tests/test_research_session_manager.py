@@ -7,9 +7,14 @@ from typing import List
 
 import pytest
 
-from ..control.control_bus import ControlMessage
-from ..services import research_session_manager as rsm_module
-from ..services.research_session_manager import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from control.control_bus import ControlMessage
+from services import research_session_manager as rsm_module
+from services.research_session_manager import (
     AdapterStatus,
     BranchStatus,
     ExperimentState,
@@ -17,7 +22,7 @@ from ..services.research_session_manager import (
     ResearchSessionManager,
     get_session_manager,
 )
-from ..uagent_research.models.events import StepEvent
+from uagent_research.models.events import StepEvent
 
 
 @pytest.mark.asyncio
@@ -182,6 +187,11 @@ async def test_handle_step_event(mock_research_session_manager, mock_orchestrato
     adapter_status = status["adapters"]["codeact"]
     assert adapter_status["status"] == "running"
     assert adapter_status["current_step"] == "Running tests"
+    assert status["active_branches"]
+    branch = status["active_branches"][0]
+    assert branch["branch_id"] == event.branch_id
+    assert branch["status"] == "running"
+    assert branch["progress"] == "Running tests"
 
 
 @pytest.mark.asyncio
@@ -197,6 +207,8 @@ async def test_handle_complete_event(mock_research_session_manager, mock_orchest
     status = manager.get_status("exp-complete")
     assert status["stats"]["completed"] == 1
     assert status["stats"]["running"] == 0
+    assert status["active_branches"][0]["status"] == "complete"
+    assert status["active_branches"][0]["progress"] == event.summary
 
 
 @pytest.mark.asyncio
@@ -212,6 +224,7 @@ async def test_handle_error_event(mock_research_session_manager, mock_orchestrat
     status = manager.get_status("exp-error")
     assert status["stats"]["failed"] == 1
     assert status["stats"]["running"] == 0
+    assert status["active_branches"][0]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -316,10 +329,10 @@ async def test_status_aggregation_full_workflow(mock_research_session_manager, m
     manager = mock_research_session_manager
     manager.register("exp-workflow", mock_orchestrator)
 
-    step1 = sample_research_events["step"](adapter_name="codeact", action="Starting")
-    step2 = sample_research_events["step"](adapter_name="deepresearch", action="Searching")
-    complete_event = sample_research_events["complete"]()
-    error_event = sample_research_events["error"]()
+    step1 = sample_research_events["step"](branch_id="branch-codeact", adapter_name="codeact", action="Starting")
+    step2 = sample_research_events["step"](branch_id="branch-deep", adapter_name="deepresearch", action="Searching")
+    complete_event = sample_research_events["complete"](branch_id="branch-codeact")
+    error_event = sample_research_events["error"](branch_id="branch-deep")
 
     for event in (step1, step2, complete_event, error_event):
         setattr(event, "experiment_id", "exp-workflow")
@@ -330,6 +343,9 @@ async def test_status_aggregation_full_workflow(mock_research_session_manager, m
     assert status["stats"]["failed"] == 1
     assert sorted(status["adapters"].keys()) == ["codeact", "deepresearch"]
     assert status["last_update"]
+    branches = {b["branch_id"]: b for b in status["active_branches"]}
+    assert branches["branch-codeact"]["status"] == "complete"
+    assert branches["branch-deep"]["status"] == "failed"
 
 
 def test_adapter_status_dataclass():

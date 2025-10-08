@@ -78,6 +78,25 @@ class AgentAdapter(ABC):
         """
         self._cancelled = True
 
+    async def send_message(self, message: str) -> None:
+        """
+        Optionally deliver a runtime message to the adapter.
+
+        Adapters that support runtime steering can override this method to
+        forward guidance to the underlying agent session (e.g. via chat).
+        The default implementation is a no-op so adapters that do not support
+        this capability do not need to override it.
+
+        Args:
+            message: Message text to deliver to the running agent.
+        """
+
+        logger.debug(
+            "Adapter '%s' does not implement runtime messaging. Ignoring message: %s",
+            getattr(self, "name", self.__class__.__name__),
+            message[:100],
+        )
+
     def is_cancelled(self) -> bool:
         """Check if adapter has been cancelled"""
         return self._cancelled

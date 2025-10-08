@@ -40,6 +40,9 @@ function AppContent() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
+  // Track if we've already started the conversation to prevent infinite loops
+  const startedConversationRef = React.useRef<string | null>(null);
+
   // Fetch batch feedback data when conversation is loaded
   useBatchFeedback();
 
@@ -59,8 +62,12 @@ function AppContent() {
         "This conversation does not exist, or you do not have permission to access it.",
       );
       navigate("/");
-    } else if (conversation?.status === "STOPPED") {
-      // If conversation is STOPPED, attempt to start it
+    } else if (
+      conversation?.status === "STOPPED" &&
+      startedConversationRef.current !== conversation.conversation_id
+    ) {
+      // If conversation is STOPPED and we haven't started it yet
+      startedConversationRef.current = conversation.conversation_id;
       startConversation(
         { conversationId: conversation.conversation_id, providers },
         {
@@ -68,16 +75,21 @@ function AppContent() {
             displayErrorToast(`Failed to start conversation: ${error.message}`);
             // Refetch the conversation to ensure UI consistency
             refetch();
+            // Reset the ref on error so we can retry
+            startedConversationRef.current = null;
           },
         },
       );
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     conversation?.conversation_id,
     conversation?.status,
     isFetched,
     isAuthed,
     providers,
+    // Intentionally omitting startConversation, navigate, and refetch
+    // These are functions that don't have stable references and would cause infinite loops
   ]);
 
   React.useEffect(() => {

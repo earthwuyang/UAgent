@@ -13,6 +13,7 @@ import {
   ExperimentProgress,
   ExperimentStatus,
   ResearchTreeView,
+  ResearchErrorBoundary,
 } from "#/components/research";
 import { Loader } from "#/components/shared/loader";
 import {
@@ -38,15 +39,15 @@ export default function ResearchTab() {
   const [experimentStatus, setExperimentStatus] = useState<ExperimentState>("idle");
   const [statusError, setStatusError] = useState<string | null>(null);
   const [treeError, setTreeError] = useState<string | null>(null);
+  // Render guard: only mount ReactFlow tree when backend returns a valid snapshot
+  const [canRenderTree, setCanRenderTree] = useState(false);
 
   const statusPollRef = useRef<NodeJS.Timeout | null>(null);
 
-  const { nodes, edges, stats, setLoading } = useResearchTreeStore((state) => ({
-    nodes: state.nodes,
-    edges: state.edges,
-    stats: state.stats,
-    setLoading: state.setLoading,
-  }));
+  // Access store state for display (nodes, edges, stats)
+  const nodes = useResearchTreeStore((state) => state.nodes);
+  const edges = useResearchTreeStore((state) => state.edges);
+  const stats = useResearchTreeStore((state) => state.stats);
 
   useEffect(() => {
     setIsClient(true);
@@ -61,6 +62,7 @@ export default function ResearchTab() {
     }
   }, []);
 
+  // Fetch tree snapshot - use store methods directly to avoid dependency issues
   const fetchTreeSnapshot = useCallback(
     async (showSpinner = false) => {
       if (!experimentId) return;
@@ -85,7 +87,8 @@ export default function ResearchTab() {
 
       try {
         if (showSpinner) {
-          setLoading(true);
+          // Access setLoading directly from store to avoid dependency issues
+          useResearchTreeStore.getState().setLoading(true);
         }
 
         const response = await fetch(
@@ -95,6 +98,7 @@ export default function ResearchTab() {
         if (response.status === 404) {
           useResearchTreeStore.getState().setSnapshot(emptySnapshot);
           setTreeError(null);
+          setCanRenderTree(false);
           return;
         }
 
@@ -105,6 +109,8 @@ export default function ResearchTab() {
         const snapshot = await response.json();
         useResearchTreeStore.getState().setSnapshot(snapshot);
         setTreeError(null);
+        // Allow rendering only when there is at least one node
+        setCanRenderTree(Boolean(snapshot?.data?.nodes?.length));
       } catch (error) {
         console.error("Failed to fetch research tree:", error);
         setTreeError(
@@ -112,13 +118,14 @@ export default function ResearchTab() {
             ? error.message
             : "Failed to fetch research tree",
         );
+        setCanRenderTree(false);
       } finally {
         if (showSpinner) {
-          setLoading(false);
+          useResearchTreeStore.getState().setLoading(false);
         }
       }
     },
-    [experimentId, setLoading],
+    [experimentId], // Only depend on experimentId
   );
 
   const fetchStatus = useCallback(async () => {
@@ -144,6 +151,7 @@ export default function ResearchTab() {
         setExperimentStatus("idle");
         setStatusError(null);
         clearStatusPolling();
+        setCanRenderTree(false);
       } else {
         const message =
           error instanceof Error ? error.message : "Failed to fetch status";
@@ -161,6 +169,7 @@ export default function ResearchTab() {
     }
 
     useResearchTreeStore.getState().setExperimentId(experimentId);
+    setCanRenderTree(false);
     fetchTreeSnapshot(true);
     fetchStatus();
   }, [experimentId, fetchTreeSnapshot, fetchStatus]);
@@ -334,9 +343,20 @@ export default function ResearchTab() {
       )}
 
       <div className="flex-1 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
-        <ReactFlowProvider>
-          <ResearchTreeView />
-        </ReactFlowProvider>
+        {canRenderTree ? (
+          <ReactFlowProvider>
+            <ResearchErrorBoundary>
+              <ResearchTreeView />
+            </ResearchErrorBoundary>
+          </ReactFlowProvider>
+        ) : (
+          <div className="flex h-full items-center justify-center text-slate-400">
+            <div className="text-center space-y-2">
+              <div className="text-lg">No research data available</div>
+              <div className="text-xs">Start or resume the experiment to see the tree</div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

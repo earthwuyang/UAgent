@@ -14,6 +14,12 @@ RESEARCH_MAX_ITERATIONS = int(os.getenv('RESEARCH_MAX_ITERATIONS', '50'))
 RESEARCH_MAX_COST = float(os.getenv('RESEARCH_MAX_COST', '10.0'))
 RESEARCH_MAX_PARALLEL = int(os.getenv('RESEARCH_MAX_PARALLEL', '3'))
 
+# Agent coordination configuration
+# Coordinators should stay responsive while research runs in background
+ENABLE_AGENT_COORDINATION = os.getenv('ENABLE_AGENT_COORDINATION', 'true').lower() == 'true'
+RESEARCH_POLL_INTERVAL = int(os.getenv('RESEARCH_POLL_INTERVAL', '10'))
+PROGRESS_CACHE_TTL = float(os.getenv('PROGRESS_CACHE_TTL', '2.0'))
+
 # To disable automatic research triggering:
 # export ENABLE_AUTO_RESEARCH_TRIGGER=false
 

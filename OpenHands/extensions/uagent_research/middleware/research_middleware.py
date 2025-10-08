@@ -13,6 +13,7 @@ Phase 3 Enhancement:
 import asyncio
 import logging
 import re
+import time
 from typing import Optional, Dict, Any, Tuple
 
 from ..classifier.task_classifier import task_classifier, TaskType
@@ -20,11 +21,20 @@ from ..orchestrator.tree_orchestrator import TreeSearchOrchestrator
 from ..uagent_research.models.research_tree import Budget
 
 try:
-    from ..config import ENABLE_AUTO_RESEARCH_TRIGGER, RESEARCH_CONFIDENCE_THRESHOLD
+    from ..config import (
+        ENABLE_AUTO_RESEARCH_TRIGGER,
+        ENABLE_AGENT_COORDINATION,
+        RESEARCH_CONFIDENCE_THRESHOLD,
+        RESEARCH_POLL_INTERVAL,
+        PROGRESS_CACHE_TTL,
+    )
 except ImportError:
     # Fallback if config not available
     ENABLE_AUTO_RESEARCH_TRIGGER = False
+    ENABLE_AGENT_COORDINATION = True
     RESEARCH_CONFIDENCE_THRESHOLD = 0.7
+    RESEARCH_POLL_INTERVAL = 10
+    PROGRESS_CACHE_TTL = 2.0
 
 # Enforce single-goal per conversation: do not auto-trigger new research from chat
 SINGLE_GOAL_MODE = True
@@ -63,6 +73,9 @@ class ResearchMiddleware:
         confidence_threshold: float = 0.7,
         enable_auto_trigger: bool = True,
         session_manager: Optional['ResearchSessionManager'] = None,
+        poll_interval: float = 10.0,
+        progress_cache_ttl: float = 2.0,
+        coordination_enabled: bool = True,
     ):
         """
         Initialize research middleware.
@@ -74,12 +87,18 @@ class ResearchMiddleware:
         """
         self.confidence_threshold = confidence_threshold
         self.enable_auto_trigger = enable_auto_trigger
-        self.active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
+        self.active_orchestrators: Dict[str, Dict[str, Any]] = {}
         # Track goal by session for single-goal mode
         self._session_goal: Dict[str, str] = {}
 
         # Session manager for progress queries
         self._session_manager = session_manager
+
+        # Coordination / polling configuration
+        self.poll_interval = poll_interval
+        self.coordination_enabled = coordination_enabled
+        self._progress_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        self._progress_cache_ttl = progress_cache_ttl
 
         # Progress query patterns
         self.progress_patterns = [
@@ -152,6 +171,23 @@ class ResearchMiddleware:
                 logger.error(f"Failed to create session manager: {e}")
         return self._session_manager
 
+    def get_active_experiment_for_session(self, session_id: str) -> Optional[str]:
+        """Return the active experiment id for the provided session, if any."""
+        for experiment_id, metadata in self.active_orchestrators.items():
+            if isinstance(metadata, dict) and metadata.get('session_id') == session_id:
+                return experiment_id
+
+        # Fallback heuristic: experiment identifiers prefixed with exp_{session_id}_
+        for experiment_id in self.active_orchestrators.keys():
+            if experiment_id.startswith(f"exp_{session_id}_"):
+                return experiment_id
+
+        return None
+
+    def is_research_active(self, session_id: str) -> bool:
+        """Check whether the given session currently has active research."""
+        return self.get_active_experiment_for_session(session_id) is not None
+
     def detect_progress_query(self, message: str) -> bool:
         """
         Detect if message is asking about research progress.
@@ -213,17 +249,8 @@ class ResearchMiddleware:
                 'message': 'Progress tracking not available (session manager not initialized)'
             }
 
-        # Get all active experiments for this session
-        # For now, we assume experiment_id follows pattern: exp_{session_id}_...
-        # In production, we'd query the database for active experiments
-
         try:
-            # Try to find active experiment for this session
-            experiment_id = None
-            for exp_id in list(self.active_orchestrators.keys()):
-                if session_id in exp_id:
-                    experiment_id = exp_id
-                    break
+            experiment_id = self.get_active_experiment_for_session(session_id)
 
             if not experiment_id:
                 return {
@@ -232,8 +259,14 @@ class ResearchMiddleware:
                     'message': 'No active research found for this session'
                 }
 
-            # Get status from session manager
-            status = session_mgr.get_status(experiment_id)
+            # Use cached progress when available and fresh
+            now = time.time()
+            cached = self._progress_cache.get(experiment_id)
+            if cached and (now - cached[1]) <= self._progress_cache_ttl:
+                status = cached[0]
+            else:
+                status = session_mgr.get_status(experiment_id)
+                self._progress_cache[experiment_id] = (status, now)
 
             # Format user-friendly summary
             summary = self._format_progress_summary(status)
@@ -342,11 +375,7 @@ class ResearchMiddleware:
             }
 
         # Find active experiment for session
-        experiment_id = None
-        for exp_id in list(self.active_orchestrators.keys()):
-            if session_id in exp_id:
-                experiment_id = exp_id
-                break
+        experiment_id = self.get_active_experiment_for_session(session_id)
 
         if not experiment_id:
             return {
@@ -356,6 +385,16 @@ class ResearchMiddleware:
             }
 
         try:
+            # Validate experiment is registered in session manager before sending commands
+            try:
+                session_mgr.get_status(experiment_id)
+            except KeyError:
+                return {
+                    'type': 'control_intent',
+                    'status': 'not_tracked',
+                    'message': 'Experiment is not currently tracked; control unavailable'
+                }
+
             # Create control message
             control_msg = ControlMessage(
                 action=action,
@@ -366,12 +405,21 @@ class ResearchMiddleware:
 
             # Send control command
             await session_mgr.send_control(experiment_id, control_msg)
+            logger.info(
+                "Control intent routed",
+                extra={
+                    'experiment_id': experiment_id,
+                    'action': action,
+                    'target': target,
+                }
+            )
 
             # Handle terminal actions
             if action == 'cancel':
                 # Remove from active orchestrators
                 if experiment_id in self.active_orchestrators:
                     del self.active_orchestrators[experiment_id]
+                self._progress_cache.pop(experiment_id, None)
 
             return {
                 'type': 'control_intent',
@@ -714,6 +762,7 @@ class ResearchMiddleware:
             # Cleanup
             if experiment_id in self.active_orchestrators:
                 del self.active_orchestrators[experiment_id]
+            self._progress_cache.pop(experiment_id, None)
             if session_mgr:
                 try:
                     session_mgr.unregister(experiment_id)
@@ -744,6 +793,7 @@ class ResearchMiddleware:
             orchestrator.cancel()
             del self.active_orchestrators[experiment_id]
             logger.info(f"Cancelled research: {experiment_id}")
+            self._progress_cache.pop(experiment_id, None)
             return True
         return False
 
@@ -754,4 +804,7 @@ class ResearchMiddleware:
 research_middleware = ResearchMiddleware(
     confidence_threshold=RESEARCH_CONFIDENCE_THRESHOLD,
     enable_auto_trigger=ENABLE_AUTO_RESEARCH_TRIGGER,
+    poll_interval=RESEARCH_POLL_INTERVAL,
+    progress_cache_ttl=PROGRESS_CACHE_TTL,
+    coordination_enabled=ENABLE_AGENT_COORDINATION,
 )

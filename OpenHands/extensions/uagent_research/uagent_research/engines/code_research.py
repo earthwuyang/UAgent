@@ -5,6 +5,7 @@ Adapted for OpenHands integration with RepoMaster capabilities.
 """
 
 import logging
+import uuid
 import json
 import re
 from typing import Dict, List, Any, Optional
@@ -16,6 +17,8 @@ from openhands.runtime.runtime import Runtime
 from openhands.events.stream import EventStream
 from openhands.events.action import CmdRunAction
 from openhands.events.observation import CmdOutputObservation
+from ...orchestrator.event_bus import EventBus, get_event_bus
+from ...uagent_research.models.events import StepEvent, CompleteEvent, ErrorEvent
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ class CodeResearchEngine:
     - Function/class search
     """
 
-    def __init__(self, llm: LLM, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, llm: LLM, config: Optional[Dict[str, Any]] = None, event_bus: Optional[EventBus] = None):
         """
         Initialize code research engine.
 
@@ -41,6 +44,7 @@ class CodeResearchEngine:
             config: Optional configuration
         """
         self.llm = llm
+        self.event_bus = event_bus or get_event_bus()
         self.config = config or {}
 
         self.max_repo_size_gb = self.config.get('max_repo_size_gb', 10)
@@ -54,6 +58,7 @@ class CodeResearchEngine:
         workspace: str,
         runtime: Runtime,
         event_stream: Optional[EventStream] = None,
+        branch_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Analyze code repository to answer query.
@@ -75,32 +80,75 @@ class CodeResearchEngine:
         if not workspace_path.exists():
             raise ValueError(f"Workspace does not exist: {workspace}")
 
-        # Phase 1: Understand repository structure
-        structure = await self._analyze_structure(workspace_path, runtime)
+        bid = branch_id or f"code_research_{uuid.uuid4().hex[:8]}"
 
-        # Phase 2: Find relevant files
-        relevant_files = await self._find_relevant_files(
-            query, structure, workspace_path, runtime
-        )
+        try:
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Analyzing repository structure",
+                    reasoning="Inspecting files and directories",
+                )
+            )
+            structure = await self._analyze_structure(workspace_path, runtime)
 
-        # Phase 3: Analyze relevant code
-        code_analysis = await self._analyze_code(
-            query, relevant_files, workspace_path, runtime
-        )
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Finding relevant files",
+                    reasoning="Searching for files matching the query",
+                )
+            )
+            relevant_files = await self._find_relevant_files(
+                query, structure, workspace_path, runtime
+            )
 
-        # Phase 4: Synthesize answer
-        answer = await self._synthesize_answer(
-            query, structure, relevant_files, code_analysis
-        )
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Analyzing code",
+                    reasoning="Reviewing candidate files for insights",
+                )
+            )
+            code_analysis = await self._analyze_code(
+                query, relevant_files, workspace_path, runtime
+            )
 
-        return {
-            'query': query,
-            'workspace': workspace,
-            'structure': structure,
-            'relevant_files': relevant_files,
-            'code_analysis': code_analysis,
-            'answer': answer,
-        }
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Synthesizing answer",
+                    reasoning="Generating comprehensive answer from analysis",
+                )
+            )
+            answer = await self._synthesize_answer(
+                query, structure, relevant_files, code_analysis
+            )
+
+            await self.event_bus.publish(
+                CompleteEvent(
+                    branch_id=bid,
+                    summary=answer[:200],
+                    artifacts=[],
+                )
+            )
+
+            return {
+                "query": query,
+                "workspace": workspace,
+                "structure": structure,
+                "relevant_files": relevant_files,
+                "code_analysis": code_analysis,
+                "answer": answer,
+            }
+        except Exception as e:
+            await self.event_bus.publish(
+                ErrorEvent(
+                    branch_id=bid,
+                    message=str(e),
+                )
+            )
+            raise
 
     async def _analyze_structure(
         self,

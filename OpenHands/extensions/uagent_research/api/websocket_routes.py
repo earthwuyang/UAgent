@@ -56,24 +56,31 @@ class ConnectionManager:
             message: The message dict to send (will be JSON-encoded)
             experiment_id: The experiment to broadcast to
         """
-        if experiment_id not in self.active_connections:
-            logger.debug(f"No active connections for experiment {experiment_id}")
-            return
+        targets: Dict[str, Set[WebSocket]]
+        if experiment_id == "*":
+            if not self.active_connections:
+                logger.debug("No active connections for wildcard broadcast")
+                return
+            targets = dict(self.active_connections)
+        else:
+            if experiment_id not in self.active_connections:
+                logger.debug(f"No active connections for experiment {experiment_id}")
+                return
+            targets = {experiment_id: self.active_connections[experiment_id]}
 
-        # Get connections before iterating (avoid modification during iteration)
-        connections = list(self.active_connections[experiment_id])
-        disconnected = []
+        for target_id, websockets in list(targets.items()):
+            connections = list(websockets)
+            disconnected = []
 
-        for connection in connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error sending to client: {e}")
-                disconnected.append(connection)
+            for connection in connections:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error(f"Error sending to client: {e}")
+                    disconnected.append(connection)
 
-        # Clean up disconnected clients
-        for connection in disconnected:
-            self.disconnect(connection, experiment_id)
+            for connection in disconnected:
+                self.disconnect(connection, target_id)
 
 
 # Global connection manager instance

@@ -396,10 +396,6 @@ class ResearchSessionManager:
                 branch.status = 'failed'
                 branch.progress = getattr(event, 'message', branch.progress)
 
-            # Remove completed/failed branches from active list
-            if branch.status in {'complete', 'failed'}:
-                state.active_branches = [b for b in state.active_branches if b.status == 'running']
-
         # Update node statistics
         if hasattr(event, 'node_id'):
             # Would need to query orchestrator's tree for accurate counts

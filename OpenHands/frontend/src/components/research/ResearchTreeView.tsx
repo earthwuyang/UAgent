@@ -4,7 +4,7 @@
  * ReactFlow-based visualization of the research tree with enhanced controls and filters.
  */
 
-import React, { useMemo, useCallback, useEffect, useState } from 'react';
+import React, { useMemo, useCallback, useState, useRef, useEffect } from 'react';
 import ReactFlow, {
   Node,
   Edge,
@@ -38,7 +38,31 @@ const nodeTypes: NodeTypes = {
   researchNode: ResearchNode,
 };
 
+// Stable layout function - uses JSON.stringify to create stable cache keys
+const layoutCache = new Map<string, { nodes: Node[]; edges: Edge[] }>();
+
 const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
+  // Create a stable cache key based on node IDs and positions
+  const cacheKey = JSON.stringify({
+    nodeIds: nodes.map(n => n.id).sort(),
+    edgeIds: edges.map(e => `${e.source}-${e.target}`).sort(),
+  });
+
+  // Return cached result if available
+  if (layoutCache.has(cacheKey)) {
+    const cached = layoutCache.get(cacheKey)!;
+    // Return nodes and edges with updated data but same positions
+    return {
+      nodes: nodes.map((node, idx) => ({
+        ...node,
+        position: cached.nodes[idx]?.position || node.position,
+        targetPosition: Position.Top,
+        sourcePosition: Position.Bottom,
+      })),
+      edges,
+    };
+  }
+
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
   dagreGraph.setGraph({ rankdir: 'TB', ranksep: 120, nodesep: 100 });
@@ -66,7 +90,16 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
     };
   });
 
-  return { nodes: layoutedNodes, edges };
+  const result = { nodes: layoutedNodes, edges };
+  
+  // Cache the result (limit cache size)
+  if (layoutCache.size > 50) {
+    const firstKey = layoutCache.keys().next().value;
+    layoutCache.delete(firstKey);
+  }
+  layoutCache.set(cacheKey, result);
+
+  return result;
 };
 
 const filterOptions = {
@@ -131,7 +164,8 @@ export function ResearchTreeView() {
 
   const { fitView, zoomIn, zoomOut } = useReactFlow();
 
-  const { nodes, edges } = useMemo(() => {
+  // Memoize the raw flow nodes and edges to prevent unnecessary re-layouts
+  const { rawNodes, rawEdges } = useMemo(() => {
     const flowNodes: Node[] = Array.from(storeNodes.values()).map((node) => {
       const isMatch = filteredIds.has(node.id);
       const isFilteredOut = hasFilters && !isMatch;
@@ -176,8 +210,13 @@ export function ResearchTreeView() {
       };
     });
 
-    return getLayoutedElements(flowNodes, flowEdges);
+    return { rawNodes: flowNodes, rawEdges: flowEdges };
   }, [storeNodes, storeEdges, selectedNodeId, filteredIds, hasFilters]);
+
+  // Apply layout only when structure changes
+  const { nodes, edges } = useMemo(() => {
+    return getLayoutedElements(rawNodes, rawEdges);
+  }, [rawNodes, rawEdges]);
 
   const onNodeClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
@@ -190,23 +229,6 @@ export function ResearchTreeView() {
     selectNode(null);
   }, [selectNode]);
 
-  useEffect(() => {
-    if (nodes.length > 0) {
-      const timeout = window.setTimeout(() => {
-        fitView({ padding: 0.2, duration: 500 });
-      }, 120);
-      return () => window.clearTimeout(timeout);
-    }
-
-    return undefined;
-  }, [nodes, fitView]);
-
-  useEffect(() => {
-    if (hasFilters && filteredNodes.length > 0) {
-      fitView({ padding: 0.3, duration: 400 });
-    }
-  }, [hasFilters, filteredNodes, fitView]);
-
   const handleClearFilters = useCallback(() => {
     clearFilters();
   }, [clearFilters]);
@@ -214,6 +236,19 @@ export function ResearchTreeView() {
   const handleFitView = useCallback(() => {
     fitView({ padding: 0.2, duration: 400 });
   }, [fitView]);
+
+  // Auto-fit only once when nodes first load
+  const hasAutoFitted = useRef(false);
+  useEffect(() => {
+    if (nodes.length > 0 && !hasAutoFitted.current) {
+      const timeout = window.setTimeout(() => {
+        fitView({ padding: 0.2, duration: 500 });
+        hasAutoFitted.current = true;
+      }, 150);
+      return () => window.clearTimeout(timeout);
+    }
+    return undefined;
+  }, [nodes.length, fitView]);
 
   return (
     <div className="research-tree-view">
@@ -223,7 +258,7 @@ export function ResearchTreeView() {
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
-        fitView
+        fitView={false}
         minZoom={0.1}
         maxZoom={2}
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}

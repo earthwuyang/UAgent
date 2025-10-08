@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from sqlalchemy import select as sql_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -110,6 +110,19 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
         # Store orchestrator
         _active_orchestrators[experiment_id] = orchestrator
 
+        # Register with session manager
+        session_mgr = get_session_manager()
+        if session_mgr:
+            try:
+                session_mgr.register(
+                    experiment_id=experiment_id,
+                    orchestrator=orchestrator,
+                    ws_publisher=None  # WebSocket publisher if available
+                )
+                logger.info(f"Registered experiment {experiment_id} with session manager")
+            except Exception as e:
+                logger.warning(f"Failed to register with session manager: {e}")
+
         # Update experiment status to RUNNING
         async for db_session in get_session():
             result = await db_session.execute(
@@ -133,6 +146,14 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
 
         logger.info(f"Experiment {experiment_id} completed successfully")
 
+        # Update session manager status
+        session_mgr = get_session_manager()
+        if session_mgr:
+            try:
+                session_mgr.update_experiment_status(experiment_id, ExperimentStatus.COMPLETE)
+            except Exception as e:
+                logger.warning(f"Failed to update session manager status: {e}")
+
         # Update experiment status to COMPLETE
         async for db_session in get_session():
             result = await db_session.execute(
@@ -152,6 +173,14 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
     except Exception as e:
         logger.error(f"Experiment {experiment_id} failed: {e}", exc_info=True)
 
+        # Update session manager status
+        session_mgr = get_session_manager()
+        if session_mgr:
+            try:
+                session_mgr.update_experiment_status(experiment_id, ExperimentStatus.FAILED)
+            except Exception as e_mgr:
+                logger.warning(f"Failed to update session manager status: {e_mgr}")
+
         # Update experiment status to FAILED
         try:
             async for db_session in get_session():
@@ -169,6 +198,15 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
             logger.error(f"Failed to update experiment status: {db_error}")
 
     finally:
+        # Unregister from session manager
+        session_mgr = get_session_manager()
+        if session_mgr:
+            try:
+                session_mgr.unregister(experiment_id)
+                logger.info(f"Unregistered experiment {experiment_id} from session manager")
+            except Exception as e:
+                logger.warning(f"Failed to unregister from session manager: {e}")
+
         # Cleanup orchestrator
         _active_orchestrators.pop(experiment_id, None)
 
@@ -745,6 +783,110 @@ async def get_experiment_tree(
         )
 
 
+# Pydantic models for control action validation
+from typing import Literal, Union, Annotated
+
+class PauseRequest(BaseModel):
+    """Pause experiment execution."""
+    action: Literal["pause"] = "pause"
+
+
+class ResumeRequest(BaseModel):
+    """Resume paused experiment."""
+    action: Literal["resume"] = "resume"
+
+
+class CancelRequest(BaseModel):
+    """Cancel entire experiment."""
+    action: Literal["cancel"] = "cancel"
+
+
+class CancelNodeRequest(BaseModel):
+    """Cancel specific node in research tree."""
+    action: Literal["cancel_node"] = "cancel_node"
+    target: Dict[str, str] = Field(..., description="Must contain 'node_id'")
+    
+    @validator('target')
+    def validate_target(cls, v):
+        if 'node_id' not in v:
+            raise ValueError("target must contain 'node_id'")
+        return v
+
+
+class ReprioritizeRequest(BaseModel):
+    """Reprioritize nodes by adapter or type."""
+    action: Literal["reprioritize"] = "reprioritize"
+    target: Dict[str, str] = Field(..., description="Must contain 'adapter' or 'node_type'")
+    payload: Dict[str, Any] = Field(..., description="Must contain 'delta' (float)")
+    
+    @validator('target')
+    def validate_target(cls, v):
+        if 'adapter' not in v and 'node_type' not in v:
+            raise ValueError("target must contain 'adapter' or 'node_type'")
+        return v
+    
+    @validator('payload')
+    def validate_payload(cls, v):
+        if 'delta' not in v:
+            raise ValueError("payload must contain 'delta'")
+        if not isinstance(v['delta'], (int, float)):
+            raise ValueError("delta must be a number")
+        return v
+
+
+class SteerRequest(BaseModel):
+    """Send guidance text to adapter."""
+    action: Literal["steer"] = "steer"
+    target: Dict[str, str] = Field(..., description="Must contain 'node_id', 'branch_id', or 'adapter'")
+    payload: Dict[str, Any] = Field(..., description="Must contain 'text'")
+    
+    @validator('target')
+    def validate_target(cls, v):
+        if not any(k in v for k in ['node_id', 'branch_id', 'adapter']):
+            raise ValueError("target must contain 'node_id', 'branch_id', or 'adapter'")
+        return v
+    
+    @validator('payload')
+    def validate_payload(cls, v):
+        if 'text' not in v or not v['text']:
+            raise ValueError("payload must contain non-empty 'text'")
+        return v
+
+
+class AddNodeRequest(BaseModel):
+    """Add new research direction to tree."""
+    action: Literal["add_node"] = "add_node"
+    payload: Dict[str, Any] = Field(..., description="Must contain 'parent_id' and 'node'")
+    
+    @validator('payload')
+    def validate_payload(cls, v):
+        if 'parent_id' not in v:
+            raise ValueError("payload must contain 'parent_id'")
+        if 'node' not in v:
+            raise ValueError("payload must contain 'node' dict")
+        node = v['node']
+        if not isinstance(node, dict):
+            raise ValueError("'node' must be a dict")
+        if 'type' not in node or 'title' not in node or 'content' not in node:
+            raise ValueError("node must contain 'type', 'title', and 'content'")
+        return v
+
+
+# Discriminated union for type-safe request parsing
+ControlActionRequest = Annotated[
+    Union[
+        PauseRequest,
+        ResumeRequest,
+        CancelRequest,
+        CancelNodeRequest,
+        ReprioritizeRequest,
+        SteerRequest,
+        AddNodeRequest
+    ],
+    Field(discriminator='action')
+]
+
+
 class ExperimentControlRequest(BaseModel):
     """Experiment control request"""
     action: str  # pause, resume, cancel, cancel_node, reprioritize, steer, add_node
@@ -755,11 +897,11 @@ class ExperimentControlRequest(BaseModel):
 @router.patch("/experiments/{experiment_id}")
 async def control_experiment(
     experiment_id: str,
-    request: ExperimentControlRequest,
+    request: ControlActionRequest,
     session: AsyncSession = Depends(get_session)
 ):
     """
-    Control experiment execution.
+    Control experiment execution with comprehensive validation.
 
     Supported actions:
     - pause: Pause research (stop scheduling new nodes)
@@ -769,7 +911,21 @@ async def control_experiment(
     - reprioritize: Adjust priorities (requires target and payload.delta)
     - steer: Send guidance to adapter (requires target and payload.text)
     - add_node: Add new research direction (requires payload.parent_id and payload.node)
+    
+    Args:
+        experiment_id: Experiment ID
+        request: Control action request
+        session: Database session
+    
+    Returns:
+        Success response with acknowledgment
+    
+    Raises:
+        HTTPException: 400 (invalid action), 404 (not found), 409 (invalid state), 500 (error)
     """
+    # Type-based validation (Pydantic validators already enforce action-specific constraints)
+    # No manual validation needed - discriminated union handles it automatically
+    
     # Check experiment exists
     result = await session.execute(
         sql_select(Experiment).where(Experiment.id == experiment_id)
@@ -787,8 +943,8 @@ async def control_experiment(
         try:
             control_msg = ControlMessage(
                 action=request.action,
-                target=request.target or {},
-                payload=request.payload or {},
+                target=getattr(request, 'target', None) or {},
+                payload=getattr(request, 'payload', None) or {},
                 sender="api"
             )
 
@@ -805,7 +961,8 @@ async def control_experiment(
                 "status": "acknowledged",
                 "experiment_id": experiment_id,
                 "action": request.action,
-                "message": f"Control command '{request.action}' sent successfully"
+                "message": f"Control command '{request.action}' sent successfully",
+                "timestamp": datetime.utcnow().isoformat()
             }
 
         except Exception as e:
@@ -840,14 +997,62 @@ async def get_experiment_status(
     """
     Get real-time experiment status with detailed progress information.
 
+    This endpoint returns comprehensive status including:
+    - Overall experiment status (running/paused/complete/failed)
+    - Node statistics (total, completed, failed, running, pending)
+    - Per-adapter status with current steps and costs
+    - Active branches with progress details
+    - Timestamps for creation and last update
+
+    The status is sourced from ResearchSessionManager when available,
+    which provides real-time updates. Falls back to database if the
+    experiment is not actively tracked.
+
+    Args:
+        experiment_id: Unique experiment identifier
+        session: Database session
+
     Returns:
-        - experiment_id: Experiment ID
-        - status: Current status (running/paused/complete/failed)
-        - stats: Node statistics (total, completed, failed, running, etc.)
-        - adapters: Status of each adapter
-        - active_branches: Currently running branches
-        - created_at: Creation timestamp
-        - last_update: Last status update timestamp
+        Detailed status dictionary with stats and adapter info
+
+    Raises:
+        HTTPException: 404 if experiment not found
+
+    Example Response:
+        {
+            "experiment_id": "exp_123",
+            "status": "running",
+            "stats": {
+                "total_nodes": 10,
+                "completed": 5,
+                "failed": 1,
+                "running": 4,
+                "pending": 0,
+                "total_cost": 0.25,
+                "total_tokens": 5000
+            },
+            "adapters": {
+                "deepresearch": {
+                    "status": "running",
+                    "current_step": "Browsing docs...",
+                    "last_event": "2025-01-06T10:30:00",
+                    "cost": 0.05,
+                    "tokens": 1200
+                }
+            },
+            "active_branches": [
+                {
+                    "branch_id": "idea-0-hyp-0",
+                    "title": "Test using pgvector",
+                    "adapter": "codeact",
+                    "status": "running",
+                    "progress": "Running tests...",
+                    "cost": 0.10
+                }
+            ],
+            "created_at": "2025-01-06T10:00:00",
+            "last_update": "2025-01-06T10:30:05"
+        }
     """
     # Check experiment exists
     result = await session.execute(
@@ -899,11 +1104,55 @@ async def get_experiment_events(
     limit: int = 100,
     session: AsyncSession = Depends(get_session)
 ):
+    # Validate query parameters
+    if since_version < 0:
+        raise HTTPException(400, "since_version must be non-negative")
+    if limit < 1 or limit > 1000:
+        raise HTTPException(400, "limit must be between 1 and 1000")
+
     """
     Get experiment events since version (incremental fetch fallback to WebSocket).
 
-    This is a fallback for when WebSocket is not available.
-    In production, events would be stored in a database or event log.
+    This endpoint provides event history for an experiment, with versioning
+    for incremental updates. Events are stored in-memory by EventBus with
+    a maximum of 1000 events per experiment (older events may be dropped).
+
+    Args:
+        experiment_id: Experiment ID
+        since_version: Only return events after this version number (0-based, default: 0)
+        limit: Maximum number of events to return (1-1000, default: 100)
+        session: Database session
+
+    Returns:
+        Dictionary with:
+        - events: List of event dicts with version, timestamp, type, data
+        - since_version: The version filter applied
+        - current_version: Latest version number
+        - earliest_available_version: Oldest version still in buffer (may be > 1 if events dropped)
+        - has_more: True if more events available beyond limit
+        - has_gap: True if requested since_version < earliest_available_version (data loss)
+
+    Raises:
+        HTTPException: 400 if invalid parameters, 404 if experiment not found
+
+    Example Response:
+        {
+            "experiment_id": "exp_123",
+            "since_version": 10,
+            "current_version": 25,
+            "earliest_available_version": 1,
+            "events": [
+                {
+                    "version": 11,
+                    "timestamp": "2025-01-06T10:25:00",
+                    "type": "STEP",
+                    "branch_id": "exp_123-idea-0",
+                    "data": {...}
+                }
+            ],
+            "has_more": false,
+            "has_gap": false
+        }
     """
     # Check experiment exists
     result = await session.execute(
@@ -914,10 +1163,33 @@ async def get_experiment_events(
     if not experiment:
         raise HTTPException(404, f"Experiment {experiment_id} not found")
 
-    # TODO: Implement event storage and retrieval
-    # For now, return empty list
-    return {
-        "events": [],
-        "current_version": since_version,
-        "has_more": False
-    }
+    # Get event bus
+    try:
+        event_bus = get_event_bus()
+        
+        # Retrieve events from EventBus
+        result = event_bus.get_events(experiment_id, since_version, limit)
+        
+        return {
+            "experiment_id": experiment_id,
+            "since_version": since_version,
+            "current_version": result["current_version"],
+            "earliest_available_version": result.get("earliest_available_version", 0),
+            "events": result["events"],
+            "has_more": result["has_more"],
+            "has_gap": result.get("has_gap", False)
+        }
+    
+    except Exception as e:
+        logger.warning(f"Error retrieving events from EventBus: {e}")
+        # Fallback: return empty events with warning
+        return {
+            "experiment_id": experiment_id,
+            "since_version": since_version,
+            "current_version": 0,
+            "earliest_available_version": 0,
+            "events": [],
+            "has_more": False,
+            "has_gap": False,
+            "warning": "Event bus not available, no events retrieved"
+        }

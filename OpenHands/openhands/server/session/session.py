@@ -126,6 +126,7 @@ class WebSession:
             self._monitor_publish_queue()
         )
         self._wait_websocket_initial_complete: bool = True
+        self._last_progress_broadcast: float = 0.0
 
     async def close(self) -> None:
         if self.sio:
@@ -366,48 +367,77 @@ class WebSession:
     async def dispatch(self, data: dict) -> None:
         event = event_from_dict(data.copy())
 
-        # Check if research should be triggered for this message
-        research_mode_active = False
+        result: dict | None = None
         if RESEARCH_MIDDLEWARE_AVAILABLE and isinstance(event, MessageAction) and event.content:
             try:
                 result = await research_middleware.process_message(
                     user_message=event.content,
                     session_id=self.sid,
-                    conversation_metadata={'source': 'subsequent_message'}
+                    conversation_metadata={'source': 'subsequent_message'},
                 )
 
                 if result.get('should_trigger_research'):
-                    research_mode_active = True
                     self.logger.info(
-                        f"Research mode triggered for message in conversation {self.sid}",
+                        "Research mode triggered",
                         extra={
+                            'session_id': self.sid,
                             'task_type': result.get('task_type'),
                             'confidence': result.get('confidence'),
                             'experiment_id': result.get('experiment_id'),
-                        }
+                        },
                     )
 
-                    # Store experiment_id for frontend access
-                    if result.get('status') == 'research_started':
-                        experiment_id = result.get('experiment_id', 'N/A')
-                        self.active_research_experiment_id = experiment_id
+                    experiment_id = result.get('experiment_id', 'N/A')
+                    self.active_research_experiment_id = experiment_id
+                    self._last_progress_broadcast = 0.0
 
-                        # Start progress reporting task
-                        if self._progress_reporter_task is None or self._progress_reporter_task.done():
-                            self._progress_reporter_task = asyncio.create_task(
-                                self._report_research_progress()
-                            )
-
-                        research_info = (
-                            f"\n\n[System: Research mode activated - "
-                            f"Experiment ID: {experiment_id}, "
-                            f"Confidence: {result.get('confidence', 0):.2f}. "
-                            f"Check the Research Tree tab for progress.]"
+                    if self._progress_reporter_task is None or self._progress_reporter_task.done():
+                        self._progress_reporter_task = asyncio.create_task(
+                            self._report_research_progress()
                         )
-                        event.content += research_info
-            except Exception as e:
-                self.logger.error(f"Failed to process research middleware: {str(e)}", exc_info=True)
-                # Continue with normal message processing
+
+                    research_info = (
+                        "\n\n[System: Research mode activated - "
+                        f"Experiment ID: {experiment_id}, "
+                        f"Confidence: {result.get('confidence', 0):.2f}. "
+                        "Check the Research Tree tab for live progress.]"
+                    )
+                    event.content += research_info
+
+            except Exception:
+                self.logger.error(
+                    "Failed to process research middleware", exc_info=True
+                )
+                result = None
+
+        mode = result.get('mode') if isinstance(result, dict) else None
+
+        if mode == 'progress_query':
+            summary = (
+                result.get('progress_data', {}).get('summary')
+                if isinstance(result, dict)
+                else None
+            ) or 'No active research found for this conversation.'
+            self.agent_session.event_stream.add_event(
+                MessageAction(content=summary),
+                EventSource.AGENT,
+            )
+            controller = self.agent_session.controller
+            if controller is not None:
+                await controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+            return
+
+        if mode == 'control_intent':
+            control_result = result.get('control_result', {}) if isinstance(result, dict) else {}
+            message = control_result.get('message') or 'Control command processed.'
+            self.agent_session.event_stream.add_event(
+                MessageAction(content=message),
+                EventSource.AGENT,
+            )
+            controller = self.agent_session.controller
+            if controller is not None:
+                await controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+            return
 
         # This checks if the model supports images
         if isinstance(event, MessageAction) and event.image_urls:
@@ -424,36 +454,7 @@ class WebSession:
                     )
                     return
 
-        # Only dispatch to regular agent if research mode is NOT active
-        if not research_mode_active:
-            # Intercept research middleware special modes
-            try:
-                # We re-run lightweight detection to see if it's a progress/control request
-                from extensions.uagent_research.middleware.research_middleware import research_middleware
-                result = await research_middleware.process_message(
-                    user_message=event.content,
-                    session_id=self.sid,
-                    conversation_metadata={'source': 'subsequent_message'}
-                )
-                mode = result.get('mode')
-                if mode == 'progress_query':
-                    # Send a concise progress summary as an agent message
-                    summary = result.get('progress_data', {}).get('summary') or 'No active research found for this conversation.'
-                    self.agent_session.event_stream.add_event(
-                        MessageAction(content=summary),
-                        EventSource.AGENT,
-                    )
-                    # Set state to awaiting input and return
-                    if self.agent_session.controller is not None:
-                        await self.agent_session.controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
-                    return
-                # Fall-through: normal dispatch if not a progress/control request
-            except Exception:
-                # If extension not available or errors, continue normal flow
-                pass
-            self.agent_session.event_stream.add_event(event, EventSource.USER)
-        else:
-            self.logger.info(f"Blocking regular agent execution - research mode active for experiment {self.active_research_experiment_id}")
+        self.agent_session.event_stream.add_event(event, EventSource.USER)
 
     async def send(self, data: dict[str, object]) -> None:
         self._publish_queue.put_nowait(data)
@@ -503,16 +504,20 @@ class WebSession:
             return False
 
     async def _report_research_progress(self):
-        """Report research progress every 30 seconds while experiment is running."""
+        """Report research progress every 60 seconds while experiment is running."""
         try:
             while self.active_research_experiment_id and self.is_alive:
-                await asyncio.sleep(30)  # Report every 30 seconds
+                await asyncio.sleep(60)  # Backup heartbeat every 60 seconds
 
                 if not self.active_research_experiment_id:
                     break
 
                 # Get progress from middleware
                 if RESEARCH_MIDDLEWARE_AVAILABLE:
+                    controller = self.agent_session.controller
+                    if controller and getattr(controller.agent, '_coordination_mode', False):
+                        continue
+
                     orchestrator = research_middleware.get_orchestrator(self.active_research_experiment_id)
 
                     if orchestrator and hasattr(orchestrator, 'tree') and orchestrator.tree:
@@ -542,6 +547,10 @@ class WebSession:
                             f"Total Cost: ${total_cost:.3f}\n"
                         )
 
+                        now = time.time()
+                        if now - self._last_progress_broadcast < 60:
+                            continue
+
                         # Send progress message to frontend
                         observation = MessageAction(content=progress_msg)
                         event_dict = event_to_dict(observation)
@@ -549,10 +558,12 @@ class WebSession:
                         await self.send(event_dict)
 
                         self.logger.info(f"Research progress reported for experiment {self.active_research_experiment_id}: {total_nodes} nodes")
+                        self._last_progress_broadcast = now
                     else:
                         # Orchestrator finished or not found - stop reporting
                         self.logger.info(f"Research orchestrator not found or completed for {self.active_research_experiment_id}, stopping progress reports")
                         self.active_research_experiment_id = None
+                        self._last_progress_broadcast = 0.0
                         break
 
         except asyncio.CancelledError:

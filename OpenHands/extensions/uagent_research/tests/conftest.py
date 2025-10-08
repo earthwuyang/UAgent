@@ -280,7 +280,7 @@ def mock_llm_registry(mock_llm: MockLLM) -> MockLLMRegistry:
 def mock_control_bus():
     """Provide a ControlBus instance with automatic cleanup."""
 
-    from ..control.control_bus import ControlBus
+    from control.control_bus import ControlBus
 
     bus = ControlBus()
     try:
@@ -294,7 +294,7 @@ def mock_control_bus():
 async def mock_event_bus():
     """Provide an EventBus configured for deterministic tests."""
 
-    from ..orchestrator.event_bus import EventBus
+    from orchestrator.event_bus import EventBus
 
     class TestEventBus(EventBus):
         async def subscribe(
@@ -325,7 +325,7 @@ async def mock_event_bus():
 async def mock_research_session_manager(mock_event_bus, mock_control_bus):
     """Yield a ResearchSessionManager wired to mock buses."""
 
-    from ..services.research_session_manager import ResearchSessionManager
+    from services.research_session_manager import ResearchSessionManager
 
     manager = ResearchSessionManager(
         event_bus=mock_event_bus,
@@ -367,7 +367,7 @@ def mock_orchestrator():
 def sample_research_events():
     """Factory helpers for creating common research events."""
 
-    from ..uagent_research.models.events import (
+    from uagent_research.models.events import (
         StepEvent,
         CompleteEvent,
         ErrorEvent,
@@ -435,3 +435,132 @@ async def test_db() -> None:
         yield
     finally:
         await close_database()
+
+
+# ============================================================================
+# Research Middleware Test Fixtures
+# ============================================================================
+
+@pytest.fixture
+async def mock_middleware(mock_event_bus, mock_control_bus, mock_research_session_manager):
+    """Provide a ResearchMiddleware instance with mocked dependencies."""
+    from extensions.uagent_research.middleware.research_middleware import ResearchMiddleware
+    
+    middleware = ResearchMiddleware(
+        confidence_threshold=0.7,
+        enable_auto_trigger=False,  # Disable auto-trigger for controlled testing
+        session_manager=mock_research_session_manager,
+        poll_interval=10.0,
+        progress_cache_ttl=2.0,
+        coordination_enabled=True,
+    )
+    
+    yield middleware
+    
+    # Cleanup
+    middleware.active_orchestrators.clear()
+    middleware._session_goal.clear()
+    middleware._progress_cache.clear()
+
+
+@pytest.fixture
+def sample_status_data():
+    """Factory for creating sample status data for testing."""
+    
+    def create_status(
+        experiment_id: str = "exp-test",
+        status: str = "running",
+        total_nodes: int = 10,
+        completed: int = 5,
+        failed: int = 1,
+        running: int = 4,
+        total_cost: float = 0.25,
+        active_branches: list = None,
+        adapters: dict = None,
+    ):
+        return {
+            "experiment_id": experiment_id,
+            "status": status,
+            "stats": {
+                "total_nodes": total_nodes,
+                "completed": completed,
+                "failed": failed,
+                "running": running,
+                "pending": total_nodes - completed - failed - running,
+                "total_cost": total_cost,
+                "total_tokens": int(total_cost * 1000),
+            },
+            "adapters": adapters or {
+                "deepresearch": {
+                    "status": "running",
+                    "current_step": "Browsing documentation",
+                    "last_event": "2025-01-06T10:30:00",
+                    "cost": 0.05,
+                    "tokens": 1200,
+                },
+                "codeact": {
+                    "status": "running",
+                    "current_step": "Executing benchmark",
+                    "last_event": "2025-01-06T10:30:05",
+                    "cost": 0.15,
+                    "tokens": 3000,
+                },
+            },
+            "active_branches": active_branches or [
+                {
+                    "branch_id": "idea-0-hyp-0",
+                    "title": "Test using pgvector",
+                    "adapter": "codeact",
+                    "status": "running",
+                    "progress": "Running tests...",
+                    "cost": 0.10,
+                }
+            ],
+            "created_at": "2025-01-06T10:00:00",
+            "last_update": "2025-01-06T10:30:00",
+        }
+    
+    return create_status
+
+
+@pytest.fixture
+def mock_orchestrator_with_tree():
+    """Enhanced mock orchestrator with tree structure for testing."""
+    
+    class MockTree:
+        def __init__(self):
+            self.research_id = "test-research"
+            self.nodes = {}
+            self.stats = {
+                "total_nodes": 0,
+                "completed": 0,
+                "failed": 0,
+                "running": 0,
+            }
+    
+    class EnhancedMockOrchestrator:
+        def __init__(self):
+            self.tree = MockTree()
+            self.status = "running"
+            self.cancelled = False
+            self.paused = False
+            self._running_tasks = {}
+        
+        async def run(self, goal, context=None, max_iterations=10, research_id=None):
+            if research_id:
+                self.tree.research_id = research_id
+            return self.tree
+        
+        def cancel(self):
+            self.cancelled = True
+            for task in self._running_tasks.values():
+                if hasattr(task, 'cancel'):
+                    task.cancel()
+        
+        def pause(self):
+            self.paused = True
+        
+        def resume(self):
+            self.paused = False
+    
+    return EnhancedMockOrchestrator()

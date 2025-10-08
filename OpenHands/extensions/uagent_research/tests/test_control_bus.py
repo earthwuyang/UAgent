@@ -7,7 +7,12 @@ from typing import Iterable, List
 
 import pytest
 
-from ..control.control_bus import ControlBus, ControlMessage, get_control_bus
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from control.control_bus import ControlBus, ControlMessage, get_control_bus
 
 
 async def collect_messages(bus: ControlBus, experiment_id: str, count: int) -> List[ControlMessage]:
@@ -156,11 +161,12 @@ async def test_unsubscribe_cleanup():
     await bus.publish("exp-clean", ControlMessage(action="pause"))
     await asyncio.wait_for(task, timeout=5)
 
-    assert "exp-clean" in bus._subscribers or "exp-clean" in bus._active_experiments
+    assert bus.has_subscribers("exp-clean") or "exp-clean" in bus.get_stats()["experiments"]
     bus.unsubscribe_all("exp-clean")
-    assert "exp-clean" not in bus._subscribers
-    assert "exp-clean" not in bus._active_experiments
-    assert bus.get_stats()["active_subscriptions"] == 0
+    assert not bus.has_subscribers("exp-clean")
+    stats = bus.get_stats()
+    assert stats["active_subscriptions"] == 0
+    assert "exp-clean" not in stats["experiments"]
 
 
 @pytest.mark.asyncio
@@ -177,8 +183,10 @@ async def test_unsubscribe_all():
     bus.unsubscribe_all("exp-unsub")
     await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
 
-    assert "exp-unsub" not in bus._subscribers
-    assert "exp-unsub" not in bus._active_experiments
+    stats = bus.get_stats()
+    assert not bus.has_subscribers("exp-unsub")
+    assert "exp-unsub" not in stats["experiments"]
+    assert stats["active_subscriptions"] == 0
     assert bus.get_stats()["active_subscriptions"] == 0
 
 

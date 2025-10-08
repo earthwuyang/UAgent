@@ -5,7 +5,6 @@ This is a production implementation that integrates UAgent's scientific research
 capabilities with OpenHands' infrastructure.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -20,6 +19,8 @@ from enum import Enum
 from openhands.llm.llm import LLM
 from openhands.runtime.runtime import Runtime
 from openhands.events.stream import EventStream
+from ...orchestrator.event_bus import EventBus, get_event_bus
+from ...uagent_research.models.events import StepEvent, CompleteEvent, ErrorEvent
 from openhands.events.action import CmdRunAction, MessageAction
 from openhands.events.observation import CmdOutputObservation
 
@@ -82,7 +83,7 @@ class ScientificResearchEngine:
     - Iterative refinement
     """
 
-    def __init__(self, llm: LLM, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, llm: LLM, config: Optional[Dict[str, Any]] = None, event_bus: Optional[EventBus] = None):
         """
         Initialize research engine.
 
@@ -91,6 +92,7 @@ class ScientificResearchEngine:
             config: Optional configuration dictionary
         """
         self.llm = llm
+        self.event_bus = event_bus or get_event_bus()
         self.config = config or {}
 
         # Configuration
@@ -99,8 +101,6 @@ class ScientificResearchEngine:
         self.simulation_detection = self.config.get('simulation_detection', True)
         self.max_iterations = self.config.get('max_iterations', 10)
 
-        # WebSocket manager (lazy-loaded)
-        self._ws_manager = None
 
         logger.info(f"ScientificResearchEngine initialized with config: {self.config}")
 
@@ -110,7 +110,8 @@ class ScientificResearchEngine:
         runtime: Runtime,
         event_stream: EventStream,
         session_id: str,
-        experiment_id: Optional[str] = None
+        experiment_id: Optional[str] = None,
+        branch_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Run complete scientific research experiment.
@@ -125,69 +126,100 @@ class ScientificResearchEngine:
         Returns:
             Dictionary with experiment results
         """
-        # Create experiment ID if not provided
         if not experiment_id:
             experiment_id = f"exp_{session_id}_{uuid.uuid4().hex[:8]}"
+
+        bid = branch_id or experiment_id
 
         logger.info(f"Starting scientific research experiment: {experiment_id}")
         logger.info(f"Goal: {goal}")
 
-        # Emit start event
-        await self._emit_event(event_stream, {
-            'type': 'experiment_started',
-            'experiment_id': experiment_id,
-            'goal': goal,
-        })
+        await self.event_bus.publish(
+            StepEvent(
+                branch_id=bid,
+                action="experiment_started",
+                reasoning=f"Starting: {goal}",
+            )
+        )
 
         try:
-            # Phase 1: Generate hypotheses
-            await self._emit_progress(event_stream, experiment_id, 'Generating hypotheses', 10)
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Generating hypotheses",
+                    reasoning="Enumerating candidate hypotheses",
+                )
+            )
             hypotheses = await self._generate_hypotheses(goal)
             logger.info(f"Generated {len(hypotheses)} hypotheses")
 
-            # Phase 2: Design experiments
-            await self._emit_progress(event_stream, experiment_id, 'Designing experiments', 30)
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Designing experiments",
+                    reasoning="Translating hypotheses into experiment plans",
+                )
+            )
             experiment_plans = await self._design_experiments(hypotheses)
             logger.info(f"Designed {len(experiment_plans)} experiments")
 
-            # Phase 3: Execute experiments
-            await self._emit_progress(event_stream, experiment_id, 'Executing experiments', 50)
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Executing experiments",
+                    reasoning="Running experiments via runtime",
+                )
+            )
             results = await self._execute_experiments(
                 experiment_plans,
                 runtime,
                 event_stream,
-                experiment_id
+                experiment_id,
             )
 
-            # Phase 4: Analyze results
-            await self._emit_progress(event_stream, experiment_id, 'Analyzing results', 80)
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Analyzing results",
+                    reasoning="Interpreting experiment outputs",
+                )
+            )
             analysis = await self._analyze_results(hypotheses, results)
 
-            # Phase 5: Validate and synthesize
-            await self._emit_progress(event_stream, experiment_id, 'Validating findings', 95)
+            await self.event_bus.publish(
+                StepEvent(
+                    branch_id=bid,
+                    action="Validating findings",
+                    reasoning="Checking for simulated or low-confidence results",
+                )
+            )
             validated = await self._validate_findings(analysis)
 
-            # Prepare final results
             final_results = {
-                'experiment_id': experiment_id,
-                'goal': goal,
-                'hypotheses': [self._hypothesis_to_dict(h) for h in hypotheses],
-                'experiment_plans': [self._plan_to_dict(p) for p in experiment_plans],
-                'results': results,
-                'analysis': analysis,
-                'validated': validated,
-                'status': 'completed',
-                'completed_at': datetime.utcnow().isoformat(),
+                "experiment_id": experiment_id,
+                "goal": goal,
+                "hypotheses": [self._hypothesis_to_dict(h) for h in hypotheses],
+                "experiment_plans": [self._plan_to_dict(p) for p in experiment_plans],
+                "results": results,
+                "analysis": analysis,
+                "validated": validated,
+                "status": "completed",
+                "completed_at": datetime.utcnow().isoformat(),
             }
 
-            # Emit completion
-            await self._emit_event(event_stream, {
-                'type': 'experiment_completed',
-                'experiment_id': experiment_id,
-                'results': final_results,
-            })
+            summary_text = (
+                analysis.get("overall_findings", "Experiment completed")
+                if isinstance(analysis, dict)
+                else "Experiment completed"
+            )
 
-            await self._emit_progress(event_stream, experiment_id, 'Completed', 100)
+            await self.event_bus.publish(
+                CompleteEvent(
+                    branch_id=bid,
+                    summary=summary_text,
+                    artifacts=[],
+                )
+            )
 
             logger.info(f"Experiment {experiment_id} completed successfully")
             return final_results
@@ -195,16 +227,12 @@ class ScientificResearchEngine:
         except Exception as e:
             logger.error(f"Experiment {experiment_id} failed: {e}", exc_info=True)
 
-            # Emit failure event
-            await self._emit_event(event_stream, {
-                'type': 'experiment_failed',
-                'experiment_id': experiment_id,
-                'error': {
-                    'message': str(e),
-                    'type': type(e).__name__,
-                }
-            })
-
+            await self.event_bus.publish(
+                ErrorEvent(
+                    branch_id=bid,
+                    message=str(e),
+                )
+            )
             raise
 
     async def _generate_hypotheses(self, goal: str) -> List[ResearchHypothesis]:
@@ -338,14 +366,6 @@ Respond with ONLY valid JSON:
         for i, plan in enumerate(plans):
             logger.info(f"Executing experiment plan: {plan.title}")
 
-            # Emit step start
-            await self._emit_event(event_stream, {
-                'type': 'step_started',
-                'experiment_id': experiment_id,
-                'step_name': f'execute_{plan.id}',
-                'step_description': plan.title,
-            })
-
             try:
                 if plan.code_to_execute:
                     # Execute code using OpenHands runtime
@@ -374,14 +394,6 @@ Respond with ONLY valid JSON:
                     }
 
                 results.append(result)
-
-                # Emit step completion
-                await self._emit_event(event_stream, {
-                    'type': 'step_completed',
-                    'experiment_id': experiment_id,
-                    'step_name': f'execute_{plan.id}',
-                    'result': result,
-                })
 
             except Exception as e:
                 logger.error(f"Experiment execution failed: {e}")
@@ -478,54 +490,6 @@ Respond with ONLY valid JSON:
         return True
 
     # Helper methods
-
-    async def _emit_event(self, event_stream: EventStream, event_data: Dict[str, Any]):
-        """Emit event to event stream"""
-        event_data['timestamp'] = datetime.utcnow().isoformat()
-        await event_stream.add_event(MessageAction(content=json.dumps(event_data)))
-
-    async def _emit_progress(
-        self,
-        event_stream: EventStream,
-        experiment_id: str,
-        step: str,
-        percentage: float
-    ):
-        """Emit progress update"""
-        progress_data = {
-            'type': 'experiment_progress',
-            'experiment_id': experiment_id,
-            'progress': {
-                'percentage': percentage,
-                'current_step': step,
-            }
-        }
-
-        # Emit to event stream
-        await self._emit_event(event_stream, progress_data)
-
-        # Also emit to WebSocket clients if available
-        if self._ws_manager is None:
-            try:
-                from ..api import ws_manager
-                self._ws_manager = ws_manager
-            except ImportError:
-                pass  # WebSocket manager not available
-
-        if self._ws_manager:
-            try:
-                await self._ws_manager.send_experiment_update(
-                    experiment_id,
-                    {
-                        'type': 'progress',
-                        'data': {
-                            'percentage': percentage,
-                            'current_step': step,
-                        }
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send WebSocket update: {e}")
 
     def _hypothesis_to_dict(self, hypothesis: ResearchHypothesis) -> Dict[str, Any]:
         """Convert hypothesis to dictionary"""

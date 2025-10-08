@@ -291,6 +291,26 @@ class CodeActAdapter(AgentAdapter):
 
         logger.info("CodeAct task cancellation requested")
 
+    async def send_message(self, message: str) -> None:
+        """Forward steering directives to the active CodeAct session."""
+
+        if not self._current_session:
+            logger.warning(
+                "Cannot deliver steering message to CodeAct adapter: no active session"
+            )
+            return
+
+        try:
+            await self._current_session.send_user_message(message)
+            logger.info(
+                "Delivered steering message to CodeAct session: %s", message[:100]
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to deliver steering message to CodeAct session: %s", exc,
+                exc_info=True,
+            )
+
     def supports_task(self, task: Task, context: Context) -> float:
         """
         Score task suitability for CodeAct.

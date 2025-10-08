@@ -1,99 +1,87 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
-import { cn } from '#/utils/utils';
 
-interface ResearchErrorBoundaryProps {
+interface Props {
   children: ReactNode;
-  fallback?: ReactNode;
-  onReset?: () => void;
 }
 
-interface ResearchErrorBoundaryState {
+interface State {
   hasError: boolean;
   error: Error | null;
   errorInfo: ErrorInfo | null;
-  showDetails: boolean;
 }
 
-class ResearchErrorBoundary extends Component<
-  ResearchErrorBoundaryProps,
-  ResearchErrorBoundaryState
-> {
-  constructor(props: ResearchErrorBoundaryProps) {
+export class ResearchErrorBoundary extends Component<Props, State> {
+  constructor(props: Props) {
     super(props);
     this.state = {
       hasError: false,
       error: null,
       errorInfo: null,
-      showDetails: false,
     };
   }
 
-  static getDerivedStateFromError(error: Error): ResearchErrorBoundaryState {
+  static getDerivedStateFromError(error: Error): Partial<State> {
     return {
       hasError: true,
       error,
-      errorInfo: null,
-      showDetails: false,
     };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('[Research Tree] Render error:', error, errorInfo);
-    this.setState({ errorInfo });
+    console.error('ResearchTreeView Error:', error, errorInfo);
+    this.setState({
+      error,
+      errorInfo,
+    });
   }
 
-  handleRetry = () => {
-    this.setState({ hasError: false, error: null, errorInfo: null, showDetails: false });
-    if (this.props.onReset) {
-      this.props.onReset();
-    }
-  };
-
-  toggleDetails = () => {
-    this.setState((state) => ({ showDetails: !state.showDetails }));
+  handleReset = () => {
+    this.setState({
+      hasError: false,
+      error: null,
+      errorInfo: null,
+    });
   };
 
   render() {
-    const { hasError, error, errorInfo, showDetails } = this.state;
-    const { children, fallback } = this.props;
-
-    if (!hasError) {
-      return children;
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-full items-center justify-center bg-slate-900 p-8">
+          <div className="max-w-md space-y-4 text-center">
+            <div className="flex justify-center">
+              <AlertTriangle size={48} className="text-amber-500" />
+            </div>
+            <h3 className="text-lg font-semibold text-slate-100">
+              Research Tree Error
+            </h3>
+            <p className="text-sm text-slate-400">
+              An error occurred while rendering the research tree. This might be
+              due to invalid data or a rendering issue.
+            </p>
+            {this.state.error && (
+              <details className="rounded border border-slate-700 bg-slate-800 p-3 text-left text-xs">
+                <summary className="cursor-pointer font-medium text-slate-300">
+                  Error Details
+                </summary>
+                <pre className="mt-2 overflow-auto text-slate-400">
+                  {this.state.error.toString()}
+                </pre>
+              </details>
+            )}
+            <button
+              type="button"
+              onClick={this.handleReset}
+              className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+            >
+              <RefreshCw size={16} />
+              Try Again
+            </button>
+          </div>
+        </div>
+      );
     }
 
-    if (fallback) {
-      return fallback;
-    }
-
-    return (
-      <div className="research-error-boundary">
-        <AlertTriangle className="error-icon" size={64} aria-hidden />
-        <h3>Something went wrong with the research tree</h3>
-        {error?.message && <p className="error-message">{error.message}</p>}
-        <button type="button" className="retry-button" onClick={this.handleRetry}>
-          <RefreshCw size={16} />
-          <span>Try Again</span>
-        </button>
-        {errorInfo && (
-          <button
-            type="button"
-            className="details-toggle"
-            onClick={this.toggleDetails}
-          >
-            {showDetails ? 'Hide details' : 'Show details'}
-          </button>
-        )}
-        {showDetails && errorInfo && (
-          <pre className={cn('error-stack', 'custom-scrollbar')}>
-            {errorInfo.componentStack}
-          </pre>
-        )}
-      </div>
-    );
+    return this.props.children;
   }
 }
-
-ResearchErrorBoundary.displayName = 'ResearchErrorBoundary';
-
-export { ResearchErrorBoundary };

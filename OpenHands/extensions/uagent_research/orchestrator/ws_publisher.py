@@ -7,9 +7,8 @@ Maps ResearchEvent → WebSocket messages for frontend consumption.
 
 import asyncio
 import logging
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional
 from datetime import datetime
-import json
 
 from ..orchestrator.event_bus import EventBus
 from ..uagent_research.models.events import (
@@ -119,25 +118,54 @@ class WebSocketMessage:
     @staticmethod
     def event_log(event: ResearchEvent, version: int) -> Dict[str, Any]:
         """Research event log"""
-        return {
+        artifacts = [
+            {
+                "kind": artifact.kind.value,
+                "locator": artifact.locator,
+                "content": artifact.content,
+                "summary": artifact.summary,
+                "metadata": artifact.metadata,
+            }
+            for artifact in getattr(event, "artifacts", [])
+        ]
+
+        message = WebSocketPublisher._format_event_message(event)
+
+        data: Dict[str, Any] = {
+            "event_type": event.type.value,
+            "branch_id": event.branch_id,
+            "node_id": event.node_id,
+            "action": getattr(event, "action", None),
+            "reasoning": getattr(event, "reasoning", None),
+            "tool": getattr(event, "tool", None),
+            "result": getattr(event, "result", None),
+            "success": getattr(event, "success", None),
+            "error": getattr(event, "error", getattr(event, "message", None)),
+            "content": getattr(event, "content", None),
+            "summary": getattr(event, "summary", None),
+            "message": message,
+            "artifacts": artifacts,
+        }
+
+        payload: Dict[str, Any] = {
             "type": "event_log",
             "version": version,
             "timestamp": event.timestamp.isoformat(),
-            "data": {
-                "event_type": event.type.value,
-                "branch_id": event.branch_id,
-                "node_id": event.node_id,
-                "message": WebSocketPublisher._format_event_message(event),
-                "artifacts": [
-                    {
-                        "type": artifact.type.value,
-                        "content": artifact.content[:500],  # Limit size
-                        "metadata": artifact.metadata,
-                    }
-                    for artifact in getattr(event, "artifacts", [])
-                ],
-            },
+            "event_type": data["event_type"],
+            "branch_id": data["branch_id"],
+            "message": message,
+            "artifacts": artifacts,
+            "data": data,
         }
+
+        if data["node_id"] is not None:
+            payload["node_id"] = data["node_id"]
+        if data["action"] is not None:
+            payload["action"] = data["action"]
+        if data["reasoning"] is not None:
+            payload["reasoning"] = data["reasoning"]
+
+        return payload
 
     @staticmethod
     def error(error_msg: str, version: int) -> Dict[str, Any]:
@@ -181,7 +209,7 @@ class WebSocketPublisher:
         self,
         event_bus: EventBus,
         ws_manager: Any,  # WebSocket manager (from fastapi)
-        experiment_id: str,
+        experiment_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ):
         """
@@ -190,7 +218,7 @@ class WebSocketPublisher:
         Args:
             event_bus: EventBus to subscribe to
             ws_manager: WebSocket connection manager
-            experiment_id: Experiment ID to filter events
+            experiment_id: Optional experiment ID to filter events
             session_id: Optional session ID
         """
         self.event_bus = event_bus
@@ -211,9 +239,8 @@ class WebSocketPublisher:
         self._running = True
         self._task = asyncio.create_task(self._publish_loop())
 
-        logger.info(
-            f"WebSocket publisher started for experiment {self.experiment_id}"
-        )
+        target = self.experiment_id or self.session_id or "*"
+        logger.info(f"WebSocket publisher started for {target}")
 
     async def stop(self):
         """Stop publishing events"""
@@ -226,22 +253,23 @@ class WebSocketPublisher:
             except asyncio.CancelledError:
                 pass
 
-        logger.info(
-            f"WebSocket publisher stopped for experiment {self.experiment_id}"
-        )
+        target = self.experiment_id or self.session_id or "*"
+        logger.info(f"WebSocket publisher stopped for {target}")
 
     async def _publish_loop(self):
         """Main publish loop"""
         try:
             # Subscribe to EventBus
-            subscriber_id = f"ws-{self.experiment_id}"
+            subscriber_id = f"ws-{self.experiment_id or self.session_id or 'global'}"
+            branch_filter = None
+            if self.experiment_id:
+                branch_filter = {self.experiment_id}
+            elif self.session_id:
+                branch_filter = {self.session_id}
 
             async for event in self.event_bus.subscribe(
                 subscriber_id=subscriber_id,
-                # Filter by branch (experiment/session)
-                branch_ids={self.experiment_id}
-                if not self.session_id
-                else {self.session_id},
+                branch_ids=branch_filter,
             ):
                 if not self._running:
                     break
@@ -308,7 +336,7 @@ class WebSocketPublisher:
         elif event.type == EventType.ERROR:
             # Error - log and possibly update node
             return WebSocketMessage.error(
-                error_msg=getattr(event, "error", "Unknown error"),
+                error_msg=getattr(event, "message", "Unknown error"),
                 version=self.version,
             )
 
@@ -322,14 +350,12 @@ class WebSocketPublisher:
             message: Message to broadcast
         """
         try:
-            # Convert to JSON
-            json_message = json.dumps(message)
-
             # Broadcast via WebSocket manager
             # (This assumes ws_manager has a broadcast method)
             if hasattr(self.ws_manager, "broadcast"):
                 await self.ws_manager.broadcast(
-                    message=json_message, experiment_id=self.experiment_id
+                    message=message,
+                    experiment_id=self.experiment_id or "*",
                 )
             else:
                 logger.warning("WebSocket manager has no broadcast method")
@@ -385,24 +411,23 @@ class WebSocketPublisher:
     @staticmethod
     def _format_event_message(event: ResearchEvent) -> str:
         """Format event as human-readable message"""
-        if isinstance(event, PlanEvent):
-            return f"Plan: {event.plan}"
-        elif isinstance(event, StepEvent):
-            return f"Step {event.step_number}: {event.description}"
+        if isinstance(event, StepEvent):
+            return f"Step: {event.action} — {event.reasoning or ''}".strip()
+        elif isinstance(event, PlanEvent):
+            return f"Plan: {', '.join(event.steps)}"
         elif isinstance(event, ToolCallEvent):
-            return f"Tool call: {event.tool_name}"
+            return f"Tool: {event.tool}"
         elif isinstance(event, ObservationEvent):
-            return f"Observation: {event.observation}"
+            return f"Observation: {('ok' if event.success else 'error')}"
         elif isinstance(event, SummaryEvent):
-            return f"Summary: {event.summary[:100]}..."
+            return f"Summary: {event.content[:100]}..."
         elif isinstance(event, CompleteEvent):
-            return f"Complete: {event.summary}"
+            return f"Complete: {event.summary[:100]}..."
         elif isinstance(event, ErrorEvent):
-            return f"Error: {event.error}"
+            return f"Error: {event.message}"
         elif isinstance(event, CritiqueEvent):
-            return f"Critique: {event.critique[:100]}..."
-        else:
-            return str(event)
+            return f"Critique: {event.content[:100]}..."
+        return str(event)
 
 
 # Example usage
@@ -413,8 +438,8 @@ async def test_ws_publisher():
 
     # Mock WebSocket manager
     class MockWSManager:
-        async def broadcast(self, message: str, experiment_id: str):
-            print(f"Broadcasting to {experiment_id}: {message[:100]}...")
+        async def broadcast(self, message: Dict[str, Any], experiment_id: str):
+            print(f"Broadcasting to {experiment_id}: {str(message)[:100]}...")
 
     bus = EventBus()
     manager = MockWSManager()
@@ -430,9 +455,8 @@ async def test_ws_publisher():
         StepEvent(
             branch_id="test-exp",
             node_id="node-1",
-            step_number=1,
-            description="Testing WebSocket publisher",
-            artifacts=[],
+            action="testing",
+            reasoning="Testing WebSocket publisher",
         )
     )
 

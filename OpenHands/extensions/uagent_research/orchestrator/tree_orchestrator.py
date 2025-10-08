@@ -210,6 +210,14 @@ class TreeSearchOrchestrator:
                 # Unsubscribe from control bus
                 self.control_bus.unsubscribe_all(research_id)
 
+                # Clear event log for this experiment
+                if self.event_bus and self.tree:
+                    try:
+                        self.event_bus.clear_event_log(self.tree.research_id)
+                        logger.info(f"Cleared event log for {self.tree.research_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to clear event log: {e}")
+
                 logger.info("Control loop cleanup complete")
 
             return self.tree
@@ -403,15 +411,23 @@ class TreeSearchOrchestrator:
 
         for child in children:
             task = asyncio.create_task(self._execute_node(child))
+            self._running_tasks[child.id] = task
+            task.add_done_callback(
+                lambda t, node_id=child.id: self._running_tasks.pop(node_id, None)
+            )
             tasks.append(task)
 
-        # Wait for all to complete
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            # Wait for all to complete
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Log any exceptions
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Child {children[i].id} failed: {result}")
+            # Log any exceptions
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Child {children[i].id} failed: {result}")
+        finally:
+            for child in children:
+                self._running_tasks.pop(child.id, None)
 
     async def _execute_node(self, node: ResearchNode):
         """
@@ -445,13 +461,30 @@ class TreeSearchOrchestrator:
                 if not adapter:
                     raise Exception(f"Adapter '{adapter_name}' not found")
 
+                node.adapter = adapter_name
                 logger.info(f"Routed node {node.id} to adapter: {adapter_name}")
+
+                await self._deliver_pending_steer(node.id, adapter_name)
 
                 # Execute via adapter
                 events_received = 0
 
                 async for event in adapter.run(task, context):
                     events_received += 1
+
+                    # Attach experiment_id to event before publishing
+                    if self.tree and self.tree.research_id:
+                        # Create shallow copy or update event with experiment_id
+                        if hasattr(event, 'copy'):
+                            # If Pydantic model with copy method
+                            try:
+                                event = event.copy(update={'experiment_id': self.tree.research_id})
+                            except:
+                                # Fallback: set attribute directly
+                                event.experiment_id = self.tree.research_id
+                        else:
+                            # Set attribute directly
+                            event.experiment_id = self.tree.research_id
 
                     # Publish event to bus
                     await self.event_bus.publish(event)
@@ -481,6 +514,10 @@ class TreeSearchOrchestrator:
                 node.avg_value = 0.0  # Failure value
 
                 self.stats["failed_nodes"] += 1
+            finally:
+                self._running_tasks.pop(node.id, None)
+                self._steer_map.pop(node.id, None)
+                self.event_bus.stop_branch_heartbeat(node.id)
 
     async def _check_budget(self) -> bool:
         """Check if budget allows continuation"""
@@ -496,6 +533,45 @@ class TreeSearchOrchestrator:
             return False
 
         return True
+
+    async def _deliver_pending_steer(self, node_id: str, adapter_name: str) -> None:
+        """Send any queued steering directives to the resolved adapter."""
+
+        for key in (node_id, adapter_name):
+            steer_text = self._steer_map.pop(key, None)
+            if not steer_text:
+                continue
+
+            delivered = await self._send_adapter_message(adapter_name, steer_text)
+            if delivered:
+                logger.info(
+                    f"Delivered steering message to adapter {adapter_name}: {steer_text[:100]}"
+                )
+                break
+            # If delivery failed, restore directive for future attempts
+            self._steer_map[key] = steer_text
+
+    async def _send_adapter_message(self, adapter_name: str, message: str) -> bool:
+        """Forward steering message to adapter if supported."""
+
+        adapter = adapter_registry.get(adapter_name)
+        if not adapter:
+            logger.warning(f"Adapter '{adapter_name}' not found for steering message")
+            return False
+
+        if not hasattr(adapter, "send_message"):
+            logger.debug(f"Adapter '{adapter_name}' does not support runtime messaging")
+            return False
+
+        try:
+            await adapter.send_message(message)
+            return True
+        except Exception as exc:
+            logger.error(
+                f"Failed to deliver steering message to adapter {adapter_name}: {exc}",
+                exc_info=True,
+            )
+            return False
 
     def _publish_tree_to_api(self):
         """Publish tree state to API endpoint for frontend consumption"""
@@ -606,6 +682,7 @@ class TreeSearchOrchestrator:
                         if not task.done():
                             task.cancel()
                             logger.info(f"Cancelled task for node {node_id}")
+                            self.event_bus.stop_branch_heartbeat(node_id)
                     logger.info(f"Cancelled research: {self.tree.research_id}")
 
                 elif cmd.action == "cancel_node":
@@ -618,6 +695,7 @@ class TreeSearchOrchestrator:
                             if node_id in self.tree.nodes:
                                 self.tree.nodes[node_id].status = NodeStatus.FAILED
                             logger.info(f"Cancelled node: {node_id}")
+                            self.event_bus.stop_branch_heartbeat(node_id)
 
                 elif cmd.action == "reprioritize":
                     # Adjust node priors
@@ -652,10 +730,30 @@ class TreeSearchOrchestrator:
 
                     if target_id:
                         self._steer_map[target_id] = steer_text
-                        logger.info(f"Stored steer directive for {target_id}: {steer_text[:100]}")
 
-                        # TODO: Send message to running adapter if it supports it
-                        # This would require adapter to expose send_message() method
+                        delivered = False
+                        if target_id in self._running_tasks:
+                            node = self.tree.nodes.get(target_id)
+                            adapter_name = getattr(node, "adapter", None) if node else None
+                            if adapter_name:
+                                delivered = await self._send_adapter_message(adapter_name, steer_text)
+                                if delivered:
+                                    self._steer_map.pop(target_id, None)
+
+                        adapter_target = cmd.target.get("adapter")
+                        if not delivered and adapter_target:
+                            delivered = await self._send_adapter_message(adapter_target, steer_text)
+                            if delivered:
+                                self._steer_map.pop(target_id, None)
+
+                        if delivered:
+                            logger.info(
+                                f"Delivered steer directive for {target_id}: {steer_text[:100]}"
+                            )
+                        else:
+                            logger.info(
+                                f"Stored steer directive for {target_id}: {steer_text[:100]}"
+                            )
 
                 elif cmd.action == "add_node":
                     # Add new research direction
@@ -673,6 +771,9 @@ class TreeSearchOrchestrator:
                         )
                         self.tree.add_node(new_node, parent_id=parent_id)
                         logger.info(f"Added manual node {new_node.id} under {parent_id}")
+                        logger.info(
+                            "Manual node will be evaluated in the next PUCT iteration"
+                        )
 
         except asyncio.CancelledError:
             logger.info(f"Control loop cancelled for {self.tree.research_id}")
@@ -692,6 +793,21 @@ class TreeSearchOrchestrator:
             if not task.done():
                 task.cancel()
                 logger.info(f"Cancelled task {task_id}")
+
+        self._running_tasks.clear()
+        self._steer_map.clear()
+
+        if self.tree:
+            for node in self.tree.nodes.values():
+                self.event_bus.stop_branch_heartbeat(node.id)
+
+        # Clear event log
+        if self.event_bus and self.tree:
+            try:
+                self.event_bus.clear_event_log(self.tree.research_id)
+                logger.info(f"Cleared event log for {self.tree.research_id}")
+            except Exception as e:
+                logger.warning(f"Failed to clear event log: {e}")
 
         logger.info("Tree search cancellation requested")
 
