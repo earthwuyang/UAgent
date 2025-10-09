@@ -235,7 +235,13 @@ class BashSession:
         # Set history limit to a large number to avoid losing history
         # https://unix.stackexchange.com/questions/43414/unlimited-history-in-tmux
         # libtmux >=0.46 uses parameter name `global_` (not `_global`)
-        self.session.set_option('history-limit', str(self.HISTORY_LIMIT), global_=True)
+        # Set history limit - handle both old and new libtmux versions
+        try:
+            # Try new version (>=0.46) parameter name
+            self.session.set_option('history-limit', str(self.HISTORY_LIMIT), global_=True)
+        except TypeError:
+            # Fall back to old version parameter name
+            self.session.set_option('history-limit', str(self.HISTORY_LIMIT), _global=True)
         self.session.history_limit = self.HISTORY_LIMIT
         # We need to create a new pane because the initial pane's history limit is (default) 2000
         _initial_window = self.session.active_window

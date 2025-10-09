@@ -21,7 +21,7 @@ from openhands.core.exceptions import (
     AgentRuntimeDisconnectedError,
 )
 from openhands.core.logger import openhands_logger as logger
-from openhands.events import EventSource, EventStream, EventStreamSubscriber
+# from openhands.events import EventSource, EventStream, EventStreamSubscriber  # Lazy import to avoid circular dependency
 from openhands.events.action import (
     Action,
     ActionConfirmationStatus,
@@ -76,6 +76,22 @@ from openhands.utils.async_utils import (
 )
 
 
+def _get_event_source():
+    """Lazy import EventSource to avoid circular dependency"""
+    from openhands.events import EventSource
+    return EventSource
+
+def _get_event_stream():
+    """Lazy import EventStream to avoid circular dependency"""
+    from openhands.events import EventStream
+    return EventStream
+
+def _get_event_stream_subscriber():
+    """Lazy import EventStreamSubscriber to avoid circular dependency"""
+    from openhands.events import EventStreamSubscriber
+    return EventStreamSubscriber
+
+
 def _default_env_vars(sandbox_config: SandboxConfig) -> dict[str, str]:
     ret = {}
     for key in os.environ:
@@ -128,7 +144,7 @@ class Runtime(FileEditRuntimeMixin):
     def __init__(
         self,
         config: OpenHandsConfig,
-        event_stream: EventStream,
+        event_stream,
         llm_registry: LLMRegistry,
         sid: str = 'default',
         plugins: list[PluginRequirement] | None = None,
@@ -147,7 +163,7 @@ class Runtime(FileEditRuntimeMixin):
         self.event_stream = event_stream
         if event_stream:
             event_stream.subscribe(
-                EventStreamSubscriber.RUNTIME, self.on_event, self.sid
+                _get_event_stream_subscriber().RUNTIME, self.on_event, self.sid
             )
         self.plugins = (
             copy.deepcopy(plugins) if plugins is not None and len(plugins) > 0 else []
@@ -400,7 +416,7 @@ class Runtime(FileEditRuntimeMixin):
         observation.tool_call_metadata = event.tool_call_metadata
 
         # this might be unnecessary, since source should be set by the event stream when we're here
-        source = event.source if event.source else EventSource.AGENT
+        source = event.source if event.source else _get_event_source().AGENT
         if isinstance(observation, NullObservation):
             # don't add null observations to the event stream
             return
@@ -489,7 +505,7 @@ class Runtime(FileEditRuntimeMixin):
         action.set_hard_timeout(600)
 
         # Add the action to the event stream as an ENVIRONMENT event
-        source = EventSource.ENVIRONMENT
+        source = _get_event_source().ENVIRONMENT
         self.event_stream.add_event(action, source)
 
         # Execute the action

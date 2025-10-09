@@ -17,11 +17,17 @@ from openhands.core.loop import run_agent_until_done
 from openhands.core.setup import create_memory
 from openhands.core.config import AgentConfig, LLMConfig, OpenHandsConfig
 from openhands.llm.llm_registry import LLMRegistry
-from openhands.runtime import get_runtime_cls
+# from openhands.runtime import get_runtime_cls  # Lazy import
 from openhands.events import EventStream, EventSource
 from openhands.events.action import MessageAction
 from openhands.server.services.conversation_stats import ConversationStats
 from openhands.storage.memory import InMemoryFileStore
+
+def _get_runtime_cls():
+    """Lazy import get_runtime_cls to avoid circular dependency"""
+    from openhands.runtime import get_runtime_cls
+    return get_runtime_cls
+
 
 logger = logging.getLogger(__name__)
 
@@ -365,7 +371,7 @@ class HeadlessAgentSession:
             # Fallback: minimal defaults
             self.oh_config = OpenHandsConfig()
             self.llm_registry = LLMRegistry(self.oh_config)
-        runtime_cls = get_runtime_cls(self.oh_config.runtime)
+        runtime_cls = _get_runtime_cls()(self.oh_config.runtime)
         # Create runtime in headless mode; attach_to_existing False to start fresh
         runtime = runtime_cls(
             config=self.oh_config,

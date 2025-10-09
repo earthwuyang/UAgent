@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 
 from openhands.events.tool import ToolCallMetadata
-from openhands.llm.metrics import Metrics
+# from openhands.llm.metrics import Metrics  # Lazy import to avoid circular dependency
 
 
 class EventSource(str, Enum):
@@ -97,15 +97,18 @@ class Event:
 
     # optional metadata, LLM call cost of the edit
     @property
-    def llm_metrics(self) -> Metrics | None:
+    def llm_metrics(self):
+        # Lazy import to avoid circular dependency
         if hasattr(self, '_llm_metrics'):
-            metrics = getattr(self, '_llm_metrics')
-            return metrics if isinstance(metrics, Metrics) else None
+            return getattr(self, '_llm_metrics', None)
         return None
 
     @llm_metrics.setter
-    def llm_metrics(self, value: Metrics) -> None:
-        self._llm_metrics = value
+    def llm_metrics(self, value) -> None:
+        # Lazy import to avoid circular dependency  
+        from openhands.llm.metrics import Metrics
+        if isinstance(value, Metrics):
+            self._llm_metrics = value
 
     # optional field, metadata about the tool call, if the event has a tool call
     @property

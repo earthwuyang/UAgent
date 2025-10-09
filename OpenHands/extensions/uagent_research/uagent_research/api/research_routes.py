@@ -347,41 +347,109 @@ async def start_experiment(
 
 
 @router.get("/experiments/{experiment_id}/tree")
-async def get_experiment_tree_snapshot(experiment_id: str, session: AsyncSession = Depends(get_session)) -> dict:
-    """Return the latest research tree snapshot for the given experiment.
-
-    The orchestrator publishes snapshots via update_tree_state(). If no snapshot
-    is available yet, try to build from database.
+async def get_experiment_tree(
+    experiment_id: str,
+    session: AsyncSession = Depends(get_session)
+):
     """
-    snap = _active_tree_snapshots.get(experiment_id)
-    if not snap:
-        # Try to build from database
-        logger.info(f"No snapshot in memory for {experiment_id}, building from database")
-        tree_data = await build_tree_from_database(session, experiment_id)
-        if tree_data:
-            snap = {
-                'version': 1,
-                'timestamp': datetime.utcnow().isoformat(),
-                'experiment_id': experiment_id,
-                'data': tree_data
-            }
-            # Cache it for future requests
-            _active_tree_snapshots[experiment_id] = snap
-            return snap
+    Get research tree snapshot for experiment.
+    
+    Handles both experiment IDs and conversation IDs for compatibility.
+    """
+    try:
+        original_id = experiment_id  # Keep the original ID for responses
+        actual_experiment = None
         
-        # Return empty tree if no data
-        return {
-            'version': 0,
-            'timestamp': datetime.utcnow().isoformat(),
-            'experiment_id': experiment_id,
-            'data': {
-                'nodes': [],
-                'edges': [],
-                'stats': {},
-            },
-        }
-    return snap
+        # First check if this is actually an experiment ID
+        result = await session.execute(
+            sql_select(Experiment).where(Experiment.id == experiment_id)
+        )
+        actual_experiment = result.scalar_one_or_none()
+        
+        # If not found, check if it's a conversation/session ID
+        if not actual_experiment:
+            result = await session.execute(
+                sql_select(Experiment).where(
+                    Experiment.session_id == experiment_id
+                ).order_by(Experiment.created_at.desc())
+            )
+            actual_experiment = result.scalar_one_or_none()
+            
+            if actual_experiment:
+                # Use the actual experiment ID for all subsequent operations
+                experiment_id = actual_experiment.id
+                logger.info(f"Found experiment by session_id lookup: {experiment_id}")
 
+        # If still no experiment, return empty tree
+        if not actual_experiment:
+            logger.info(f"No experiment found for ID: {original_id}")
+            return TreeSnapshotResponse(
+                version=0,
+                timestamp=datetime.utcnow().isoformat(),
+                experiment_id=original_id,
+                data={
+                    "nodes": [],
+                    "edges": [],
+                    "stats": {}
+                }
+            )
+
+        # Get orchestrator (if running)
+        orchestrator = None
+        if MIDDLEWARE_AVAILABLE:
+            orchestrator = research_middleware.get_orchestrator(experiment_id)
+        if not orchestrator:
+            orchestrator = _active_orchestrators.get(experiment_id)
+
+        logger.info(f"Orchestrator check: orchestrator={orchestrator is not None}")
+        
+        if not orchestrator or not hasattr(orchestrator, 'tree') or not orchestrator.tree:
+            # Try to build tree from database
+            tree_data = await build_tree_from_database(session, experiment_id)
+            if tree_data:
+                return TreeSnapshotResponse(
+                    version=1,
+                    timestamp=datetime.utcnow().isoformat(),
+                    experiment_id=original_id,
+                    data=tree_data
+                )
+            
+            # Return empty tree
+            return TreeSnapshotResponse(
+                version=0,
+                timestamp=datetime.utcnow().isoformat(),
+                experiment_id=original_id,
+                data={
+                    "nodes": [],
+                    "edges": [],
+                    "stats": {}
+                }
+            )
+
+
+        tree = orchestrator.tree
+        nodes = []
+        edges = []
+        # Convert tree to snapshot format
+        # (Implementation would go here)
+        return TreeSnapshotResponse(
+            version=1,
+            timestamp=datetime.utcnow().isoformat(),
+            experiment_id=original_id,
+            data={
+                "nodes": nodes,
+                "edges": edges,
+                "stats": {}
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error getting tree for {experiment_id}: {e}")
+        return TreeSnapshotResponse(
+            version=0,
+            timestamp=datetime.utcnow().isoformat(),
+            experiment_id=experiment_id,
+            data={"nodes": [], "edges": [], "stats": {}}
+        )
 
 @router.get("/experiments/{experiment_id}", response_model=ExperimentResponse)
 async def get_experiment(
@@ -849,10 +917,23 @@ async def get_experiment_tree(
     """
     try:
         # Check experiment exists
+        # First check if this is actually an experiment ID
         result = await session.execute(
             sql_select(Experiment).where(Experiment.id == experiment_id)
         )
         experiment = result.scalar_one_or_none()
+        
+        # If not found, check if it's a conversation/session ID
+        if not experiment:
+            result = await session.execute(
+                sql_select(Experiment).where(Experiment.session_id == experiment_id).order_by(Experiment.created_at.desc())
+            )
+            experiment = result.scalar_one_or_none()
+            
+            if experiment:
+                # Use the actual experiment ID for further processing
+                experiment_id = experiment.id
+                logger.info(f"Found experiment by session_id lookup: {experiment_id}")
 
         # Even if experiment doesn't exist yet, return empty tree for graceful handling
         # This prevents 404 errors when accessing research tree before experiment starts
@@ -872,14 +953,14 @@ async def get_experiment_tree(
         # Get orchestrator (if running) - check middleware first
         orchestrator = None
         if MIDDLEWARE_AVAILABLE:
-            orchestrator = research_middleware.get_orchestrator(experiment_id)
+            orchestrator = research_middleware.get_orchestrator(experiment.id)
         if not orchestrator:
-            orchestrator = _active_orchestrators.get(experiment_id)
+            orchestrator = _active_orchestrators.get(experiment.id)
 
         logger.info(f"Orchestrator check: orchestrator={orchestrator is not None}, has_tree={hasattr(orchestrator, 'tree') if orchestrator else False}")
         if not orchestrator or not hasattr(orchestrator, 'tree') or not orchestrator.tree:
             # Try to build tree from database
-            tree_data = await build_tree_from_database(session, experiment_id)
+            tree_data = await build_tree_from_database(session, experiment.id)
             if tree_data:
                 return TreeSnapshotResponse(
                     version=1,

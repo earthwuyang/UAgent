@@ -25,7 +25,7 @@ from pydantic import SecretStr
 from openhands.core.config import OpenHandsConfig
 from openhands.core.config.mcp_config import MCPConfig, MCPStdioServerConfig
 from openhands.core.logger import openhands_logger as logger
-from openhands.events import EventStream
+# from openhands.events import EventStream  # Lazy import
 from openhands.events.action import (
     BrowseInteractiveAction,
     BrowseURLAction,
@@ -107,7 +107,7 @@ class CLIRuntime(Runtime):
     def __init__(
         self,
         config: OpenHandsConfig,
-        event_stream: EventStream,
+        event_stream,
         llm_registry: LLMRegistry,
         sid: str = 'default',
         plugins: list[PluginRequirement] | None = None,

@@ -27,11 +27,23 @@ from ..adapters.base.agent_adapter import AgentAdapter, adapter_registry
 from ..router.skill_router import SkillRouter
 from .event_bus import EventBus
 from ..control.control_bus import ControlBus, ControlMessage
-from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
+# Lazy import to avoid circular dependency
+# from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
 from ..services.idea_generation_service import IdeaGenerationService
 
 
 logger = logging.getLogger(__name__)
+
+
+
+def _get_openhands_events():
+    """Lazy import of OpenHands events to avoid circular dependency"""
+    try:
+        from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
+        return ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
+    except ImportError:
+        # If events not available, return None placeholders
+        return None, None, None
 
 
 class TreeSearchOrchestrator:
@@ -663,15 +675,21 @@ class TreeSearchOrchestrator:
         
         tasks = []
 
+        # Use semaphore to limit concurrent execution properly
+        semaphore = self._semaphore
+        
+        async def limited_execute_node(node):
+            """Execute node with semaphore limiting."""
+            async with semaphore:
+                return await self._execute_node(node)
+
         for child in children:
-            task = asyncio.create_task(self._execute_node(child))
+            task = asyncio.create_task(limited_execute_node(child))
             self._running_tasks[child.id] = task
             task.add_done_callback(
                 lambda t, node_id=child.id: self._running_tasks.pop(node_id, None)
             )
             tasks.append(task)
-
-
         # DIAGNOSTIC: Log task creation
         logger.info(f"[DIAGNOSTIC] Created {len(tasks)} asyncio tasks for parallel execution")
         logger.info(f"[DIAGNOSTIC] Active task IDs: {list(self._running_tasks.keys())}")
@@ -687,7 +705,7 @@ class TreeSearchOrchestrator:
             failure_count = len(results) - success_count
             logger.info(f"[DIAGNOSTIC] Parallel execution complete: {success_count} succeeded, {failure_count} failed")
             
-                        # Log any exceptions
+            # Log any exceptions
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Child {children[i].id} failed: {result}")

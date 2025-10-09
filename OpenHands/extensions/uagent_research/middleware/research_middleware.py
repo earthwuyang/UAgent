@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, Tuple
 
 from ..classifier.task_classifier import task_classifier, TaskType
 from ..orchestrator.tree_orchestrator import TreeSearchOrchestrator
-from ..models.research_tree import Budget
+from ..uagent_research.models.research_tree import Budget
 
 try:
     from ..config import (

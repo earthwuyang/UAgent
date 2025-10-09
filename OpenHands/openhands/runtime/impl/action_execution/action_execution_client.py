@@ -18,7 +18,7 @@ from openhands.core.config.mcp_config import (
 from openhands.core.exceptions import (
     AgentRuntimeTimeoutError,
 )
-from openhands.events import EventStream
+# from openhands.events import EventStream  # Lazy import to avoid circular dependency
 from openhands.events.action import (
     ActionConfirmationStatus,
     AgentThinkAction,
@@ -68,7 +68,7 @@ class ActionExecutionClient(Runtime):
     def __init__(
         self,
         config: OpenHandsConfig,
-        event_stream: EventStream,
+        event_stream,
         llm_registry: LLMRegistry,
         sid: str = 'default',
         plugins: list[PluginRequirement] | None = None,
