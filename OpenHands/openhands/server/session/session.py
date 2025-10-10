@@ -514,100 +514,78 @@ class WebSession:
 
     async def dispatch(self, data: dict) -> None:
         event = event_from_dict(data.copy())
+        
+        # Log message receipt
+        self.logger.info(f"[MESSAGE_RECEIVED] Dispatch called for conversation {self.sid}")
+        self.logger.info(f"[MESSAGE_RECEIVED] Event type: {type(event).__name__}")
+        if hasattr(event, 'action'):
+            self.logger.info(f"[MESSAGE_RECEIVED] Action: {event.action}")
+        if hasattr(event, 'content'):
+            content_preview = event.content[:100] if len(event.content) > 100 else event.content
+            self.logger.info(f"[MESSAGE_RECEIVED] Content preview: {content_preview}")
 
-        result: dict | None = None
-        if RESEARCH_MIDDLEWARE_AVAILABLE and isinstance(event, MessageAction) and event.content:
-            try:
-                result = await research_middleware.process_message(
-                    user_message=event.content,
-                    session_id=self.sid,
-                    conversation_metadata={'source': 'subsequent_message'},
-                )
-
-                if result.get('should_trigger_research'):
-                    self.logger.info(
-                        "🔬 Research mode triggered",
-                        extra={
-                            'session_id': self.sid,
-                            'task_type': result.get('task_type'),
-                            'confidence': result.get('confidence'),
-                            'experiment_id': result.get('experiment_id'),
-                        },
-                    )
-
-                    experiment_id = result.get('experiment_id', 'N/A')
-                    self.logger.debug(f"📋 Experiment ID: {experiment_id}")
+        # Direct research classification for first user message
+        # Use conversation-specific tracking instead of session attribute
+        if isinstance(event, MessageAction) and event.content:
+            # Check if this conversation has been classified already
+            if not hasattr(self, '_research_checked_conversations'):
+                self._research_checked_conversations = set()
+            
+            conversation_id = self.sid
+            self.logger.info(f"[RESEARCH_CHECK] Checking if research should trigger for {conversation_id}")
+            self.logger.info(f"[RESEARCH_CHECK] Event type: {type(event).__name__}, already_checked: {conversation_id in self._research_checked_conversations}")
+            if isinstance(event, MessageAction):
+                self.logger.info(f"[RESEARCH_CHECK] MessageAction detected with content length: {len(event.content) if event.content else 0}")
+            
+            if conversation_id not in self._research_checked_conversations:
+                self._research_checked_conversations.add(conversation_id)
+                try:
+                    from extensions.uagent_research.classifier.task_classifier import task_classifier
+                    from extensions.uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
+                    import uuid
                     
-                    self.active_research_experiment_id = experiment_id
-                    self._last_progress_broadcast = 0.0
-
-                    # Register with coordinator for proper tracking
-                    coordinator = self.get_or_create_coordinator()
-                    try:
-                        self.logger.debug(f"🔍 Attempting to track experiment {experiment_id} in coordinator")
-                        # Track the existing experiment in coordinator
-                        if coordinator.track_existing_experiment(experiment_id):
-                            self.logger.info(f"✅ Research experiment {experiment_id} tracked by coordinator")
-                        else:
-                            self.logger.warning(f"⚠️ Failed to track experiment {experiment_id} in coordinator")
-                        
-                        # Register in session state
-                        self.logger.debug(f"📝 Registering experiment {experiment_id} in session")
-                        self.register_experiment(experiment_id)
-                        self.logger.debug(f"✅ Experiment {experiment_id} registered in session")
-                    except Exception as e:
-                        self.logger.error(f"❌ Failed to register research with coordinator: {e}", exc_info=True)
-
-                    if self._progress_reporter_task is None or self._progress_reporter_task.done():
-                        self.logger.info(f"📊 Starting progress reporter for {experiment_id}")
-                        self._progress_reporter_task = asyncio.create_task(
-                            self._report_research_progress()
-                        )
-                    else:
-                        self.logger.debug("📊 Progress reporter already active")
-
-                    research_info = (
-                        "\n\n[System: Research mode activated - "
-                        f"Experiment ID: {experiment_id}, "
-                        f"Confidence: {result.get('confidence', 0):.2f}. "
-                        "Check the Research Tree tab for live progress.]"
+                    self.logger.info(f"Classifying first message in session {self.sid}")
+                    
+                    should_trigger, task_type, confidence, reasoning = task_classifier.should_trigger_research(
+                        event.content, confidence_threshold=0.7
                     )
-                    event.content += research_info
-
-            except Exception:
-                self.logger.error(
-                    "Failed to process research middleware", exc_info=True
-                )
-                result = None
-
-        mode = result.get('mode') if isinstance(result, dict) else None
-
-        if mode == 'progress_query':
-            summary = (
-                result.get('progress_data', {}).get('summary')
-                if isinstance(result, dict)
-                else None
-            ) or 'No active research found for this conversation.'
-            self.agent_session.event_stream.add_event(
-                MessageAction(content=summary),
-                EventSource.AGENT,
-            )
-            controller = self.agent_session.controller
-            if controller is not None:
-                await controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
-            return
-
-        if mode == 'control_intent':
-            control_result = result.get('control_result', {}) if isinstance(result, dict) else {}
-            message = control_result.get('message') or 'Control command processed.'
-            self.agent_session.event_stream.add_event(
-                MessageAction(content=message),
-                EventSource.AGENT,
-            )
-            controller = self.agent_session.controller
-            if controller is not None:
-                await controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
-            return
+                    
+                    if should_trigger:
+                        self.logger.info(f"🔬 Research activated: {task_type.value} ({confidence:.0%})")
+                        
+                        # Use middleware to start research so frontend can access the tree
+                        from extensions.uagent_research.middleware.research_middleware import research_middleware
+                        experiment_id = await research_middleware.start_research(
+                            goal=event.content,
+                            session_id=self.sid,
+                            research_type='scientific',
+                            config={'max_iterations': 50}
+                        )
+                        self.logger.info(f"[RESEARCH] Started via middleware: {experiment_id}")
+                        self.logger.info(f"[RESEARCH_TRIGGER] ✅ Research auto-started successfully")
+                        self.logger.info(f"[RESEARCH_TRIGGER] Experiment ID: {experiment_id}")
+                        self.logger.info(f"[RESEARCH_TRIGGER] Goal preview: {event.content[:100]}")
+                        
+                        # Track in session and start progress reporting
+                        self.active_research_experiment_id = experiment_id
+                        self._last_progress_broadcast = 0.0
+                        
+                        # Register with coordinator
+                        coordinator = self.get_or_create_coordinator()
+                        try:
+                            if coordinator.track_existing_experiment(experiment_id):
+                                self.logger.info(f"✅ Research tracked by coordinator")
+                            self.register_experiment(experiment_id)
+                        except Exception as e:
+                            self.logger.error(f"Failed to register with coordinator: {e}", exc_info=True)
+                        
+                        # Start progress reporting
+                        if self._progress_reporter_task is None or self._progress_reporter_task.done():
+                            self._progress_reporter_task = asyncio.create_task(
+                                self._report_research_progress()
+                            )
+                except Exception as e:
+                    self.logger.error(f"Classification failed: {e}", exc_info=True)
 
         # This checks if the model supports images
         if isinstance(event, MessageAction) and event.image_urls:

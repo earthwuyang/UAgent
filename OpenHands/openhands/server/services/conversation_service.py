@@ -33,13 +33,13 @@ from openhands.utils.conversation_summary import get_default_conversation_title
 # Import research middleware
 try:
     from extensions.uagent_research.middleware.research_middleware import research_middleware
-    RESEARCH_MIDDLEWARE_AVAILABLE = True
+    RESEARCH_EXTENSION_AVAILABLE = True
     logger.info("Research middleware loaded successfully")
 except ImportError as e:
-    RESEARCH_MIDDLEWARE_AVAILABLE = False
+    RESEARCH_EXTENSION_AVAILABLE = False
     logger.warning(f"Research middleware not available: {str(e)}")
 except Exception as e:
-    RESEARCH_MIDDLEWARE_AVAILABLE = False
+    RESEARCH_EXTENSION_AVAILABLE = False
     logger.error(f"Failed to load research middleware: {str(e)}", exc_info=True)
 
 
@@ -164,7 +164,7 @@ async def start_conversation(
 
     # Check if research mode should be triggered from initial message (legacy path)
     research_triggered = False
-    if RESEARCH_MIDDLEWARE_AVAILABLE and initial_user_msg:
+    if RESEARCH_EXTENSION_AVAILABLE and initial_user_msg:
         try:
             # Process research in a non-blocking way - don't await the actual research execution
             result = await research_middleware.process_message(
@@ -220,7 +220,7 @@ async def start_conversation(
 
     # Single-goal auto-start: if conversation has an immutable research goal set,
     # start research tied to this conversation id regardless of initial message.
-    if RESEARCH_MIDDLEWARE_AVAILABLE and conversation_metadata.research_goal:
+    if RESEARCH_EXTENSION_AVAILABLE and conversation_metadata.research_goal:
         try:
             logger.info(
                 f"Starting single-goal research for conversation {conversation_id}",
@@ -291,7 +291,7 @@ async def start_conversation(
     logger.info(f'Finished initializing conversation {agent_loop_info.conversation_id}')
     # If no research was triggered and no goal is set, ask user to provide a single research goal
     if (
-        RESEARCH_MIDDLEWARE_AVAILABLE
+        RESEARCH_EXTENSION_AVAILABLE
         and not research_triggered
         and not conversation_metadata.research_locked
     ):

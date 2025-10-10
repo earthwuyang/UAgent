@@ -1254,3 +1254,9 @@ curl -X PATCH http://localhost:3000/api/research/experiments/exp_123 \
 - `❌ Failed to publish tree state` - Tree publishing failed
 - `⚠️ No active tree for experiment` - Tree data not found in API
 
+## Troubleshooting Research Middleware
+
+- Ensure `.env` includes `ENABLE_AUTO_RESEARCH_TRIGGER=true` (now documented in `.env.example`).
+- On startup, check server logs for `Research middleware availability: <bool>` emitted from `openhands.server.session.session`.
+- Config import failures now produce `Failed to import research config` warnings and disable auto-triggering; resolve missing dependencies if seen.
+- Run `python extensions/uagent_research/tools/verify_research_middleware_import.py` from the project root to generate `research_import_verification.json` summarizing import-chain status.

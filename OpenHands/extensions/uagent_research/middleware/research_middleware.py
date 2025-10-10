@@ -17,20 +17,25 @@ import time
 import uuid
 from typing import Optional, Dict, Any, Tuple
 
-from ..classifier.task_classifier import task_classifier, TaskType
-from ..orchestrator.tree_orchestrator import TreeSearchOrchestrator
-from ..uagent_research.models.research_tree import Budget
+from extensions.uagent_research.classifier.task_classifier import task_classifier, TaskType
+from extensions.uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
+from extensions.uagent_research.uagent_research.models.research_tree import Budget
+
+logger = logging.getLogger(__name__)
 
 try:
-    from ..config import (
+    from extensions.uagent_research.config import (
         ENABLE_AUTO_RESEARCH_TRIGGER,
         ENABLE_AGENT_COORDINATION,
         RESEARCH_CONFIDENCE_THRESHOLD,
         RESEARCH_POLL_INTERVAL,
         PROGRESS_CACHE_TTL,
     )
-except ImportError:
-    # Fallback if config not available
+except ImportError as config_error:
+    logger.warning(
+        "Failed to import research config; using safe defaults and disabling auto trigger: %s",
+        config_error,
+    )
     ENABLE_AUTO_RESEARCH_TRIGGER = False
     ENABLE_AGENT_COORDINATION = True
     RESEARCH_CONFIDENCE_THRESHOLD = 0.7
@@ -40,17 +45,14 @@ except ImportError:
 # Enforce single-goal per conversation: do not auto-trigger new research from chat
 SINGLE_GOAL_MODE = True
 
-# Initialize logger early to avoid usage before definition
-logger = logging.getLogger(__name__)
-
 # Import control components
 try:
-    from ..control.control_bus import ControlMessage
-    from ..services.research_session_manager import (
+    from extensions.uagent_research.control.control_bus import ControlMessage
+    from extensions.uagent_research.services.research_session_manager import (
         ResearchSessionManager,
         ExperimentStatus,
     )
-    from ..orchestrator.event_bus import get_event_bus
+    from extensions.uagent_research.orchestrator.event_bus import get_event_bus
     CONTROL_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Control components not available: {e}")
@@ -142,14 +144,14 @@ class ResearchMiddleware:
 
     def _register_adapters(self):
         """Register all agent adapters with the adapter registry"""
-        from ..adapters.ensure_adapters import ensure_research_adapters_registered
+        from extensions.uagent_research.adapters.ensure_adapters import ensure_research_adapters_registered
         ensure_research_adapters_registered()
 
     def get_session_manager(self) -> Optional['ResearchSessionManager']:
         """Get or create session manager"""
         if self._session_manager is None and CONTROL_AVAILABLE:
             try:
-                from ..control.control_bus import ControlBus
+                from extensions.uagent_research.control.control_bus import ControlBus
                 event_bus = get_event_bus()
                 control_bus = ControlBus()
                 self._session_manager = ResearchSessionManager(

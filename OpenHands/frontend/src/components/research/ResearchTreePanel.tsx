@@ -23,9 +23,12 @@ import { ResearchErrorBoundary } from './ResearchErrorBoundary';
 import { cn } from '#/utils/utils';
 import './research-tree.css';
 
-interface ResearchTreePanelProps {
+export interface ResearchTreePanelProps {
   experimentId: string;
   onClose: () => void;
+  size?: { width: number; height: number };
+  onSizeChange?: (size: { width: number; height: number }) => void;
+  onDragHandleMouseDown?: (e: React.MouseEvent) => void;
 }
 
 const detailPanelTransition = {
@@ -34,7 +37,13 @@ const detailPanelTransition = {
   stiffness: 240,
 };
 
-export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelProps) {
+export function ResearchTreePanel({ 
+  experimentId, 
+  onClose,
+  size,
+  onSizeChange,
+  onDragHandleMouseDown,
+}: ResearchTreePanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
@@ -162,9 +171,21 @@ export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelPr
     [edges.length, nodes.size, stats.max_depth, stats.total_cost, stats.total_tokens]
   );
 
+  const panelStyle = size ? {
+    width: `${size.width}px`,
+    height: `${size.height}px`,
+  } : undefined;
+
   return (
-    <div className={cn('research-tree-panel', isMinimized && 'minimized')}>
-      <div className="research-tree-header">
+    <div 
+      className={cn('research-tree-panel', 'research-tree-panel-floating', isMinimized && 'minimized')}
+      style={panelStyle}
+    >
+      <div 
+        className="research-tree-header"
+        onMouseDown={onDragHandleMouseDown}
+        style={{ cursor: onDragHandleMouseDown ? 'move' : 'default' }}
+      >
         <div>
           <h2>🔬 Research Tree</h2>
           <div

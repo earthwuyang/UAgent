@@ -10,7 +10,7 @@ import re
 from typing import Optional, Dict, Any, List
 from enum import Enum
 
-from ..uagent_research.models.research_tree import Task, Context, ResearchNode, NodeType
+from extensions.uagent_research.uagent_research.models.research_tree import Task, Context, ResearchNode, NodeType
 
 logger = logging.getLogger(__name__)
 

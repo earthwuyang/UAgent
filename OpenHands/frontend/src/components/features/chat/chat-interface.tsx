@@ -44,6 +44,21 @@ function getEntryPoint(
 }
 
 export function ChatInterface() {
+  // Listen for WebSocket send errors
+  React.useEffect(() => {
+    const handleWebSocketError = (event: CustomEvent) => {
+      const error = event.detail?.error || 'Failed to send message';
+      console.error('[MESSAGE_SEND_ERROR]', error);
+      displayErrorToast(`Message failed to send: ${error}. Please try again.`);
+    };
+
+    window.addEventListener('websocket-send-error', handleWebSocketError as EventListener);
+
+    return () => {
+      window.removeEventListener('websocket-send-error', handleWebSocketError as EventListener);
+    };
+  }, []);
+
   const dispatch = useDispatch();
   const { getErrorMessage } = useWSErrorMessage();
   const { send, isLoadingMessages, parsedEvents } = useWsClient();
@@ -70,6 +85,7 @@ export function ChatInterface() {
     "positive" | "negative"
   >("positive");
   const [feedbackModalIsOpen, setFeedbackModalIsOpen] = React.useState(false);
+  const [isSendingMessage, setIsSendingMessage] = React.useState(false);
   const { selectedRepository, replayJson } = useSelector(
     (state: RootState) => state.initialQuery,
   );
@@ -101,6 +117,17 @@ export function ChatInterface() {
     // Create mutable copies of the arrays
     const images = [...originalImages];
     const files = [...originalFiles];
+    
+    // Log message send attempt
+    console.log('[MESSAGE_SEND] Starting to send message:', {
+      contentLength: content.length,
+      imageCount: images.length,
+      fileCount: files.length,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Set sending state
+    setIsSendingMessage(true);
     if (events.length === 0) {
       posthog.capture("initial_query_submitted", {
         entry_point: getEntryPoint(
@@ -124,6 +151,7 @@ export function ChatInterface() {
     if (!validation.isValid) {
       displayErrorToast(`Error: ${validation.errorMessage}`);
       return; // Stop processing if validation fails
+      setIsSendingMessage(false);
     }
 
     const promises = images.map((image) => convertImageToBase64(image));
@@ -142,7 +170,21 @@ export function ChatInterface() {
     const prompt =
       uploadedFiles.length > 0 ? `${content}\n\n${filePrompt}` : content;
 
-    send(createChatMessage(prompt, imageUrls, uploadedFiles, timestamp));
+    const message = createChatMessage(prompt, imageUrls, uploadedFiles, timestamp);
+    
+    console.log('[MESSAGE_SEND] Sending message via WebSocket:', {
+      action: message.action,
+      contentPreview: prompt.substring(0, 100),
+      imageUrlCount: imageUrls.length,
+      uploadedFileCount: uploadedFiles.length
+    });
+    
+    send(message);
+    
+    console.log('[MESSAGE_SEND] Message sent successfully');
+    
+    // Clear sending state
+    setIsSendingMessage(false);
     setOptimisticUserMessage(content);
     setMessageToSend(null);
   };
@@ -240,7 +282,8 @@ export function ChatInterface() {
             isWaitingForUserInput={isWaitingForUserInput}
             hasSubstantiveAgentActions={hasSubstantiveAgentActions}
             optimisticUserMessage={!!optimisticUserMessage}
-          />
+          
+            isSending={isSendingMessage}/>
         </div>
 
         {config?.APP_MODE !== "saas" && (

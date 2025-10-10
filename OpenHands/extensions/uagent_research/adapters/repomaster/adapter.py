@@ -16,9 +16,9 @@ vendor_path = os.path.join(os.path.dirname(__file__), "../../vendor/repomaster")
 if vendor_path not in sys.path:
     sys.path.insert(0, vendor_path)
 
-from ...adapters.base.agent_adapter import AgentAdapter
-from ...uagent_research.models.research_tree import Task, Context
-from ...uagent_research.models.events import (
+from extensions.uagent_research.adapters.base.agent_adapter import AgentAdapter
+from extensions.uagent_research.uagent_research.models.research_tree import Task, Context
+from extensions.uagent_research.uagent_research.models.events import (
     ResearchEvent,
     PlanEvent,
     StepEvent,

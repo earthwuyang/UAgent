@@ -140,6 +140,49 @@ const getTaskTrackingObservationContent = (
   return content;
 };
 
+const getSubAgentSpawnedContent = (event: SubAgentSpawnedObservation): string => {
+  const { sub_agent_id, sub_agent_type, goal } = event.extras;
+  const truncatedGoal = goal.length > 200 ? goal.substring(0, 200) + "..." : goal;
+  return `Sub-agent ${sub_agent_id} (${sub_agent_type}) spawned with goal: ${truncatedGoal}`;
+};
+
+const getSubAgentProgressContent = (event: SubAgentProgressObservation): string => {
+  const { sub_agent_id, status, progress, current_task, tree_stats } = event.extras;
+  const progressPercent = Math.round(progress * 100);
+  let content = `Status: ${status}, Progress: ${progressPercent}%, Task: ${current_task}`;
+  
+  if (tree_stats) {
+    const stats = [];
+    if (tree_stats.total_nodes !== undefined) stats.push(`Nodes: ${tree_stats.total_nodes}`);
+    if (tree_stats.total_cost !== undefined) stats.push(`Cost: $${tree_stats.total_cost.toFixed(2)}`);
+    if (stats.length > 0) {
+      content += `\n${stats.join(", ")}`;
+    }
+  }
+  
+  return content;
+};
+
+const getSubAgentCompletedContent = (event: SubAgentCompletedObservation): string => {
+  const { sub_agent_id, status, result, tree_stats } = event.extras;
+  let content = `Sub-agent ${sub_agent_id} ${status}`;
+  
+  if (result) {
+    content += `: ${result}`;
+  }
+  
+  if (tree_stats) {
+    const stats = [];
+    if (tree_stats.completed_nodes !== undefined) stats.push(`${tree_stats.completed_nodes} nodes`);
+    if (tree_stats.iterations !== undefined) stats.push(`${tree_stats.iterations} iterations`);
+    if (stats.length > 0) {
+      content += `\nCompleted ${stats.join(" in ")}`;
+    }
+  }
+  
+  return content;
+};
+
 export const getObservationContent = (event: OpenHandsObservation): string => {
   switch (event.observation) {
     case "read":
@@ -158,6 +201,12 @@ export const getObservationContent = (event: OpenHandsObservation): string => {
       return getRecallObservationContent(event);
     case "task_tracking":
       return getTaskTrackingObservationContent(event);
+    case "sub_agent_spawned":
+      return getSubAgentSpawnedContent(event as SubAgentSpawnedObservation);
+    case "sub_agent_progress":
+      return getSubAgentProgressContent(event as SubAgentProgressObservation);
+    case "sub_agent_completed":
+      return getSubAgentCompletedContent(event as SubAgentCompletedObservation);
     default:
       return getDefaultEventContent(event);
   }

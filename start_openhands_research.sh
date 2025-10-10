@@ -20,6 +20,9 @@ export OPENHANDS_PORT="${OPENHANDS_PORT:-3000}"
 echo "[start_openhands_research] Using OPENHANDS_HEADLESS_RUNTIME=${OPENHANDS_HEADLESS_RUNTIME}"
 echo "[start_openhands_research] Starting OpenHands on port ${OPENHANDS_PORT}"
 
+# Add OpenHands to PYTHONPATH so we can import from source
+export PYTHONPATH="${SCRIPT_DIR}/OpenHands:${PYTHONPATH:-}"
+
 # Pick Python interpreter (prefer local venv)
 if [[ -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then
   PYTHON="${SCRIPT_DIR}/.venv/bin/python"
@@ -27,6 +30,6 @@ else
   PYTHON="python"
 fi
 
-# Start the OpenHands server (FastAPI)
-exec "$PYTHON" -m uvicorn openhands.server.app:app --host 0.0.0.0 --port "${OPENHANDS_PORT}"
-
+# Start the OpenHands server (FastAPI) - use openhands.server.listen:app
+cd "${SCRIPT_DIR}/OpenHands"
+exec "$PYTHON" -m uvicorn openhands.server.listen:app --host 0.0.0.0 --port "${OPENHANDS_PORT}" --reload --reload-exclude "./workspace"

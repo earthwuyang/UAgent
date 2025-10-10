@@ -31,7 +31,7 @@ from openhands.events.observation import (
 )
 from openhands.events.stream import EventStreamSubscriber
 
-from ..uagent_research.models.events import (
+from extensions.uagent_research.uagent_research.models.events import (
     ResearchEvent,
     StepEvent,
     PlanEvent,

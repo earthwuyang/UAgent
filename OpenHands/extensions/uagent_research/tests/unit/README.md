@@ -8,7 +8,9 @@ This directory contains unit tests for the UAgent Research extension.
 tests/unit/
 ├── __init__.py
 ├── README.md (this file)
-└── test_research_tree_models.py  # Tests for research tree models
+├── conftest.py  # Shared fixtures
+├── test_research_tree_models.py  # Tests for research tree models
+└── test_control_bus.py  # Tests for control bus (NEW)
 ```
 
 ## Running Tests
@@ -74,6 +76,37 @@ Common fixtures are available in test files:
 - `sample_tree`: Factory for creating ResearchTree instances
 - `populated_tree`: Pre-populated tree for testing traversal
 
+## Control Bus Testing
+
+### Test Classes
+- `TestControlMessage`: Tests for ControlMessage Pydantic model
+- `TestControlBus`: Core functionality tests
+- `TestControlBusEdgeCases`: Edge cases and error conditions
+- `TestControlBusConcurrency`: Concurrent operations and stress tests
+- `TestControlBusSingleton`: Singleton pattern tests
+- `TestControlBusIntegration`: Integration scenarios
+
+### Fixtures
+- `sample_control_message`: Factory for creating ControlMessage instances
+- `control_bus`: Fresh ControlBus instance for each test
+- `experiment_id`: Standard experiment ID for tests
+- `subscriber_helper`: Helper for creating test subscribers
+
+### Running Control Bus Tests
+```bash
+# Run all control bus tests
+pytest tests/unit/test_control_bus.py
+
+# Run specific test class
+pytest tests/unit/test_control_bus.py::TestControlMessage
+
+# Run with coverage
+pytest tests/unit/test_control_bus.py --cov=control.control_bus --cov-report=html
+```
+
+### Coverage Goals
+- Control bus module: >85%
+
 ### Example Test
 
 ```python
@@ -102,6 +135,7 @@ class TestResearchNode:
 
 - Overall: >80%
 - Models module: >90%
+- Control bus module: >85% (NEW)
 - Critical paths: 100%
 
 ## Best Practices

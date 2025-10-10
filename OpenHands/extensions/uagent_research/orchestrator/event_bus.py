@@ -19,9 +19,9 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import json
 
-from ..uagent_research.models.events import ResearchEvent, EventType, StepEvent
+from extensions.uagent_research.uagent_research.models.events import ResearchEvent, EventType, StepEvent
 try:
-    from ..api.websocket_routes import broadcast_tree_update
+    from extensions.uagent_research.api.websocket_routes import broadcast_tree_update
     WEBSOCKET_AVAILABLE = True
 except ImportError:
     WEBSOCKET_AVAILABLE = False
@@ -717,7 +717,7 @@ async def close_event_bus():
 # Example usage
 async def test_event_bus():
     """Test event bus"""
-    from ..uagent_research.models.events import StepEvent, CompleteEvent
+    from extensions.uagent_research.uagent_research.models.events import StepEvent, CompleteEvent
 
     bus = EventBus()
 

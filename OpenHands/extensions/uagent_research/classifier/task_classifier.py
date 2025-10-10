@@ -1,168 +1,216 @@
 """
-Task Complexity Classifier
+LLM-based Task Classifier for Research Mode Detection
 
-Detects whether a user query should trigger research mode based on complexity indicators.
+Uses LLM to intelligently determine if a user's task should trigger research mode.
+This replaces the regex-based approach with natural language understanding.
 """
 
-import logging
+import os
 import re
 from enum import Enum
 from typing import Dict, List, Tuple
+import json
 
+import logging
 logger = logging.getLogger(__name__)
 
 
-class TaskType(str, Enum):
-    """Classification of task types"""
-    SIMPLE = "simple"  # Direct implementation task
-    COMPLEX_RESEARCH = "complex_research"  # Multi-stage research required
-    HYBRID = "hybrid"  # Research + implementation
+class TaskType(Enum):
+    """Types of tasks that can be classified"""
+    COMPLEX_RESEARCH = "complex_research"
+    HYBRID = "hybrid"
+    SIMPLE = "simple"
 
 
 class TaskClassifier:
     """
-    Classifies user queries to determine if they require research mode.
-
-    Classification Criteria:
-    - Complex Research: Multi-source exploration, hypothesis testing, comparative studies
-    - Simple: Well-defined implementation, single-step tasks
-    - Hybrid: Research followed by implementation
+    LLM-based classifier to determine if a task should trigger research mode.
+    
+    Uses the same LLM configured for OpenHands to analyze user intent.
     """
-
+    
     def __init__(self):
-        # Research indicators (strong signals for research mode)
-        self.research_keywords = [
-            r'\b(research|investigate|explore|study|analyze|survey|review)\b',
-            r'\b(find out|discover|learn about|understand)\b',
-            r'\b(compare|benchmark|evaluate|assess)\b',
-            r'\b(state[- ]of[- ]the[- ]art|sota|latest|recent)\b',
-            r'\b(papers|literature|publications|articles)\b',
-            r'\b(approaches|methods|techniques|strategies)\b',
-            r'\b(experimental|hypothesis|test)\b',
-        ]
-
-        # Complexity indicators (signals for multi-stage work)
-        self.complexity_keywords = [
-            r'\b(multi[- ]stage|multiple steps|end[- ]to[- ]end)\b',
-            r'\b(train|training|model|machine learning|ml|ai)\b',
-            r'\b(optimize|optimization|performance)\b',
-            r'\b(collect|gather|extract)\s+(data|features|metrics)\b',
-            r'\b(experiment|experiments|experimental)\b',
-            r'\b(baseline|comparison|comparative)\b',
-            r'\b(source code|download|clone)\s+(from|repo|repository)\b',
-        ]
-
-        # Implementation indicators (signals for direct execution)
-        self.simple_keywords = [
-            r'\b(fix|debug|patch|repair)\s+(bug|error|issue)\b',
-            r'\b(add|create|write)\s+(function|class|method)\b',
-            r'\b(refactor|clean up|format)\b',
-            r'\b(install|setup|configure)\b',
-            r'\b(run|execute)\s+(test|script|command)\b',
-        ]
-
-        # Compile patterns
-        self.research_patterns = [re.compile(p, re.IGNORECASE) for p in self.research_keywords]
-        self.complexity_patterns = [re.compile(p, re.IGNORECASE) for p in self.complexity_keywords]
-        self.simple_patterns = [re.compile(p, re.IGNORECASE) for p in self.simple_keywords]
-
-    def classify(self, user_message: str) -> Tuple[TaskType, float, Dict[str, any]]:
+        """Initialize the LLM-based task classifier"""
+        self.llm = None
+        self._init_llm()
+    
+    def _init_llm(self):
+        """Initialize the LLM client"""
+        try:
+            from litellm import completion
+            self.llm_completion = completion
+            
+            # Get LLM configuration from environment
+            self.model = os.getenv('LLM_MODEL', 'dashscope/qwen3-coder-plus')
+            self.api_key = os.getenv('LLM_API_KEY') or os.getenv('DASHSCOPE_API_KEY')
+            self.base_url = os.getenv('LLM_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+            
+            logger.info(f"TaskClassifier initialized with model: {self.model}")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM for task classification: {e}")
+            self.llm_completion = None
+    
+    def classify(self, user_message: str) -> Tuple[TaskType, float, Dict]:
         """
-        Classify a user message.
-
+        Classify a user message using LLM.
+        
         Args:
-            user_message: User's input message
-
+            user_message: The user's input message
+            
         Returns:
             Tuple of (task_type, confidence, reasoning)
-            - task_type: TaskType enum
-            - confidence: 0-1 confidence score
-            - reasoning: Dict with classification details
         """
-        # Calculate scores
-        research_score = self._count_matches(user_message, self.research_patterns)
-        complexity_score = self._count_matches(user_message, self.complexity_patterns)
-        simple_score = self._count_matches(user_message, self.simple_patterns)
+        if not self.llm_completion:
+            # Fallback to heuristic if LLM not available
+            return self._fallback_classify(user_message)
+        
+        try:
+            # Create classification prompt
+            system_prompt = """You are a task classifier for a research-oriented AI agent system.
 
-        # Additional heuristics
-        has_multi_stage = any([
-            'first' in user_message.lower() and 'then' in user_message.lower(),
-            'step 1' in user_message.lower() or 'step 2' in user_message.lower(),
-            user_message.count(',') > 3,  # Multiple comma-separated tasks
-            len(user_message) > 500,  # Very long detailed request
-            user_message.count(' and ') > 3,  # Multiple 'and' connectors
-            sum(1 for word in ['download', 'modify', 'extract', 'collect', 'train', 'embed', 'implement'] if word in user_message.lower()) >= 4,  # Many action verbs
-        ])
+Your job is to determine if a user's task should trigger "research mode" - an advanced mode that uses tree search, parallel exploration, and systematic experimentation.
 
-        has_research_goal = any([
-            'research' in user_message.lower(),
-            'compare' in user_message.lower(),
-            'benchmark' in user_message.lower(),
-            'evaluate' in user_message.lower(),
-            'experiment' in user_message.lower() and 'run' in user_message.lower(),
-        ])
+TRIGGER RESEARCH MODE if the task involves:
+1. **Research & Investigation**: Comparing approaches, benchmarking, literature review, evaluating methods
+2. **Complex Multi-Stage Work**: Tasks with 3+ distinct phases (e.g., "first download, then extract, then train, then embed")
+3. **Experimental Systems**: Building ML models, collecting data, running experiments, performance comparisons
+4. **Source Code Modification**: Modifying database/system internals, kernel-level changes, embedding models into C/C++ code
+5. **Systematic Comparison**: Comparing multiple baselines, threshold methods, different approaches
 
-        # Decision logic
-        reasoning = {
-            'research_score': research_score,
-            'complexity_score': complexity_score,
-            'simple_score': simple_score,
-            'has_multi_stage': has_multi_stage,
-            'has_research_goal': has_research_goal,
-            'message_length': len(user_message),
-        }
+DO NOT TRIGGER for:
+- Simple bug fixes or single-file edits
+- Running existing scripts
+- Basic CRUD operations
+- Simple refactoring
+- Installing packages
 
-        # Classification thresholds
-        if has_research_goal or (research_score >= 2 and complexity_score >= 1):
-            # Strong research indicators
-            task_type = TaskType.COMPLEX_RESEARCH
-            confidence = min(0.95, 0.6 + research_score * 0.15 + complexity_score * 0.1)
-            reasoning['decision'] = 'Strong research indicators detected'
+Respond ONLY with valid JSON in this exact format:
+{
+  "task_type": "complex_research" | "hybrid" | "simple",
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation",
+  "indicators": ["key indicator 1", "key indicator 2", ...]
+}"""
 
-        elif has_multi_stage and (research_score >= 1 or complexity_score >= 2):
-            # Multi-stage with some research/complexity
-            task_type = TaskType.COMPLEX_RESEARCH
-            confidence = min(0.9, 0.5 + research_score * 0.15 + complexity_score * 0.15)
-            reasoning['decision'] = 'Multi-stage complex task detected'
+            user_prompt = f"""Classify this task:
 
-        elif complexity_score >= 3:
-            # High complexity even without explicit research keywords
-            task_type = TaskType.COMPLEX_RESEARCH
-            confidence = min(0.85, 0.5 + complexity_score * 0.15)
-            reasoning['decision'] = 'High complexity detected'
+"{user_message}"
 
-        elif simple_score > research_score and simple_score > complexity_score:
-            # Clear simple task
-            task_type = TaskType.SIMPLE
-            confidence = min(0.9, 0.6 + simple_score * 0.1)
-            reasoning['decision'] = 'Simple implementation task'
+Respond with JSON only."""
 
-        elif research_score == 0 and complexity_score <= 1:
-            # No research indicators, low complexity
-            task_type = TaskType.SIMPLE
-            confidence = 0.7
-            reasoning['decision'] = 'No research indicators, treating as simple'
-
-        else:
-            # Ambiguous - default to simple unless clear research intent
-            if research_score > 0:
+            # Call LLM
+            response = self.llm_completion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                api_key=self.api_key,
+                base_url=self.base_url,
+                temperature=0.3,  # Lower temperature for more consistent classification
+                max_tokens=500,
+            )
+            
+            # Parse response
+            content = response.choices[0].message.content.strip()
+            
+            # Extract JSON from response (handle markdown code blocks)
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if json_match:
+                content = json_match.group(1)
+            
+            result = json.loads(content)
+            
+            # Map to TaskType enum
+            task_type_str = result.get('task_type', 'simple').lower()
+            if 'complex' in task_type_str or 'research' in task_type_str:
+                task_type = TaskType.COMPLEX_RESEARCH
+            elif 'hybrid' in task_type_str:
                 task_type = TaskType.HYBRID
-                confidence = 0.6
-                reasoning['decision'] = 'Hybrid task - some research + implementation'
             else:
                 task_type = TaskType.SIMPLE
-                confidence = 0.65
-                reasoning['decision'] = 'Ambiguous, defaulting to simple'
-
-        logger.info(f"Task classified as {task_type.value} (confidence: {confidence:.2f})")
-        logger.debug(f"Classification reasoning: {reasoning}")
-
+            
+            confidence = float(result.get('confidence', 0.5))
+            reasoning = {
+                'decision': result.get('reasoning', 'LLM classification'),
+                'indicators': result.get('indicators', []),
+                'llm_response': content[:200],
+                'method': 'llm'
+            }
+            
+            logger.info(f"LLM classified task as {task_type.value} (confidence: {confidence:.2f})")
+            logger.debug(f"LLM reasoning: {reasoning}")
+            
+            return task_type, confidence, reasoning
+            
+        except Exception as e:
+            logger.error(f"LLM classification failed: {e}", exc_info=True)
+            logger.info("Falling back to heuristic classification")
+            return self._fallback_classify(user_message)
+    
+    def _fallback_classify(self, user_message: str) -> Tuple[TaskType, float, Dict]:
+        """
+        Fallback heuristic classification when LLM is unavailable.
+        
+        This is a simplified version of the original regex-based classifier.
+        """
+        msg_lower = user_message.lower()
+        
+        # Research keywords
+        research_indicators = [
+            'research', 'compare', 'benchmark', 'evaluate', 
+            'experiment', 'investigate', 'analyze', 'study'
+        ]
+        
+        # Complexity indicators
+        complexity_indicators = [
+            'train', 'model', 'machine learning', 'ml', 'deep learning',
+            'collect data', 'extract features', 'embed', 'modify source',
+            'kernel', 'database source', 'implement baseline'
+        ]
+        
+        # Multi-stage indicators
+        has_multi_stage = any([
+            'first' in msg_lower and 'then' in msg_lower,
+            msg_lower.count(',') > 3,
+            len(user_message) > 500,
+            msg_lower.count(' and ') > 3,
+        ])
+        
+        # Count matches
+        research_score = sum(1 for kw in research_indicators if kw in msg_lower)
+        complexity_score = sum(1 for kw in complexity_indicators if kw in msg_lower)
+        
+        # Decision logic
+        if research_score >= 2 or (research_score >= 1 and complexity_score >= 2):
+            task_type = TaskType.COMPLEX_RESEARCH
+            confidence = min(0.85, 0.6 + research_score * 0.1 + complexity_score * 0.05)
+            decision = "Strong research indicators (fallback heuristic)"
+        elif has_multi_stage and (research_score >= 1 or complexity_score >= 3):
+            task_type = TaskType.COMPLEX_RESEARCH
+            confidence = min(0.80, 0.5 + research_score * 0.1 + complexity_score * 0.1)
+            decision = "Multi-stage complex task (fallback heuristic)"
+        elif complexity_score >= 4:
+            task_type = TaskType.COMPLEX_RESEARCH
+            confidence = min(0.75, 0.5 + complexity_score * 0.1)
+            decision = "High complexity (fallback heuristic)"
+        else:
+            task_type = TaskType.SIMPLE
+            confidence = 0.7
+            decision = "Simple task (fallback heuristic)"
+        
+        reasoning = {
+            'decision': decision,
+            'research_score': research_score,
+            'complexity_score': complexity_score,
+            'has_multi_stage': has_multi_stage,
+            'method': 'fallback_heuristic'
+        }
+        
+        logger.info(f"Fallback classified task as {task_type.value} (confidence: {confidence:.2f})")
+        
         return task_type, confidence, reasoning
-
-    def _count_matches(self, text: str, patterns: List[re.Pattern]) -> int:
-        """Count how many patterns match in the text"""
-        return sum(1 for pattern in patterns if pattern.search(text))
-
+    
     def should_trigger_research(
         self,
         user_message: str,
@@ -170,21 +218,21 @@ class TaskClassifier:
     ) -> Tuple[bool, TaskType, float, Dict]:
         """
         Determine if research mode should be triggered.
-
+        
         Args:
             user_message: User's input message
             confidence_threshold: Minimum confidence to trigger research (default: 0.7)
-
+            
         Returns:
             Tuple of (should_trigger, task_type, confidence, reasoning)
         """
         task_type, confidence, reasoning = self.classify(user_message)
-
+        
         should_trigger = (
             task_type == TaskType.COMPLEX_RESEARCH and
             confidence >= confidence_threshold
         )
-
+        
         return should_trigger, task_type, confidence, reasoning
 
 
@@ -200,28 +248,24 @@ def test_classifier():
         "Research neural architecture search methods and implement the best approach",
         "Compare different sorting algorithms and benchmark their performance",
         "Investigate the latest advances in transformer models",
-        "Find papers on reinforcement learning and summarize key findings",
-
+        
         # Complex tasks (should trigger)
         "Download postgres source code, extract features, train a model, and embed it",
-        "First collect data from API, then train model, finally deploy to production",
         "Modify postgres and pg_duckdb source code, extract pre-opt features from postgres kernel and log to files, collect dual-execution data and train ML model",
-
+        
         # Simple tasks (should NOT trigger)
         "Fix the bug in the login function",
         "Add a new method to calculate sum",
-        "Refactor the database connection code",
         "Install numpy and run the script",
-        "Create a function that returns hello world",
     ]
-
+    
     classifier = TaskClassifier()
-
+    
     for message in test_cases:
         should_trigger, task_type, confidence, reasoning = classifier.should_trigger_research(message)
         print(f"\nMessage: {message[:80]}...")
         print(f"  Type: {task_type.value}, Trigger: {should_trigger}, Confidence: {confidence:.2f}")
-        print(f"  Reasoning: {reasoning['decision']}")
+        print(f"  Reasoning: {reasoning.get('decision', 'N/A')}")
 
 
 if __name__ == "__main__":

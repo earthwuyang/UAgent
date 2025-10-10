@@ -6,7 +6,12 @@ interface MobileLayoutProps {
   isRightPanelShown: boolean;
 }
 
-export function MobileLayout({ isRightPanelShown }: MobileLayoutProps) {
+export function MobileLayout({ 
+  isRightPanelShown,
+}: MobileLayoutProps) {
+  // On mobile, we disable the floating panel and rely on the existing research tab
+  // The floating panel would not work well on small screens, so we keep the tab-based approach
+
   return (
     <div className="flex flex-col gap-3 overflow-auto w-full">
       <div

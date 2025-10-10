@@ -99,6 +99,22 @@ export const isTaskTrackingObservation = (
 ): event is TaskTrackingObservation =>
   isOpenHandsObservation(event) && event.observation === "task_tracking";
 
+
+export const isSubAgentSpawnedObservation = (
+  event: OpenHandsParsedEvent,
+): event is SubAgentSpawnedObservation =>
+  isOpenHandsObservation(event) && event.observation === "sub_agent_spawned";
+
+export const isSubAgentProgressObservation = (
+  event: OpenHandsParsedEvent,
+): event is SubAgentProgressObservation =>
+  isOpenHandsObservation(event) && event.observation === "sub_agent_progress";
+
+export const isSubAgentCompletedObservation = (
+  event: OpenHandsParsedEvent,
+): event is SubAgentCompletedObservation =>
+  isOpenHandsObservation(event) && event.observation === "sub_agent_completed";
+
 export const isStatusUpdate = (event: unknown): event is StatusUpdate =>
   typeof event === "object" &&
   event !== null &&

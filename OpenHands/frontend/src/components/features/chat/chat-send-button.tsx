@@ -12,6 +12,12 @@ export function ChatSendButton({
   handleSubmit,
   disabled,
 }: ChatSendButtonProps) {
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    handleSubmit();
+  };
+
   return (
     <button
       type="button"
@@ -24,7 +30,7 @@ export function ChatSendButton({
       )}
       data-name="arrow-up-circle-fill"
       data-testid="submit-button"
-      onClick={handleSubmit}
+      onClick={handleClick}
       disabled={disabled}
     >
       <ArrowUp color={disabled ? "#959CB2" : "white"} />

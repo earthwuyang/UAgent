@@ -14558,5 +14558,45 @@
     "tr": "Jupyter defteriniz boş. Gösterilecek hücre yok.",
     "de": "Ihr Jupyter-Notebook ist leer. Keine Zellen zum Anzeigen.",
     "uk": "Ваш Jupyter-ноутбук порожній. Немає клітинок для відображення."
+  },
+  "OBSERVATION_MESSAGE$SUB_AGENT_SPAWNED": {
+    "en": "Sub-agent spawned",
+    "zh-CN": "子代理已生成",
+    "zh-TW": "子代理已生成"
+  },
+  "OBSERVATION_MESSAGE$SUB_AGENT_PROGRESS": {
+    "en": "Sub-agent progress update",
+    "zh-CN": "子代理进度更新",
+    "zh-TW": "子代理進度更新"
+  },
+  "OBSERVATION_MESSAGE$SUB_AGENT_COMPLETED": {
+    "en": "Sub-agent completed",
+    "zh-CN": "子代理已完成",
+    "zh-TW": "子代理已完成"
+  },
+  "SUB_AGENT$TYPE": {
+    "en": "Type",
+    "zh-CN": "类型",
+    "zh-TW": "類型"
+  },
+  "SUB_AGENT$GOAL": {
+    "en": "Goal",
+    "zh-CN": "目标",
+    "zh-TW": "目標"
+  },
+  "SUB_AGENT$STATUS": {
+    "en": "Status",
+    "zh-CN": "状态",
+    "zh-TW": "狀態"
+  },
+  "SUB_AGENT$PROGRESS": {
+    "en": "Progress",
+    "zh-CN": "进度",
+    "zh-TW": "進度"
+  },
+  "SUB_AGENT$CURRENT_TASK": {
+    "en": "Current Task",
+    "zh-CN": "当前任务",
+    "zh-TW": "當前任務"
   }
 }

@@ -6,6 +6,8 @@ import { useUpdateConversation } from "#/hooks/mutation/use-update-conversation"
 import { useConversationNameContextMenu } from "#/hooks/use-conversation-name-context-menu";
 import { displaySuccessToast } from "#/utils/custom-toast-handlers";
 import { I18nKey } from "#/i18n/declaration";
+import { FlaskConical } from "lucide-react";
+import { useConversationStore } from "#/state/conversation-store";
 import { EllipsisButton } from "../conversation-panel/ellipsis-button";
 import { ConversationNameContextMenu } from "./conversation-name-context-menu";
 import { SystemMessageModal } from "../conversation-panel/system-message-modal";
@@ -58,6 +60,17 @@ export function ConversationName() {
     showOptions: true, // Enable all options for conversation name
     onContextMenuToggle: setContextMenuOpen,
   });
+
+  // Research panel visibility from store
+  const isResearchPanelVisible = useConversationStore((state) => state.isResearchPanelVisible);
+  const setIsResearchPanelVisible = useConversationStore((state) => state.setIsResearchPanelVisible);
+  
+  // Get research experiment ID from conversation
+  const researchExperimentId = conversation?.research_experiment_id ?? null;
+
+  const handleToggleResearchPanel = () => {
+    setIsResearchPanelVisible(!isResearchPanelVisible);
+  };
 
   const handleDoubleClick = () => {
     setTitleMode("edit");
@@ -149,7 +162,20 @@ export function ConversationName() {
         )}
 
         {titleMode !== "edit" && (
-          <div className="relative flex items-center">
+          <div className="relative flex items-center gap-1">
+            {/* Research Tree Toggle Button */}
+            {researchExperimentId && (
+              <button
+                type="button"
+                onClick={handleToggleResearchPanel}
+                className={`p-1.5 rounded hover:bg-neutral-700 transition-colors ${
+                  isResearchPanelVisible ? 'bg-neutral-700 text-blue-400' : 'text-neutral-400'
+                }`}
+                title="Toggle Research Tree Panel"
+              >
+                <FlaskConical size={16} />
+              </button>
+            )}
             <EllipsisButton fill="#B1B9D3" onClick={handleEllipsisClick} />
             {contextMenuOpen && (
               <ConversationNameContextMenu

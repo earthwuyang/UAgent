@@ -22,6 +22,7 @@ interface InteractiveChatBoxProps {
   onSubmit: (message: string, images: File[], files: File[]) => void;
   onStop: () => void;
   isWaitingForUserInput: boolean;
+  isSending?: boolean;
   hasSubstantiveAgentActions: boolean;
   optimisticUserMessage: boolean;
 }
@@ -32,6 +33,7 @@ export function InteractiveChatBox({
   isWaitingForUserInput,
   hasSubstantiveAgentActions,
   optimisticUserMessage,
+  isSending,
 }: InteractiveChatBoxProps) {
   const dispatch = useDispatch();
   const curAgentState = useAgentStore((state) => state.curAgentState);
@@ -153,7 +155,7 @@ export function InteractiveChatBox({
     (curAgentState === AgentState.LOADING &&
       conversation?.status !== "STOPPED") ||
     (curAgentState === AgentState.RUNNING &&
-      conversation?.status !== "STOPPED");
+      conversation?.status !== "STOPPED") || isSending;
 
   return (
     <div data-testid="interactive-chat-box">

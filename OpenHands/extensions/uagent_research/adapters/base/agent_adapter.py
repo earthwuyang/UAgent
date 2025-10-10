@@ -9,8 +9,8 @@ from abc import ABC, abstractmethod
 from typing import AsyncIterator, Optional
 import logging
 
-from ...uagent_research.models.research_tree import Task, Context
-from ...uagent_research.models.events import ResearchEvent
+from extensions.uagent_research.uagent_research.models.research_tree import Task, Context
+from extensions.uagent_research.uagent_research.models.events import ResearchEvent
 
 
 logger = logging.getLogger(__name__)

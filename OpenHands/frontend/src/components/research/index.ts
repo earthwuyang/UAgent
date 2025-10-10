@@ -11,6 +11,12 @@ export { ResearchTreeView } from './ResearchTreeView';
 /** Floating container that manages the research tree experience */
 export { ResearchTreePanel } from './ResearchTreePanel';
 
+/** Draggable and resizable wrapper for floating panels */
+export { DraggableResizableWrapper } from './DraggableResizableWrapper';
+
+/** Floating research panel with drag, resize, and portal rendering */
+export { FloatingResearchPanel } from './FloatingResearchPanel';
+
 /** Error boundary specialised for research tree rendering */
 export { ResearchErrorBoundary } from './ResearchErrorBoundary';
 

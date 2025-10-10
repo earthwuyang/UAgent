@@ -27,6 +27,7 @@ interface ConversationState {
   submittedMessage: string | null;
   shouldHideSuggestions: boolean; // New state to hide suggestions when input expands
   hasRightPanelToggled: boolean;
+  isResearchPanelVisible: boolean; // Research panel visibility state
 }
 
 interface ConversationActions {
@@ -50,6 +51,7 @@ interface ConversationActions {
   setSubmittedMessage: (message: string | null) => void;
   resetConversationState: () => void;
   setHasRightPanelToggled: (hasRightPanelToggled: boolean) => void;
+  setIsResearchPanelVisible: (isVisible: boolean) => void;
 }
 
 type ConversationStore = ConversationState & ConversationActions;
@@ -82,6 +84,7 @@ export const useConversationStore = create<ConversationStore>()(
       submittedMessage: null,
       shouldHideSuggestions: false,
       hasRightPanelToggled: true,
+      isResearchPanelVisible: false,
 
       // Actions
       setIsRightPanelShown: (isRightPanelShown) =>
@@ -213,10 +216,16 @@ export const useConversationStore = create<ConversationStore>()(
         set({ submittedMessage }, false, "setSubmittedMessage"),
 
       resetConversationState: () =>
-        set({ shouldHideSuggestions: false }, false, "resetConversationState"),
+        set({ 
+          shouldHideSuggestions: false,
+          isResearchPanelVisible: false,
+        }, false, "resetConversationState"),
 
       setHasRightPanelToggled: (hasRightPanelToggled) =>
         set({ hasRightPanelToggled }, false, "setHasRightPanelToggled"),
+
+      setIsResearchPanelVisible: (isResearchPanelVisible) =>
+        set({ isResearchPanelVisible }, false, "setIsResearchPanelVisible"),
     }),
     {
       name: "conversation-store",
@@ -309,4 +318,8 @@ export const resetConversationState = () => {
 
 export const setHasRightPanelToggled = (hasRightPanelToggled: boolean) => {
   useConversationStore.getState().setHasRightPanelToggled(hasRightPanelToggled);
+};
+
+export const setIsResearchPanelVisible = (isVisible: boolean) => {
+  useConversationStore.getState().setIsResearchPanelVisible(isVisible);
 };

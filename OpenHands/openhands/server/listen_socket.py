@@ -142,6 +142,8 @@ async def connect(connection_id: str, environ: dict) -> None:
 
 @sio.event
 async def oh_user_action(connection_id: str, data: dict[str, Any]) -> None:
+    logger.info(f'[MESSAGE_RECEIVED] connection_id={connection_id}, action={data.get("action")}, message={data.get("message", "")[:100]}')
+    logger.info(f'[WS_RECEIVE] Full data: {data}')
     await conversation_manager.send_to_event_stream(connection_id, data)
 
 

@@ -12,12 +12,20 @@ import {
   isRejectObservation,
   isMcpObservation,
   isTaskTrackingObservation,
+  isSubAgentSpawnedObservation,
+  isSubAgentProgressObservation,
+  isSubAgentCompletedObservation,
 } from "#/types/core/guards";
 import { OpenHandsObservation } from "#/types/core/observations";
 import { ImageCarousel } from "../images/image-carousel";
 import { ChatMessage } from "./chat-message";
 import { ErrorMessage } from "./error-message";
 import { MCPObservationContent } from "./mcp-observation-content";
+import {
+  SubAgentSpawnedContent,
+  SubAgentProgressContent,
+  SubAgentCompletedContent,
+} from "./sub-agent-observation-content";
 import { TaskTrackingObservationContent } from "./task-tracking-observation-content";
 import { getObservationResult } from "./event-content-helpers/get-observation-result";
 import { getEventContent } from "./event-content-helpers/get-event-content";
@@ -238,6 +246,50 @@ export function EventMessage({
           initiallyExpanded={initiallyExpanded}
         />
         {shouldShowConfirmationButtons && <ConfirmationButtons />}
+      </div>
+    );
+  }
+
+  if (isSubAgentSpawnedObservation(event)) {
+    return (
+      <div>
+        <GenericEventMessage
+          title={getEventContent(event).title}
+          details={<SubAgentSpawnedContent event={event} />}
+          success={getObservationResult(event)}
+          initiallyExpanded={true}
+          variant="sub-agent"
+        />
+        {shouldShowConfirmationButtons && <ConfirmationButtons />}
+      </div>
+    );
+  }
+
+  if (isSubAgentProgressObservation(event)) {
+    return (
+      <div>
+        <GenericEventMessage
+          title={getEventContent(event).title}
+          details={<SubAgentProgressContent event={event} />}
+          success={getObservationResult(event)}
+          initiallyExpanded={false}
+          variant="sub-agent"
+        />
+      </div>
+    );
+  }
+
+  if (isSubAgentCompletedObservation(event)) {
+    return (
+      <div>
+        <GenericEventMessage
+          title={getEventContent(event).title}
+          details={<SubAgentCompletedContent event={event} />}
+          success={getObservationResult(event)}
+          initiallyExpanded={true}
+          variant="sub-agent"
+        />
+        {renderLikertScale()}
       </div>
     );
   }

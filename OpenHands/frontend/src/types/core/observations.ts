@@ -161,6 +161,53 @@ export interface TaskTrackingObservation
   };
 }
 
+
+export interface SubAgentSpawnedObservation
+  extends OpenHandsObservationEvent<"sub_agent_spawned"> {
+  source: "agent";
+  extras: {
+    sub_agent_id: string;
+    sub_agent_type: string;
+    goal: string;
+    session_id: string;
+  };
+}
+
+export interface SubAgentProgressObservation
+  extends OpenHandsObservationEvent<"sub_agent_progress"> {
+  source: "agent";
+  extras: {
+    sub_agent_id: string;
+    status: string;
+    progress: number;
+    current_task: string;
+    tree_stats?: {
+      total_nodes?: number;
+      completed_nodes?: number;
+      total_cost?: number;
+      total_tokens?: number;
+      iterations?: number;
+    };
+  };
+}
+
+export interface SubAgentCompletedObservation
+  extends OpenHandsObservationEvent<"sub_agent_completed"> {
+  source: "agent";
+  extras: {
+    sub_agent_id: string;
+    status: string;
+    result?: string;
+    tree_stats?: {
+      total_nodes?: number;
+      completed_nodes?: number;
+      total_cost?: number;
+      total_tokens?: number;
+      iterations?: number;
+    };
+  };
+}
+
 export type OpenHandsObservation =
   | AgentStateChangeObservation
   | AgentThinkObservation
@@ -176,4 +223,7 @@ export type OpenHandsObservation =
   | RecallObservation
   | MCPObservation
   | UserRejectedObservation
-  | TaskTrackingObservation;
+  | TaskTrackingObservation
+  | SubAgentSpawnedObservation
+  | SubAgentProgressObservation
+  | SubAgentCompletedObservation;

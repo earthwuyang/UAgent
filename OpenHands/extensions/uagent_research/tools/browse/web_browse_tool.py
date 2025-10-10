@@ -13,8 +13,8 @@ from cachetools import TTLCache
 from bs4 import BeautifulSoup
 import re
 
-from ..common.base_tool import Tool, ToolResult
-from ..common.browser_manager import get_browser_pool
+from extensions.uagent_research.tools.common.base_tool import Tool, ToolResult
+from extensions.uagent_research.tools.common.browser_manager import get_browser_pool
 
 logger = logging.getLogger(__name__)
 

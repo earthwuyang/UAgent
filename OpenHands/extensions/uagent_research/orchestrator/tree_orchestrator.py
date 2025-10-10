@@ -13,7 +13,7 @@ from datetime import datetime
 from collections import defaultdict
 import uuid
 
-from ..uagent_research.models.research_tree import (
+from extensions.uagent_research.uagent_research.models.research_tree import (
     ResearchTree,
     ResearchNode,
     NodeType,
@@ -22,15 +22,29 @@ from ..uagent_research.models.research_tree import (
     Context,
     Budget,
 )
-from ..uagent_research.models.events import ResearchEvent, EventType, CompleteEvent
-from ..adapters.base.agent_adapter import AgentAdapter, adapter_registry
+from extensions.uagent_research.uagent_research.models.events import ResearchEvent, EventType, CompleteEvent
+from extensions.uagent_research.adapters.base.agent_adapter import AgentAdapter, adapter_registry
 from ..router.skill_router import SkillRouter
 from .event_bus import EventBus
 from ..control.control_bus import ControlBus, ControlMessage
 # Lazy import to avoid circular dependency
 # from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
-from ..services.idea_generation_service import IdeaGenerationService
+from extensions.uagent_research.services.idea_generation_service import IdeaGenerationService
 
+try:
+    from ..config import (
+        ENABLE_INTELLIGENT_EXPANSION,
+        MAX_RESEARCH_IDEAS,
+        MAX_HYPOTHESES_PER_IDEA,
+        MAX_EXPERIMENTS_PER_HYPOTHESIS,
+        IDEA_GENERATION_RETRY_COUNT,
+    )
+except ImportError:  # pragma: no cover - config should normally be available
+    ENABLE_INTELLIGENT_EXPANSION = True
+    MAX_RESEARCH_IDEAS = 3
+    MAX_HYPOTHESES_PER_IDEA = 2
+    MAX_EXPERIMENTS_PER_HYPOTHESIS = 1
+    IDEA_GENERATION_RETRY_COUNT = 2
 
 logger = logging.getLogger(__name__)
 
@@ -103,28 +117,20 @@ class TreeSearchOrchestrator:
         self.idea_service = idea_service
         if self.idea_service is None and self.llm is not None and ENABLE_INTELLIGENT_EXPANSION:
             try:
-                from ..config import (
-                    ENABLE_INTELLIGENT_EXPANSION,
-                    MAX_RESEARCH_IDEAS,
-                    MAX_HYPOTHESES_PER_IDEA,
-                    MAX_EXPERIMENTS_PER_HYPOTHESIS,
-                    IDEA_GENERATION_RETRY_COUNT,
-                )
                 config = {
-                    'max_ideas': MAX_RESEARCH_IDEAS,
-                    'max_hypotheses': MAX_HYPOTHESES_PER_IDEA,
-                    'max_experiments': MAX_EXPERIMENTS_PER_HYPOTHESIS,
-                    'retry_count': IDEA_GENERATION_RETRY_COUNT,
+                    "max_ideas": MAX_RESEARCH_IDEAS,
+                    "max_hypotheses": MAX_HYPOTHESES_PER_IDEA,
+                    "max_experiments": MAX_EXPERIMENTS_PER_HYPOTHESIS,
+                    "retry_count": IDEA_GENERATION_RETRY_COUNT,
                 }
                 self.idea_service = IdeaGenerationService(llm=self.llm, config=config)
                 logger.info("Created IdeaGenerationService for intelligent node expansion")
             except Exception as e:
                 logger.warning(f"Failed to create IdeaGenerationService: {e}")
                 self.idea_service = None
-        
-        self.use_intelligent_expansion = (self.idea_service is not None)
+
+        self.use_intelligent_expansion = self.idea_service is not None
         if self.use_intelligent_expansion:
-            logger.info(f"[EXPAND] Using LLM to generate children for {node.id}")
             logger.info("Intelligent node expansion ENABLED")
         else:
             logger.warning("Intelligent node expansion DISABLED (using fallback placeholders)")
@@ -229,13 +235,13 @@ class TreeSearchOrchestrator:
             # Verify API imports are working
             try:
                 from ..api.research_routes import update_tree_state
-                from ..api.websocket_routes import broadcast_tree_update
+                from extensions.uagent_research.api.websocket_routes import broadcast_tree_update
                 logger.info("[ORCHESTRATOR] ✅ API imports verified successfully")
             except ImportError as e:
                 logger.error(f"[ORCHESTRATOR] ❌ API imports FAILED: {e}", exc_info=True)
                 logger.error("[ORCHESTRATOR] Tree updates will NOT be published to UI!")
 
-            from ..adapters.base.agent_adapter import adapter_registry
+            from extensions.uagent_research.adapters.base.agent_adapter import adapter_registry
             if hasattr(adapter_registry, '_adapters'):
                 registered = list(adapter_registry._adapters.keys())
             else:
@@ -720,115 +726,112 @@ class TreeSearchOrchestrator:
         Args:
             node: Node to execute
         """
-        async with self._semaphore:
-            try:
-                logger.info(f"Executing node {node.id} (type={node.type})")
+        try:
+            logger.info(f"Executing node {node.id} (type={node.type})")
 
+            # DIAGNOSTIC: Log node execution details
+            logger.info(f"[DIAGNOSTIC] Executing node: ID={node.id}, Type={node.type}")
+            logger.info(f"[DIAGNOSTIC]   Goal/Title: {node.title}")
 
-                # DIAGNOSTIC: Log node execution details
-                logger.info(f"[DIAGNOSTIC] Executing node: ID={node.id}, Type={node.type}")
-                logger.info(f"[DIAGNOSTIC]   Goal/Title: {node.title}")
-                logger.info(f"[DIAGNOSTIC]   Acquiring semaphore (max_parallel={self.max_parallel})")
-                
-                node.status = NodeStatus.RUNNING
+            node.status = NodeStatus.RUNNING
 
-                # Create task for node
-                task = Task(
-                    id=node.id,
-                    goal=node.content,
-                    context=node.title,
-                )
+            # Create task for node
+            task = Task(
+                id=node.id,
+                goal=node.content,
+                context=node.title,
+            )
 
-                context = Context(
-                    branch_id=node.id,
-                    parent_nodes=[],
-                )
+            context = Context(
+                branch_id=node.id,
+                parent_nodes=[],
+            )
 
-                # Route to adapter
-                adapter_name = self.router.route(task, context)
-                adapter = adapter_registry.get(adapter_name)
+            # Route to adapter
+            adapter_name = self.router.route(task, context)
+            adapter = adapter_registry.get(adapter_name)
 
-                if not adapter:
-                    raise Exception(f"Adapter '{adapter_name}' not found")
+            if not adapter:
+                raise Exception(f"Adapter '{adapter_name}' not found")
 
-                node.adapter = adapter_name
-                logger.info(f"Routed node {node.id} to adapter: {adapter_name}")
+            node.adapter = adapter_name
+            logger.info(f"Routed node {node.id} to adapter: {adapter_name}")
 
-                await self._deliver_pending_steer(node.id, adapter_name)
+            await self._deliver_pending_steer(node.id, adapter_name)
 
-                # Execute via adapter
-                events_received = 0
+            # Execute via adapter
+            events_received = 0
 
-                async for event in adapter.run(task, context):
-                    events_received += 1
+            async for event in adapter.run(task, context):
+                events_received += 1
 
-                    # Attach experiment_id to event before publishing
-                    if self.tree and self.tree.research_id:
-                        # Create shallow copy or update event with experiment_id
-                        if hasattr(event, 'copy'):
-                            # If Pydantic model with copy method
-                            try:
-                                event = event.copy(update={'experiment_id': self.tree.research_id})
-                            except:
-                                # Fallback: set attribute directly
-                                event.experiment_id = self.tree.research_id
-                        else:
-                            # Set attribute directly
+                # Attach experiment_id to event before publishing
+                if self.tree and self.tree.research_id:
+                    # Create shallow copy or update event with experiment_id
+                    if hasattr(event, 'copy'):
+                        # If Pydantic model with copy method
+                        try:
+                            event = event.copy(update={'experiment_id': self.tree.research_id})
+                        except:
+                            # Fallback: set attribute directly
                             event.experiment_id = self.tree.research_id
+                    else:
+                        # Set attribute directly
+                        event.experiment_id = self.tree.research_id
 
-                    # Publish event to bus
-                    await self.event_bus.publish(event)
+                # Publish event to bus
+                await self.event_bus.publish(event)
 
-                    # Update node on completion
-                    if event.type == EventType.COMPLETE:
-                        node.status = NodeStatus.COMPLETE
-                        node.visits += 1
-                        node.avg_value = 0.8  # Success value
+                # Update node on completion
+                if event.type == EventType.COMPLETE:
+                    node.status = NodeStatus.COMPLETE
+                    node.visits += 1
+                    node.avg_value = 0.8  # Success value
 
-                        self.stats["completed_nodes"] += 1
+                    self.stats["completed_nodes"] += 1
 
-                        # Update costs
-                        cost = await adapter.estimate_cost(task, context)
-                        node.cost = cost
-                        self.stats["total_cost"] += cost
+                    # Update costs
+                    cost = await adapter.estimate_cost(task, context)
+                    node.cost = cost
+                    self.stats["total_cost"] += cost
 
-                logger.info(
-                    f"Node {node.id} completed ({events_received} events received)"
-                )
-                
-                # Emit NodeCompleteEvent via MessageBus
-                if self.message_bus and self.tree:
-                    try:
-                        asyncio.create_task(
-                            self.message_bus.send_message(
+            logger.info(
+                f"Node {node.id} completed ({events_received} events received)"
+            )
+            
+            # Emit NodeCompleteEvent via MessageBus
+            if self.message_bus and self.tree:
+                try:
+                    asyncio.create_task(
+                        self.message_bus.send_message(
+                            from_agent_id=self.tree.research_id,
+                            to_agent_id=None,  # Broadcast
+                            message=NodeCompleteEvent(
                                 from_agent_id=self.tree.research_id,
-                                to_agent_id=None,  # Broadcast
-                                message=NodeCompleteEvent(
-                                    from_agent_id=self.tree.research_id,
-                                    node_id=node.id,
-                                    branch_id=node.id,
-                                    experiment_id=self.tree.research_id,
-                                    result=node.content,
-                                    cost=node.cost,
-                                    artifacts=node.artifacts
-                                )
+                                node_id=node.id,
+                                branch_id=node.id,
+                                experiment_id=self.tree.research_id,
+                                result=node.content,
+                                cost=node.cost,
+                                artifacts=node.artifacts
                             )
                         )
-                    except Exception as e:
-                        logger.debug(f"Failed to emit NodeCompleteEvent: {e}")
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to emit NodeCompleteEvent: {e}")
 
-            except Exception as e:
-                logger.error(f"Node {node.id} execution failed: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Node {node.id} execution failed: {e}", exc_info=True)
 
-                node.status = NodeStatus.FAILED
-                node.visits += 1
-                node.avg_value = 0.0  # Failure value
+            node.status = NodeStatus.FAILED
+            node.visits += 1
+            node.avg_value = 0.0  # Failure value
 
-                self.stats["failed_nodes"] += 1
-            finally:
-                self._running_tasks.pop(node.id, None)
-                self._steer_map.pop(node.id, None)
-                self.event_bus.stop_branch_heartbeat(node.id)
+            self.stats["failed_nodes"] += 1
+        finally:
+            self._running_tasks.pop(node.id, None)
+            self._steer_map.pop(node.id, None)
+            self.event_bus.stop_branch_heartbeat(node.id)
 
     async def _check_budget(self) -> bool:
         """Check if budget allows continuation"""
@@ -914,7 +917,7 @@ class TreeSearchOrchestrator:
         try:
             # Fix: Use relative import instead of absolute
             from ..api.research_routes import update_tree_state
-            from ..api.websocket_routes import broadcast_tree_update
+            from extensions.uagent_research.api.websocket_routes import broadcast_tree_update
             logger.info(f"[PUBLISH] Successfully imported API functions")
             
             # Create tree snapshot

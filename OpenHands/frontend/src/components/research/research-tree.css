@@ -6,11 +6,9 @@
 
 /* Panel Container */
 .research-tree-panel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  width: 50%;
-  height: 100vh;
+  position: relative;
+  width: 100%;
+  height: 100%;
   background: var(--bg-workspace);
   border-left: 1px solid var(--border-color);
   box-shadow: -4px 0 24px rgba(15, 23, 42, 0.26);
@@ -23,6 +21,112 @@
 .research-tree-panel.minimized {
   width: 320px;
 }
+
+/* Floating Panel Styles */
+.research-tree-panel-floating {
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Draggable Wrapper */
+.draggable-wrapper {
+  position: fixed;
+  z-index: 1000;
+  cursor: move;
+}
+
+/* Resize Handles */
+.resize-handle {
+  position: absolute;
+  background: transparent;
+  z-index: 1001;
+}
+
+.resize-handle:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+/* Top resize handle */
+.resize-handle-n {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+/* Bottom resize handle */
+.resize-handle-s {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+/* Right resize handle */
+.resize-handle-e {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+/* Left resize handle */
+.resize-handle-w {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+/* Top-right corner */
+.resize-handle-ne {
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+}
+
+/* Top-left corner */
+.resize-handle-nw {
+  top: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+/* Bottom-right corner */
+.resize-handle-se {
+  bottom: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+/* Bottom-left corner */
+.resize-handle-sw {
+  bottom: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+}
+
+/* Optional backdrop */
+.research-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: 999;
+}
+
 
 .research-tree-panel .custom-scrollbar {
   scrollbar-width: thin;

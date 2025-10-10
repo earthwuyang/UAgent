@@ -9,10 +9,10 @@ import logging
 import uuid
 from typing import List, Optional
 
-from ..uagent_research.engines.scientific_research_original import (
+from extensions.uagent_research.uagent_research.engines.scientific_research_original import (
     ScientificResearchEngine,
 )
-from ..uagent_research.models.research_tree import (
+from extensions.uagent_research.uagent_research.models.research_tree import (
     NodeStatus,
     NodeType,
     ResearchNode,

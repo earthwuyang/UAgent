@@ -8,9 +8,9 @@ import asyncio
 import logging
 from typing import AsyncIterator, Dict, Any, Optional
 
-from ...adapters.base.agent_adapter import AgentAdapter
-from ...uagent_research.models.research_tree import Task, Context
-from ...uagent_research.models.events import (
+from extensions.uagent_research.adapters.base.agent_adapter import AgentAdapter
+from extensions.uagent_research.uagent_research.models.research_tree import Task, Context
+from extensions.uagent_research.uagent_research.models.events import (
     ResearchEvent,
     PlanEvent,
     StepEvent,
@@ -405,7 +405,7 @@ async def test_codeact_adapter():
     logger.info(f"  Max iterations: {adapter.max_iterations}")
 
     # Test task scoring
-    from ...uagent_research.models.research_tree import Task, Context
+    from extensions.uagent_research.uagent_research.models.research_tree import Task, Context
 
     test_tasks = [
         Task(id="1", goal="Implement quicksort in Python"),
