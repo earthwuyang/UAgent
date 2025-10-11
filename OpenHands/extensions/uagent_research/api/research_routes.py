@@ -1,20 +1,189 @@
 """Research API routes for tree visualization and control."""
 
 import logging
+import os
+import secrets
+import time
 import traceback
-from datetime import datetime
-from typing import Dict, Optional
+from collections import OrderedDict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from threading import RLock
+from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel
+
+from ..config import CONFIG_SUMMARY
+from ..utils.security import SlidingWindowRateLimiter, sanitize_identifier
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/research", tags=["research"])
 
-# In-memory storage for active experiments
-# In production, this should be in a database or Redis
-_active_trees: Dict[str, dict] = {}
+
+def _parse_positive_int(env_var: str, default: int) -> int:
+    """Parse a positive integer environment variable with sane fallback."""
+    value = os.getenv(env_var)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning(
+            "Invalid integer for %s=%r; falling back to default %s",
+            env_var,
+            value,
+            default,
+        )
+        return default
+    if parsed <= 0:
+        logger.warning(
+            "%s must be positive (got %s); using default %s",
+            env_var,
+            parsed,
+            default,
+        )
+        return default
+    return parsed
+
+
+_TREE_TTL_SECONDS = _parse_positive_int("UAGENT_ACTIVE_TREE_TTL_SECONDS", 3600)
+_TREE_MAX_ENTRIES = _parse_positive_int("UAGENT_MAX_ACTIVE_TREES", 200)
+
+_API_RATE_LIMIT = _parse_positive_int("UAGENT_API_RATE_LIMIT", 120)
+_API_RATE_WINDOW_SECONDS = _parse_positive_int("UAGENT_API_RATE_WINDOW_SECONDS", 60)
+_RESEARCH_API_TOKEN = os.getenv("UAGENT_RESEARCH_API_TOKEN")
+
+
+def _create_rate_limiter() -> SlidingWindowRateLimiter:
+    try:
+        return SlidingWindowRateLimiter(_API_RATE_LIMIT, _API_RATE_WINDOW_SECONDS)
+    except ValueError as exc:  # pragma: no cover - defensive fallback
+        logger.warning("Invalid API rate limit configuration: %s", exc)
+        return SlidingWindowRateLimiter(120, 60)
+
+
+_RATE_LIMITER = _create_rate_limiter()
+
+
+def _authorize_request(x_research_token: Optional[str] = Header(default=None)) -> None:
+    """Optional header-based authentication for research endpoints."""
+    if not _RESEARCH_API_TOKEN:
+        return
+    if not x_research_token or not secrets.compare_digest(x_research_token, _RESEARCH_API_TOKEN):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+
+def _validate_experiment_id(experiment_id: str) -> str:
+    try:
+        return sanitize_identifier("experiment_id", experiment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _enforce_rate_limit(endpoint: str, experiment_id: str) -> None:
+    key = f"{endpoint}:{experiment_id}"
+    if not _RATE_LIMITER.allow(key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded for experiment",
+        )
+
+
+router = APIRouter(
+    prefix="/api/research",
+    tags=["research"],
+    dependencies=[Depends(_authorize_request)],
+)
+
+
+@dataclass
+class _TreeEntry:
+    data: dict
+    updated_at: datetime
+
+    @property
+    def expires_at(self) -> datetime:
+        return self.updated_at + timedelta(seconds=_TREE_TTL_SECONDS)
+
+
+class _ActiveTreeStore:
+    """Track active experiments with TTL + LRU eviction."""
+
+    def __init__(self) -> None:
+        self._entries: "OrderedDict[str, _TreeEntry]" = OrderedDict()
+        self._lock = RLock()
+
+    def _purge_locked(self, now: datetime) -> None:
+        if _TREE_TTL_SECONDS:
+            expired = [key for key, entry in self._entries.items() if entry.expires_at <= now]
+            for key in expired:
+                data = self._entries.pop(key)
+                logger.info(
+                    "🧹 Expired tree state for experiment %s removed; last update %s",
+                    key,
+                    data.updated_at.isoformat(),
+                )
+        while _TREE_MAX_ENTRIES and len(self._entries) > _TREE_MAX_ENTRIES:
+            key, data = self._entries.popitem(last=False)
+            logger.warning(
+                "🧹 Evicted oldest tree state for experiment %s to enforce max entries %s",
+                key,
+                _TREE_MAX_ENTRIES,
+            )
+
+    def get(self, experiment_id: str) -> Optional[dict]:
+        now = datetime.utcnow()
+        with self._lock:
+            self._purge_locked(now)
+            entry = self._entries.get(experiment_id)
+            if not entry:
+                return None
+            # Maintain LRU order
+            self._entries.move_to_end(experiment_id)
+            return entry.data
+
+    def set(self, experiment_id: str, tree_data: dict) -> None:
+        now = datetime.utcnow()
+        with self._lock:
+            self._entries[experiment_id] = _TreeEntry(tree_data, now)
+            self._entries.move_to_end(experiment_id)
+            self._purge_locked(now)
+
+    def delete(self, experiment_id: str) -> None:
+        with self._lock:
+            removed = self._entries.pop(experiment_id, None)
+        if removed:
+            logger.info(
+                "🧹 Cleared tree state for experiment %s (nodes=%s)",
+                experiment_id,
+                len(removed.data.get("data", {}).get("nodes", [])),
+            )
+
+    def keys(self) -> List[str]:
+        now = datetime.utcnow()
+        with self._lock:
+            self._purge_locked(now)
+            return list(self._entries.keys())
+
+    def items(self) -> List[Tuple[str, dict]]:
+        now = datetime.utcnow()
+        with self._lock:
+            self._purge_locked(now)
+            return [(key, entry.data) for key, entry in self._entries.items()]
+
+    def stats(self) -> Dict[str, int]:
+        now = datetime.utcnow()
+        with self._lock:
+            self._purge_locked(now)
+            return {
+                "count": len(self._entries),
+                "max_entries": _TREE_MAX_ENTRIES,
+                "ttl_seconds": _TREE_TTL_SECONDS,
+            }
+
+
+_active_tree_store = _ActiveTreeStore()
 
 # Track API initialization
 _api_initialized = False
@@ -38,7 +207,10 @@ def initialize_research_api():
     global _api_initialized
     if not _api_initialized:
         logger.info("🚀 Initializing Research API routes")
-        logger.debug(f"📊 Active trees storage initialized: {_active_trees}")
+        logger.debug(
+            "📊 Active trees storage initialized: %s",
+            _active_tree_store.stats(),
+        )
         _api_initialized = True
         logger.info("✅ Research API initialization complete")
     else:
@@ -51,17 +223,27 @@ async def get_research_diagnostics():
     try:
         logger.info("📊 Research API diagnostics requested")
         
+        store_stats = _active_tree_store.stats()
         diagnostics = {
             "status": "ok",
             "timestamp": datetime.utcnow().isoformat(),
             "api_initialized": _api_initialized,
-            "active_experiments": list(_active_trees.keys()),
-            "total_experiments": len(_active_trees),
+            "active_experiments": _active_tree_store.keys(),
+            "total_experiments": store_stats["count"],
+            "storage_limits": {
+                "ttl_seconds": _TREE_TTL_SECONDS,
+                "max_entries": _TREE_MAX_ENTRIES,
+            },
+            "rate_limit": {
+                "limit": _API_RATE_LIMIT,
+                "window_seconds": _API_RATE_WINDOW_SECONDS,
+            },
+            "configuration": CONFIG_SUMMARY,
             "experiment_details": {}
         }
-        
+
         # Add details for each experiment
-        for exp_id, tree_data in _active_trees.items():
+        for exp_id, tree_data in _active_tree_store.items():
             try:
                 data = tree_data.get('data', {})
                 stats = data.get('stats', {})
@@ -106,11 +288,14 @@ async def get_experiment_tree(experiment_id: str) -> TreeSnapshotResponse:
         TreeSnapshotResponse with version-tracked tree state
     """
     try:
+        experiment_id = _validate_experiment_id(experiment_id)
+        _enforce_rate_limit("tree", experiment_id)
         logger.info(f"📡 Tree requested for experiment {experiment_id}")
-        logger.debug(f"🔍 Checking active trees: {list(_active_trees.keys())}")
+        logger.debug(f"🔍 Checking active trees: {_active_tree_store.keys()}")
 
         # Check if experiment has an active tree
-        if experiment_id not in _active_trees:
+        tree_data = _active_tree_store.get(experiment_id)
+        if tree_data is None:
             logger.info(f"ℹ️ No active tree for experiment {experiment_id}, returning empty tree")
             # Return empty tree for now
             # In production, you would fetch from database or create new tree
@@ -132,7 +317,6 @@ async def get_experiment_tree(experiment_id: str) -> TreeSnapshotResponse:
                 }
             )
 
-        tree_data = _active_trees[experiment_id]
         logger.info(
             f"✅ Returning tree for {experiment_id}: "
             f"version={tree_data.get('version', 0)}, "
@@ -164,6 +348,8 @@ async def control_experiment(
         Status message
     """
     try:
+        experiment_id = _validate_experiment_id(experiment_id)
+        _enforce_rate_limit("control", experiment_id)
         logger.info(f"🎮 Control request for experiment {experiment_id}: {request.action}")
 
         valid_actions = {"start", "pause", "resume", "cancel"}
@@ -174,10 +360,10 @@ async def control_experiment(
                 detail=f"Invalid action. Must be one of: {valid_actions}"
             )
 
-        if experiment_id not in _active_trees:
+        if _active_tree_store.get(experiment_id) is None:
             if request.action == "start":
                 logger.info(f"🚀 Initializing empty tree for experiment {experiment_id} on start action")
-                _active_trees[experiment_id] = {
+                _active_tree_store.set(experiment_id, {
                     "version": 0,
                     "timestamp": datetime.utcnow().isoformat(),
                     "experiment_id": experiment_id,
@@ -193,7 +379,7 @@ async def control_experiment(
                             "failed_nodes": 0,
                         },
                     },
-                }
+                })
                 logger.debug(f"✅ Empty tree initialized for {experiment_id}")
             else:
                 logger.warning(f"⚠️ Experiment {experiment_id} not found for action {request.action}")
@@ -241,6 +427,9 @@ async def get_experiment_events(
         List of events and current version
     """
     try:
+        experiment_id = _validate_experiment_id(experiment_id)
+        _enforce_rate_limit("events", experiment_id)
+        limit = max(1, min(limit, 500))
         logger.info(
             f"📡 Fetching events for experiment {experiment_id} "
             f"since version {since_version}, limit {limit}"
@@ -272,17 +461,19 @@ async def get_experiment_events(
 def update_tree_state(experiment_id: str, tree_data: dict):
     """Update the tree state for an experiment."""
     try:
-        if not experiment_id:
-            logger.error("❌ Cannot update tree state: experiment_id is empty")
+        try:
+            experiment_id = sanitize_identifier("experiment_id", experiment_id)
+        except ValueError as exc:
+            logger.error("❌ Cannot update tree state: %s", exc)
             return
-        
+
         if not tree_data or not isinstance(tree_data, dict):
             logger.error(f"❌ Cannot update tree state for {experiment_id}: invalid tree_data (type: {type(tree_data)})")
             return
-        
+
         logger.debug(f"🔄 Updating tree state for {experiment_id}")
-        _active_trees[experiment_id] = tree_data
-        
+        _active_tree_store.set(experiment_id, tree_data)
+
         # Log summary
         nodes_count = len(tree_data.get('data', {}).get('nodes', []))
         edges_count = len(tree_data.get('data', {}).get('edges', []))
@@ -300,13 +491,16 @@ def update_tree_state(experiment_id: str, tree_data: dict):
 def clear_tree_state(experiment_id: str):
     """Remove tree state when experiment completes."""
     try:
-        if experiment_id in _active_trees:
-            nodes_count = len(_active_trees[experiment_id].get('data', {}).get('nodes', []))
-            logger.info(f"🧹 Clearing tree state for experiment {experiment_id} (had {nodes_count} nodes)")
-            del _active_trees[experiment_id]
-            logger.debug(f"✅ Tree state cleared for experiment {experiment_id}")
-        else:
+        try:
+            experiment_id = sanitize_identifier("experiment_id", experiment_id)
+        except ValueError as exc:
+            logger.error("❌ Invalid experiment_id during clear: %s", exc)
+            return
+
+        if _active_tree_store.get(experiment_id) is None:
             logger.debug(f"ℹ️ No tree state to clear for experiment {experiment_id}")
+            return
+        _active_tree_store.delete(experiment_id)
     except Exception as e:
         logger.error(f"❌ Error clearing tree state for {experiment_id}: {e}", exc_info=True)
 

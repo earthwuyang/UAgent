@@ -18,7 +18,7 @@ from services.research_session_manager import (
     AdapterStatus,
     BranchStatus,
     ExperimentState,
-    ExperimentStatus,
+ExperimentStatus.COMPLETED
     ResearchSessionManager,
     get_session_manager,
 )

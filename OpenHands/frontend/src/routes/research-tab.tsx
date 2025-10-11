@@ -21,7 +21,6 @@ import {
   ExperimentStatus as ExperimentState,
   ResearchAPIError,
 } from "#/api/research-api";
-import { useResearchWS } from "#/hooks/useResearchWS";
 import { useResearchTreeStore } from "#/state/research-tree-store";
 
 const TREE_POLL_INTERVAL = 5000;
@@ -216,10 +215,8 @@ export default function ResearchTab() {
     return () => clearInterval(interval);
   }, [experimentId, experimentStatus, fetchTreeSnapshot]);
 
-  const { isConnected } = useResearchWS({
-    experimentId: experimentId ?? "",
-    autoConnect: Boolean(experimentId && experimentStatus !== "idle"),
-  });
+  // Get connection status from store instead of creating duplicate WebSocket
+  const isConnected = useResearchTreeStore((state) => state.isConnected);
 
   const handleControlAction = useCallback(
     (action: string) => {

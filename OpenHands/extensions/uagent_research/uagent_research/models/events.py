@@ -7,7 +7,7 @@ by the TreeSearchOrchestrator to build the research tree.
 
 from enum import Enum
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 
@@ -47,7 +47,7 @@ class Artifact(BaseModel):
 class Event(BaseModel):
     """Base event emitted by agent adapters"""
     type: EventType
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     branch_id: str  # Research branch identifier
     node_id: Optional[str] = None  # Associated tree node
 

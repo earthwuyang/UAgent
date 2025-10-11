@@ -10,6 +10,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from .events import Artifact
+from extensions.uagent_research.exceptions import TreeIntegrityError
 
 
 class NodeType(str, Enum):
@@ -244,6 +245,52 @@ class ResearchTree(BaseModel):
             "stats": self.stats,
             "version": self.version
         }
+
+    def validate_integrity(self) -> None:
+        """Validate that the tree structure has no cycles, duplicates, or orphans."""
+
+        errors = []
+
+        # Check that all parents exist
+        for node_id, node in self.nodes.items():
+            if node.parent_id and node.parent_id not in self.nodes:
+                errors.append(f"Node '{node_id}' references missing parent '{node.parent_id}'")
+
+        # Check duplicate edges
+        seen_edges = set()
+        for edge in self.edges:
+            key = (edge.parent_id, edge.child_id)
+            if key in seen_edges:
+                errors.append(f"Duplicate edge detected: {edge.parent_id}->{edge.child_id}")
+            else:
+                seen_edges.add(key)
+
+        visited = set()
+        in_stack = set()
+
+        def _dfs(node_identifier: str):
+            if node_identifier in in_stack:
+                errors.append(f"Cycle detected involving node '{node_identifier}'")
+                return
+            if node_identifier in visited:
+                return
+
+            visited.add(node_identifier)
+            in_stack.add(node_identifier)
+            for child_node in self.get_children(node_identifier):
+                _dfs(child_node.id)
+            in_stack.remove(node_identifier)
+
+        root_ids = [nid for nid, node in self.nodes.items() if not node.parent_id]
+        for root_id in root_ids or list(self.nodes.keys()):
+            _dfs(root_id)
+
+        orphans = set(self.nodes.keys()) - visited
+        if orphans:
+            errors.append(f"Orphaned nodes detected: {sorted(orphans)}")
+
+        if errors:
+            raise TreeIntegrityError("; ".join(errors))
 
 
 class Task(BaseModel):

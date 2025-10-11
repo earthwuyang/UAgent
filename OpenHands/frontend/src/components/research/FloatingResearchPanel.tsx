@@ -25,6 +25,34 @@ export function FloatingResearchPanel({
   conversationId,
 }: FloatingResearchPanelProps) {
   const [dragHandleMouseDown, setDragHandleMouseDown] = useState<((e: React.MouseEvent) => void) | null>(null);
+  // Stable callback to avoid triggering infinite update loops
+  const handleDragHandleReady = React.useCallback(
+    (handler: (e: React.MouseEvent) => void) => {
+      setDragHandleMouseDown(() => handler);
+    },
+    []
+  );
+  const [portalContainer] = useState(() => {
+    if (typeof document === 'undefined') return null;
+    const container = document.createElement('div');
+    container.id = `research-portal-${experimentId}`;
+    document.body.appendChild(container);
+    return container;
+  });
+
+  // Cleanup portal container on unmount
+  React.useEffect(() => {
+    return () => {
+      if (portalContainer && document.body.contains(portalContainer)) {
+        // Wait for animations to complete before removing
+        setTimeout(() => {
+          if (document.body.contains(portalContainer)) {
+            document.body.removeChild(portalContainer);
+          }
+        }, 300);
+      }
+    };
+  }, [portalContainer]);
 
   if (!isVisible) {
     return null;
@@ -59,7 +87,7 @@ export function FloatingResearchPanel({
             maxWidth={typeof window !== 'undefined' ? window.innerWidth * 0.9 : undefined}
             maxHeight={typeof window !== 'undefined' ? window.innerHeight * 0.95 : undefined}
             conversationId={conversationId}
-            onDragHandleReady={(handler) => setDragHandleMouseDown(() => handler)}
+            onDragHandleReady={handleDragHandleReady}
           >
             <ResearchTreePanel
               experimentId={experimentId}
@@ -72,8 +100,8 @@ export function FloatingResearchPanel({
     </AnimatePresence>
   );
 
-  // Render using portal at document body level
-  return typeof document !== 'undefined' 
-    ? createPortal(panelContent, document.body)
+  // Render using portal with managed container
+  return portalContainer
+    ? createPortal(panelContent, portalContainer)
     : null;
 }

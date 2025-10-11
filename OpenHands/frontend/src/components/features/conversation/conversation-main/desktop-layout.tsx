@@ -77,6 +77,7 @@ export function DesktopLayout({
       {/* Floating Research Panel */}
       {researchExperimentId && (
         <FloatingResearchPanel
+          key={researchExperimentId}
           experimentId={researchExperimentId}
           isVisible={isResearchPanelVisible}
           onClose={handleClosePanel}

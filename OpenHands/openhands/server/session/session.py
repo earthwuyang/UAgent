@@ -570,6 +570,16 @@ class WebSession:
                         self.active_research_experiment_id = experiment_id
                         self._last_progress_broadcast = 0.0
                         
+                        # Send research_experiment_id to frontend for UI activation
+                        await self.send({
+                            'action': 'research_started',
+                            'research_experiment_id': experiment_id,
+                            'research_goal': event.content,
+                            'source': 'SYSTEM',
+                            'timestamp': time.time()
+                        })
+                        self.logger.info(f"[RESEARCH] Sent research_experiment_id to frontend: {experiment_id}")
+                        
                         # Register with coordinator
                         coordinator = self.get_or_create_coordinator()
                         try:

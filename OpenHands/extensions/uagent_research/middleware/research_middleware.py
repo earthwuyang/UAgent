@@ -15,11 +15,14 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional, Dict, Any, Tuple
+from dataclasses import dataclass
+from threading import RLock
+from typing import Optional, Dict, Any, Tuple, List
 
 from extensions.uagent_research.classifier.task_classifier import task_classifier, TaskType
 from extensions.uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
 from extensions.uagent_research.uagent_research.models.research_tree import Budget
+from ..utils.security import sanitize_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,15 @@ except ImportError as e:
     ExperimentStatus = None
 
 
+@dataclass
+class ExperimentRecord:
+    orchestrator: TreeSearchOrchestrator
+    goal: str
+    session_id: str
+    max_iterations: int
+    task: Optional[asyncio.Task] = None
+
+
 class ResearchMiddleware:
     """
     Middleware that intercepts user messages and triggers research mode when needed.
@@ -91,9 +103,11 @@ class ResearchMiddleware:
         """
         self.confidence_threshold = confidence_threshold
         self.enable_auto_trigger = enable_auto_trigger
-        self.active_orchestrators: Dict[str, Dict[str, Any]] = {}
+        self.active_orchestrators: Dict[str, 'ExperimentRecord'] = {}
+        self._active_orchestrators_lock = RLock()
         # Track goal by session for single-goal mode
         self._session_goal: Dict[str, str] = {}
+        self._session_goal_lock = RLock()
 
         # Session manager for progress queries
         self._session_manager = session_manager
@@ -103,6 +117,7 @@ class ResearchMiddleware:
         self.coordination_enabled = coordination_enabled
         self._progress_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
         self._progress_cache_ttl = progress_cache_ttl
+        self._progress_cache_lock = RLock()
 
         # Progress query patterns
         self.progress_patterns = [
@@ -147,6 +162,71 @@ class ResearchMiddleware:
         from extensions.uagent_research.adapters.ensure_adapters import ensure_research_adapters_registered
         ensure_research_adapters_registered()
 
+    # --- Concurrency-safe helpers -------------------------------------------------
+
+    def _list_active_orchestrators(self) -> List[Tuple[str, 'ExperimentRecord']]:
+        with self._active_orchestrators_lock:
+            return list(self.active_orchestrators.items())
+
+    def _active_experiment_ids(self) -> List[str]:
+        with self._active_orchestrators_lock:
+            return list(self.active_orchestrators.keys())
+
+    def _get_active_metadata(self, experiment_id: str) -> Optional['ExperimentRecord']:
+        with self._active_orchestrators_lock:
+            return self.active_orchestrators.get(experiment_id)
+
+    def _set_active_metadata(self, experiment_id: str, metadata: 'ExperimentRecord') -> None:
+        with self._active_orchestrators_lock:
+            self.active_orchestrators[experiment_id] = metadata
+
+    def _remove_active_metadata(self, experiment_id: str) -> Optional['ExperimentRecord']:
+        with self._active_orchestrators_lock:
+            return self.active_orchestrators.pop(experiment_id, None)
+
+    def _active_experiment_count(self) -> int:
+        with self._active_orchestrators_lock:
+            return len(self.active_orchestrators)
+
+    def _set_task_reference(self, experiment_id: str, task: asyncio.Task) -> None:
+        with self._active_orchestrators_lock:
+            metadata = self.active_orchestrators.get(experiment_id)
+            if metadata is not None:
+                metadata.task = task
+
+    def _get_session_goal_value(self, session_id: str) -> Optional[str]:
+        with self._session_goal_lock:
+            return self._session_goal.get(session_id)
+
+    def _set_session_goal_value(self, session_id: str, goal: str) -> None:
+        with self._session_goal_lock:
+            self._session_goal[session_id] = goal
+
+    def _clear_session_goal_value(self, session_id: str) -> None:
+        with self._session_goal_lock:
+            self._session_goal.pop(session_id, None)
+
+    def _get_progress_cache_entry(self, experiment_id: str) -> Optional[Tuple[Dict[str, Any], float]]:
+        with self._progress_cache_lock:
+            return self._progress_cache.get(experiment_id)
+
+    def _set_progress_cache_entry(self, experiment_id: str, status: Dict[str, Any], timestamp: float) -> None:
+        with self._progress_cache_lock:
+            self._progress_cache[experiment_id] = (status, timestamp)
+
+    def _pop_progress_cache_entry(self, experiment_id: str) -> None:
+        with self._progress_cache_lock:
+            self._progress_cache.pop(experiment_id, None)
+
+    def _validated_identifier(self, name: str, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            return sanitize_identifier(name, value)
+        except ValueError as exc:
+            logger.warning("Rejected %s due to invalid value: %s", name, exc)
+            return None
+
     def get_session_manager(self) -> Optional['ResearchSessionManager']:
         """Get or create session manager"""
         if self._session_manager is None and CONTROL_AVAILABLE:
@@ -165,12 +245,12 @@ class ResearchMiddleware:
 
     def get_active_experiment_for_session(self, session_id: str) -> Optional[str]:
         """Return the active experiment id for the provided session, if any."""
-        for experiment_id, metadata in self.active_orchestrators.items():
-            if isinstance(metadata, dict) and metadata.get('session_id') == session_id:
+        for experiment_id, metadata in self._list_active_orchestrators():
+            if metadata.session_id == session_id:
                 return experiment_id
 
         # Fallback heuristic: experiment identifiers prefixed with exp_{session_id}_
-        for experiment_id in self.active_orchestrators.keys():
+        for experiment_id in self._active_experiment_ids():
             if experiment_id.startswith(f"exp_{session_id}_"):
                 return experiment_id
 
@@ -253,12 +333,12 @@ class ResearchMiddleware:
 
             # Use cached progress when available and fresh
             now = time.time()
-            cached = self._progress_cache.get(experiment_id)
+            cached = self._get_progress_cache_entry(experiment_id)
             if cached and (now - cached[1]) <= self._progress_cache_ttl:
                 status = cached[0]
             else:
                 status = session_mgr.get_status(experiment_id)
-                self._progress_cache[experiment_id] = (status, now)
+                self._set_progress_cache_entry(experiment_id, status, now)
 
             # Format user-friendly summary
             summary = self._format_progress_summary(status)
@@ -408,10 +488,16 @@ class ResearchMiddleware:
 
             # Handle terminal actions
             if action == 'cancel':
-                # Remove from active orchestrators
-                if experiment_id in self.active_orchestrators:
-                    del self.active_orchestrators[experiment_id]
-                self._progress_cache.pop(experiment_id, None)
+                removed = self._remove_active_metadata(experiment_id)
+                if removed:
+                    logger.debug("Removed experiment %s from active orchestrators after cancel", experiment_id)
+                    session_id_for_goal = removed.session_id
+                    if session_id_for_goal:
+                        self._clear_session_goal_value(session_id_for_goal)
+                    background_task = removed.task
+                    if background_task and not background_task.done():
+                        background_task.cancel()
+                self._pop_progress_cache_entry(experiment_id)
 
             return {
                 'type': 'control_intent',
@@ -474,6 +560,25 @@ class ResearchMiddleware:
         if control_intent:
             action, target = control_intent
             logger.info(f"Detected control intent from session {session_id}: action={action}, target={target}")
+            sanitized_target = target.copy()
+            for key in ("node_id", "experiment_id", "branch_id"):
+                if sanitized_target.get(key):
+                    safe_value = self._validated_identifier(key, sanitized_target[key])
+                    if safe_value is None:
+                        return {
+                            'mode': 'control_intent',
+                            'should_trigger_research': False,
+                            'task_type': TaskType.SIMPLE,
+                            'confidence': 0.0,
+                            'reasoning': {'decision': f'invalid {key}'},
+                            'control_result': {
+                                'type': 'control_intent',
+                                'status': 'invalid_target',
+                                'message': f'Invalid {key} supplied'
+                            }
+                        }
+                    sanitized_target[key] = safe_value
+            target = sanitized_target
             control_result = await self.handle_control_intent(action, target, session_id)
             return {
                 'mode': 'control_intent',
@@ -492,17 +597,10 @@ class ResearchMiddleware:
                 goal_already_set = bool(conversation_metadata.get('research_goal')) or bool(conversation_metadata.get('research_locked'))
             # Fallback to internal tracking and active orchestrators
             if not goal_already_set:
-                if session_id in self._session_goal:
+                if self._get_session_goal_value(session_id):
                     goal_already_set = True
-                else:
-                    # Also consider background API-started experiments with exp_{session_id}_*
-                    if session_id in self.active_orchestrators:
-                        goal_already_set = True
-                    else:
-                        for exp_id in list(self.active_orchestrators.keys()):
-                            if exp_id.startswith(f"exp_{session_id}_"):
-                                goal_already_set = True
-                                break
+                elif self.get_active_experiment_for_session(session_id):
+                    goal_already_set = True
             if not goal_already_set:
                 should_trigger, task_type, confidence, reasoning = task_classifier.should_trigger_research(
                     user_message,
@@ -517,7 +615,7 @@ class ResearchMiddleware:
                             config=conversation_metadata or {},
                         )
                         # Record goal for single-goal mode
-                        self._session_goal[session_id] = user_message
+                        self._set_session_goal_value(session_id, user_message)
                         return {
                             'mode': 'research',
                             'should_trigger_research': True,
@@ -622,7 +720,7 @@ class ResearchMiddleware:
         Notes:
             This method is designed to work with MultiAgentCoordinator.
             The coordinator can access the orchestrator via:
-            middleware.active_orchestrators[experiment_id]['orchestrator']
+            middleware.active_orchestrators[experiment_id].orchestrator
             
             The background task runs independently, but coordinator can monitor
             completion by checking if experiment_id is still in active_orchestrators.
@@ -711,18 +809,20 @@ class ResearchMiddleware:
         logger.info(f"[RESEARCH_MIDDLEWARE] TreeSearchOrchestrator created successfully")
 
         # Store orchestrator and goal
-        self.active_orchestrators[experiment_id] = {
-            'orchestrator': orchestrator,
-            'goal': goal,
-            'session_id': session_id,
-            'max_iterations': max_iterations,
-        }
+        record = ExperimentRecord(
+            orchestrator=orchestrator,
+            goal=goal,
+            session_id=session_id,
+            max_iterations=max_iterations,
+        )
+        self._set_active_metadata(experiment_id, record)
+        active_count = self._active_experiment_count()
         logger.info(f"📦 Orchestrator stored in active_orchestrators")
-        logger.info(f"📊 Total active experiments: {len(self.active_orchestrators)}")
+        logger.info(f"📊 Total active experiments: {active_count}")
 
         # Track session goal for single-goal mode
-        self._session_goal[session_id] = goal
-        logger.info(f"[RESEARCH_MIDDLEWARE] Stored orchestrator in active_orchestrators, total active: {len(self.active_orchestrators)}")
+        self._set_session_goal_value(session_id, goal)
+        logger.info(f"[RESEARCH_MIDDLEWARE] Stored orchestrator in active_orchestrators, total active: {active_count}")
 
         if session_mgr:
             try:
@@ -737,7 +837,8 @@ class ResearchMiddleware:
 
         # Start research in background, pass experiment_id as research_id
         logger.info(f"[RESEARCH_MIDDLEWARE] Creating background task for experiment {experiment_id}")
-        asyncio.create_task(self._run_research(experiment_id))
+        background_task = asyncio.create_task(self._run_research(experiment_id))
+        self._set_task_reference(experiment_id, background_task)
 
         logger.info(f"🚀 Background research task created for {experiment_id}")
         logger.info(f"⏳ Research will run asynchronously in background")
@@ -772,14 +873,14 @@ class ResearchMiddleware:
         try:
             logger.info(f"[RESEARCH_MIDDLEWARE] _run_research started for {experiment_id}")
 
-            exp_data = self.active_orchestrators.get(experiment_id)
+            exp_data = self._get_active_metadata(experiment_id)
             if not exp_data:
                 logger.error(f"Experiment data not found: {experiment_id}")
                 return
 
-            orchestrator = exp_data['orchestrator']
-            goal = exp_data['goal']
-            max_iterations = exp_data['max_iterations']
+            orchestrator = exp_data.orchestrator
+            goal = exp_data.goal
+            max_iterations = exp_data.max_iterations
             logger.info(f"🎯 Goal: {goal[:100]}...")
             logger.info(f"🔢 Max iterations: {max_iterations}")
 
@@ -801,7 +902,7 @@ class ResearchMiddleware:
             if session_mgr and ExperimentStatus:
                 try:
                     session_mgr.update_experiment_status(
-                        experiment_id, ExperimentStatus.COMPLETE
+                        experiment_id, ExperimentStatus.COMPLETED
                     )
                 except Exception:
                     logger.exception(
@@ -824,10 +925,13 @@ class ResearchMiddleware:
         finally:
             logger.info(f"[MIDDLEWARE] Cleaning up experiment {experiment_id}")
             # Cleanup
-            if experiment_id in self.active_orchestrators:
+            removed = self._remove_active_metadata(experiment_id)
+            if removed:
                 logger.info(f"[COORDINATOR] Cleaning up experiment {experiment_id} from active_orchestrators")
-                del self.active_orchestrators[experiment_id]
-            self._progress_cache.pop(experiment_id, None)
+                session_id_for_goal = removed.session_id
+                if session_id_for_goal:
+                    self._clear_session_goal_value(session_id_for_goal)
+            self._pop_progress_cache_entry(experiment_id)
             if session_mgr:
                 try:
                     session_mgr.unregister(experiment_id)
@@ -839,20 +943,26 @@ class ResearchMiddleware:
 
     def get_orchestrator(self, experiment_id: str) -> Optional[TreeSearchOrchestrator]:
         """Get active orchestrator by experiment ID"""
-        exp_data = self.active_orchestrators.get(experiment_id)
-        return exp_data['orchestrator'] if exp_data else None
-    
+        experiment_id = self._validated_identifier('experiment_id', experiment_id)
+        if not experiment_id:
+            return None
+        exp_data = self._get_active_metadata(experiment_id)
+        return exp_data.orchestrator if exp_data else None
+
     def get_orchestrator_for_tracking(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         """
         Get orchestrator and metadata for coordinator tracking.
         
         Args:
             experiment_id: Experiment ID
-            
+
         Returns:
             Dict with orchestrator, goal, session_id, max_iterations, or None if not found
         """
-        return self.active_orchestrators.get(experiment_id)
+        experiment_id = self._validated_identifier('experiment_id', experiment_id)
+        if not experiment_id:
+            return None
+        return self._get_active_metadata(experiment_id)
     
     def is_experiment_running(self, experiment_id: str) -> bool:
         """
@@ -864,7 +974,10 @@ class ResearchMiddleware:
         Returns:
             True if experiment is in active_orchestrators, False otherwise
         """
-        return experiment_id in self.active_orchestrators
+        experiment_id = self._validated_identifier('experiment_id', experiment_id)
+        if not experiment_id:
+            return False
+        return self._get_active_metadata(experiment_id) is not None
 
     def cancel_research(self, experiment_id: str) -> bool:
         """
@@ -876,13 +989,25 @@ class ResearchMiddleware:
         Returns:
             True if cancelled, False if not found
         """
-        exp_data = self.active_orchestrators.get(experiment_id)
+        experiment_id = self._validated_identifier('experiment_id', experiment_id)
+        if not experiment_id:
+            return False
+
+        exp_data = self._get_active_metadata(experiment_id)
         if exp_data:
             orchestrator = exp_data['orchestrator']
-            orchestrator.cancel()
-            del self.active_orchestrators[experiment_id]
+            cancel_coro = orchestrator.cancel()
+            if asyncio.iscoroutine(cancel_coro):
+                asyncio.create_task(cancel_coro)
+            removed = self._remove_active_metadata(experiment_id)
             logger.info(f"Cancelled research: {experiment_id}")
-            self._progress_cache.pop(experiment_id, None)
+            self._pop_progress_cache_entry(experiment_id)
+            if removed:
+                background_task = removed.task
+                if background_task and not background_task.done():
+                    background_task.cancel()
+            if removed and removed.session_id:
+                self._clear_session_goal_value(removed.session_id)
             return True
         return False
 

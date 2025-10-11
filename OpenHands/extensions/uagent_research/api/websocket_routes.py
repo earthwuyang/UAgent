@@ -64,28 +64,64 @@ class ConnectionManager:
             except Exception as e:
                 logger.error(f"❌ Failed to send connection confirmation: {e}", exc_info=True)
             
-            # Send initial tree snapshot if available
+            # Send initial tree snapshot (send empty tree if experiment doesn't exist yet)
             try:
                 logger.debug(f"🔍 Checking for active tree snapshot for {experiment_id}")
                 from .research_routes import _active_trees
+                
                 if experiment_id in _active_trees:
                     tree_snapshot = _active_trees[experiment_id]
-                    await websocket.send_json({
-                        "type": "tree_snapshot",
-                        **tree_snapshot
-                    })
-                    logger.info(f"✅ Sent initial tree snapshot to new client {conn_id} for {experiment_id}")
-                    self.connection_metadata[str(conn_id)]["messages_sent"] += 1
+                    logger.info(f"✅ Sending existing tree snapshot to new client {conn_id} for {experiment_id}")
                 else:
-                    logger.debug(f"ℹ️ No active tree found for {experiment_id} to send to new client {conn_id}")
+                    # Send empty tree snapshot (matches REST API behavior for non-existent experiments)
+                    logger.info(f"📊 Sending empty tree snapshot to new client {conn_id} for {experiment_id} (experiment not yet initialized)")
+                    tree_snapshot = {
+                        "version": 0,
+                        "timestamp": datetime.now().isoformat(),
+                        "experiment_id": experiment_id,
+                        "data": {
+                            "nodes": [],
+                            "edges": [],
+                            "stats": {
+                                "total_nodes": 0,
+                                "total_edges": 0,
+                                "total_cost": 0.0,
+                                "total_tokens": 0,
+                                "completed_nodes": 0,
+                                "failed_nodes": 0,
+                            }
+                        }
+                    }
+                
+                await websocket.send_json({
+                    "type": "tree_snapshot",
+                    **tree_snapshot
+                })
+                self.connection_metadata[str(conn_id)]["messages_sent"] += 1
+                logger.debug(f"✅ Successfully sent tree snapshot to client {conn_id}")
+                
             except Exception as e:
-                error_msg = f"Could not send initial tree snapshot: {e}"
-                logger.warning(error_msg, exc_info=True)
+                error_msg = f"Failed to send initial tree snapshot: {e}"
+                logger.error(error_msg, exc_info=True)
                 self.connection_metadata[str(conn_id)]["errors"].append({
                     "timestamp": datetime.now().isoformat(),
                     "error": error_msg,
                     "traceback": traceback.format_exc()
                 })
+                # Send error message to client and close connection
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Failed to initialize connection",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    await websocket.close(code=1011, reason="Server error during initialization")
+                    logger.warning(f"🔌 Closed connection {conn_id} due to initialization error")
+                except Exception as close_error:
+                    logger.error(f"❌ Failed to close connection gracefully: {close_error}")
+                # Do NOT re-raise - connection is already gracefully closed
+                # Re-raising would disrupt FastAPI's cleanup and cause client to see 1006 error
+                return  # Exit connect() method cleanly
                 
         except Exception as e:
             logger.error(f"❌ Failed to establish WebSocket connection for {experiment_id}: {e}", exc_info=True)

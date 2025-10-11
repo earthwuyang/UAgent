@@ -11,6 +11,7 @@ import math
 from typing import Dict, List, Optional, AsyncIterator, Set, Any
 from datetime import datetime
 from collections import defaultdict
+from threading import RLock
 import uuid
 
 from extensions.uagent_research.uagent_research.models.research_tree import (
@@ -24,6 +25,7 @@ from extensions.uagent_research.uagent_research.models.research_tree import (
 )
 from extensions.uagent_research.uagent_research.models.events import ResearchEvent, EventType, CompleteEvent
 from extensions.uagent_research.adapters.base.agent_adapter import AgentAdapter, adapter_registry
+from extensions.uagent_research.exceptions import TreeIntegrityError
 from ..router.skill_router import SkillRouter
 from .event_bus import EventBus
 from ..control.control_bus import ControlBus, ControlMessage
@@ -138,12 +140,14 @@ class TreeSearchOrchestrator:
         # Execution state
         self.tree: Optional[ResearchTree] = None
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        self._running_tasks_lock = RLock()
         self._cancelled = False
         self._paused = False
         self._semaphore = asyncio.Semaphore(max_parallel)
 
         # Control state
         self._steer_map: Dict[str, str] = {}  # node_id/branch_id -> steer text
+        self._steer_map_lock = RLock()
         self._control_task: Optional[asyncio.Task] = None
 
         # Statistics
@@ -159,6 +163,49 @@ class TreeSearchOrchestrator:
         # Debounce for broadcast flood prevention (500ms threshold)
         self._last_broadcast_ts = 0.0
         self._broadcast_debounce_ms = 500
+
+    # ------------------------------------------------------------------
+    # Concurrency-safe helpers
+
+    def _set_running_task(self, node_id: str, task: asyncio.Task) -> None:
+        with self._running_tasks_lock:
+            self._running_tasks[node_id] = task
+
+    def _pop_running_task(self, node_id: str) -> Optional[asyncio.Task]:
+        with self._running_tasks_lock:
+            return self._running_tasks.pop(node_id, None)
+
+    def _get_running_task(self, node_id: str) -> Optional[asyncio.Task]:
+        with self._running_tasks_lock:
+            return self._running_tasks.get(node_id)
+
+    def _list_running_task_ids(self) -> List[str]:
+        with self._running_tasks_lock:
+            return list(self._running_tasks.keys())
+
+    def _iter_running_tasks(self):
+        with self._running_tasks_lock:
+            return list(self._running_tasks.items())
+
+    def _clear_running_tasks(self) -> None:
+        with self._running_tasks_lock:
+            self._running_tasks.clear()
+
+    def _set_steer_text(self, key: str, value: str) -> None:
+        with self._steer_map_lock:
+            self._steer_map[key] = value
+
+    def _pop_steer_text(self, key: str) -> Optional[str]:
+        with self._steer_map_lock:
+            return self._steer_map.pop(key, None)
+
+    def _get_steer_text(self, key: str) -> Optional[str]:
+        with self._steer_map_lock:
+            return self._steer_map.get(key)
+
+    def _clear_steer_map(self) -> None:
+        with self._steer_map_lock:
+            self._steer_map.clear()
 
     async def run(
         self,
@@ -353,6 +400,19 @@ class TreeSearchOrchestrator:
                         logger.info(f"Cleared event log for {self.tree.research_id}")
                     except Exception as e:
                         logger.warning(f"Failed to clear event log: {e}")
+
+                # Clear cached tree snapshot
+                if self.tree:
+                    try:
+                        from ..api.research_routes import clear_tree_state
+
+                        clear_tree_state(self.tree.research_id)
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            "Failed to clear API tree state for %s: %s",
+                            self.tree.research_id,
+                            cleanup_err,
+                        )
 
                 logger.info("Control loop cleanup complete")
 
@@ -691,14 +751,16 @@ class TreeSearchOrchestrator:
 
         for child in children:
             task = asyncio.create_task(limited_execute_node(child))
-            self._running_tasks[child.id] = task
-            task.add_done_callback(
-                lambda t, node_id=child.id: self._running_tasks.pop(node_id, None)
-            )
+            self._set_running_task(child.id, task)
+
+            def _cleanup_task(_completed_task, node_id=child.id):
+                self._pop_running_task(node_id)
+
+            task.add_done_callback(_cleanup_task)
             tasks.append(task)
         # DIAGNOSTIC: Log task creation
         logger.info(f"[DIAGNOSTIC] Created {len(tasks)} asyncio tasks for parallel execution")
-        logger.info(f"[DIAGNOSTIC] Active task IDs: {list(self._running_tasks.keys())}")
+        logger.info(f"[DIAGNOSTIC] Active task IDs: {self._list_running_task_ids()}")
         
         try:
             # Wait for all to complete
@@ -717,7 +779,7 @@ class TreeSearchOrchestrator:
                     logger.error(f"Child {children[i].id} failed: {result}")
         finally:
             for child in children:
-                self._running_tasks.pop(child.id, None)
+                self._pop_running_task(child.id)
 
     async def _execute_node(self, node: ResearchNode):
         """
@@ -768,8 +830,15 @@ class TreeSearchOrchestrator:
                 # Attach experiment_id to event before publishing
                 if self.tree and self.tree.research_id:
                     # Create shallow copy or update event with experiment_id
-                    if hasattr(event, 'copy'):
-                        # If Pydantic model with copy method
+                    if hasattr(event, 'model_copy'):
+                        # If Pydantic V2 model with model_copy method
+                        try:
+                            event = event.model_copy(update={'experiment_id': self.tree.research_id})
+                        except:
+                            # Fallback: set attribute directly
+                            event.experiment_id = self.tree.research_id
+                    elif hasattr(event, 'copy'):
+                        # If Pydantic V1 model with copy method
                         try:
                             event = event.copy(update={'experiment_id': self.tree.research_id})
                         except:
@@ -829,8 +898,8 @@ class TreeSearchOrchestrator:
 
             self.stats["failed_nodes"] += 1
         finally:
-            self._running_tasks.pop(node.id, None)
-            self._steer_map.pop(node.id, None)
+            self._pop_running_task(node.id)
+            self._pop_steer_text(node.id)
             self.event_bus.stop_branch_heartbeat(node.id)
 
     async def _check_budget(self) -> bool:
@@ -852,7 +921,7 @@ class TreeSearchOrchestrator:
         """Send any queued steering directives to the resolved adapter."""
 
         for key in (node_id, adapter_name):
-            steer_text = self._steer_map.pop(key, None)
+            steer_text = self._pop_steer_text(key)
             if not steer_text:
                 continue
 
@@ -863,7 +932,7 @@ class TreeSearchOrchestrator:
                 )
                 break
             # If delivery failed, restore directive for future attempts
-            self._steer_map[key] = steer_text
+            self._set_steer_text(key, steer_text)
 
     async def _send_adapter_message(self, adapter_name: str, message: str) -> bool:
         """Forward steering message to adapter if supported."""
@@ -919,8 +988,14 @@ class TreeSearchOrchestrator:
             from ..api.research_routes import update_tree_state
             from extensions.uagent_research.api.websocket_routes import broadcast_tree_update
             logger.info(f"[PUBLISH] Successfully imported API functions")
-            
+
             # Create tree snapshot
+            try:
+                self.tree.validate_integrity()
+            except TreeIntegrityError as exc:
+                logger.error("[PUBLISH] Tree integrity validation failed: %s", exc)
+                return
+
             tree_data = self.tree.to_dict() if hasattr(self.tree, 'to_dict') else {}
             
             # Ensure stats are inside data, not at top level
@@ -1105,7 +1180,7 @@ class TreeSearchOrchestrator:
                 elif cmd.action == "cancel":
                     self._cancelled = True
                     # Cancel all running tasks
-                    for node_id, task in list(self._running_tasks.items()):
+                    for node_id, task in self._iter_running_tasks():
                         if not task.done():
                             task.cancel()
                             logger.info(f"Cancelled task for node {node_id}")
@@ -1114,9 +1189,9 @@ class TreeSearchOrchestrator:
 
                 elif cmd.action == "cancel_node":
                     node_id = cmd.target.get("node_id")
-                    if node_id and node_id in self._running_tasks:
-                        task = self._running_tasks[node_id]
-                        if not task.done():
+                    if node_id:
+                        task = self._get_running_task(node_id)
+                        if task and not task.done():
                             task.cancel()
                             # Mark node as cancelled in tree
                             if node_id in self.tree.nodes:
@@ -1156,22 +1231,23 @@ class TreeSearchOrchestrator:
                     steer_text = cmd.payload.get("text", "")
 
                     if target_id:
-                        self._steer_map[target_id] = steer_text
+                        self._set_steer_text(target_id, steer_text)
 
                         delivered = False
-                        if target_id in self._running_tasks:
+                        running_task = self._get_running_task(target_id)
+                        if running_task is not None:
                             node = self.tree.nodes.get(target_id)
                             adapter_name = getattr(node, "adapter", None) if node else None
                             if adapter_name:
                                 delivered = await self._send_adapter_message(adapter_name, steer_text)
                                 if delivered:
-                                    self._steer_map.pop(target_id, None)
+                                    self._pop_steer_text(target_id)
 
                         adapter_target = cmd.target.get("adapter")
                         if not delivered and adapter_target:
                             delivered = await self._send_adapter_message(adapter_target, steer_text)
                             if delivered:
-                                self._steer_map.pop(target_id, None)
+                                self._pop_steer_text(target_id)
 
                         if delivered:
                             logger.info(
@@ -1216,13 +1292,13 @@ class TreeSearchOrchestrator:
             self._control_task.cancel()
 
         # Cancel all running tasks
-        for task_id, task in self._running_tasks.items():
+        for task_id, task in self._iter_running_tasks():
             if not task.done():
                 task.cancel()
                 logger.info(f"Cancelled task {task_id}")
 
-        self._running_tasks.clear()
-        self._steer_map.clear()
+        self._clear_running_tasks()
+        self._clear_steer_map()
 
         if self.tree:
             for node in self.tree.nodes.values():
@@ -1235,6 +1311,19 @@ class TreeSearchOrchestrator:
                 logger.info(f"Cleared event log for {self.tree.research_id}")
             except Exception as e:
                 logger.warning(f"Failed to clear event log: {e}")
+
+        # Remove cached tree snapshot to release memory immediately
+        if self.tree:
+            try:
+                from ..api.research_routes import clear_tree_state
+
+                clear_tree_state(self.tree.research_id)
+            except Exception as cleanup_err:
+                logger.warning(
+                    "Failed to clear API tree state for %s during cancel: %s",
+                    self.tree.research_id,
+                    cleanup_err,
+                )
 
         logger.info("Tree search cancellation requested")
 

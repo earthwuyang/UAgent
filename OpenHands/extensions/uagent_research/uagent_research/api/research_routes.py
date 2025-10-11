@@ -7,7 +7,7 @@ FastAPI routes for research experiment management.
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
@@ -140,7 +140,7 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
             experiment = result.scalar_one_or_none()
             if experiment:
                 experiment.status = ExperimentStatus.RUNNING
-                experiment.started_at = datetime.utcnow()
+                experiment.started_at = datetime.now(timezone.utc)
                 await db_session.commit()
             break  # Only need one iteration
 
@@ -159,7 +159,7 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
         session_mgr = get_session_manager()
         if session_mgr:
             try:
-                session_mgr.update_experiment_status(experiment_id, ExperimentStatus.COMPLETE)
+                session_mgr.update_experiment_status(experiment_id, ExperimentStatus.COMPLETED)
             except Exception as e:
                 logger.warning(f"Failed to update session manager status: {e}")
 
@@ -170,8 +170,8 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
             )
             experiment = result.scalar_one_or_none()
             if experiment:
-                experiment.status = ExperimentStatus.COMPLETE
-                experiment.completed_at = datetime.utcnow()
+                experiment.status = ExperimentStatus.COMPLETED
+                experiment.completed_at = datetime.now(timezone.utc)
                 experiment.results = {
                     'total_nodes': len(tree.nodes) if tree else 0,
                     'stats': tree.stats if tree and hasattr(tree, 'stats') else {}
@@ -293,7 +293,7 @@ async def start_experiment(
         goal=request.goal,
         config=request.config,
         status=ExperimentStatus.PENDING,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
     session.add(experiment)
@@ -385,7 +385,7 @@ async def get_experiment_tree(
             logger.info(f"No experiment found for ID: {original_id}")
             return TreeSnapshotResponse(
                 version=0,
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 experiment_id=original_id,
                 data={
                     "nodes": [],
@@ -409,7 +409,7 @@ async def get_experiment_tree(
             if tree_data:
                 return TreeSnapshotResponse(
                     version=1,
-                    timestamp=datetime.utcnow().isoformat(),
+                    timestamp=datetime.now(timezone.utc).isoformat(),
                     experiment_id=original_id,
                     data=tree_data
                 )
@@ -417,7 +417,7 @@ async def get_experiment_tree(
             # Return empty tree
             return TreeSnapshotResponse(
                 version=0,
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 experiment_id=original_id,
                 data={
                     "nodes": [],
@@ -434,7 +434,7 @@ async def get_experiment_tree(
         # (Implementation would go here)
         return TreeSnapshotResponse(
             version=1,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             experiment_id=original_id,
             data={
                 "nodes": nodes,
@@ -446,7 +446,7 @@ async def get_experiment_tree(
         logger.error(f"Error getting tree for {experiment_id}: {e}")
         return TreeSnapshotResponse(
             version=0,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             experiment_id=experiment_id,
             data={"nodes": [], "edges": [], "stats": {}}
         )

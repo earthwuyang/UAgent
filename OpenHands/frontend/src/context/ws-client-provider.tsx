@@ -176,6 +176,24 @@ export function WsClientProvider({
   function handleMessage(event: Record<string, unknown>) {
     handleAssistantMessage(event);
 
+    // Handle research_started event to update conversation with experiment ID
+    if (event.action === 'research_started' && event.research_experiment_id) {
+      // Update the conversation cache with research_experiment_id
+      queryClient.setQueryData<Conversation>(
+        ['user', 'conversation', conversationId],
+        (oldData) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            research_experiment_id: event.research_experiment_id as string,
+          };
+        }
+      );
+      EventLogger.info(
+        `Research started with experiment ID: ${event.research_experiment_id}`
+      );
+    }
+
     if (isOpenHandsEvent(event)) {
       const isStatusUpdateError =
         isStatusUpdate(event) && event.type === "error";

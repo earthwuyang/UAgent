@@ -107,13 +107,13 @@ class RepoMasterAdapter(AgentAdapter):
             yield PlanEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                plan=f"Code research: {task.goal}",
                 steps=[
                     "Search GitHub for relevant repositories",
                     "Analyze top repositories",
                     "Extract key implementations",
                     "Generate summary with examples",
                 ],
+                reasoning=f"Using GitHub code research approach to find implementations for: {task.goal}",
             )
 
             # Execute research

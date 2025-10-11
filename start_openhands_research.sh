@@ -1,27 +1,28 @@
 #!/bin/bash
 # OpenHands with UAgent Research Extension - Startup Script
 
-cd "$(dirname "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 echo "════════════════════════════════════════════════════"
 echo "  OpenHands + UAgent Research Extension"
 echo "════════════════════════════════════════════════════"
 echo ""
 
-# Load environment variables from UAgent/.env
-if [ -f "../.env" ]; then
-    echo "✓ Loading environment from ../.env"
+# Load environment variables from .env
+if [ -f ".env" ]; then
+    echo "✓ Loading environment from .env"
     # Export all variables from .env file
     set -a
-    source ../.env
+    source .env
     set +a
 else
-    echo "⚠ ../.env not found, using defaults"
+    echo "⚠ .env not found, using defaults"
 fi
 
 # Activate .venv
-if [ -f "../.venv/bin/activate" ]; then
-    source ../.venv/bin/activate
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
     echo "✓ Using .venv environment"
 else
     echo "✗ .venv not found, using system Python"
@@ -134,5 +135,6 @@ echo "Press Ctrl+C to stop"
 echo "════════════════════════════════════════════════════"
 echo ""
 
-# Start server
+# Change to OpenHands directory and start server
+cd "$SCRIPT_DIR/OpenHands"
 exec python -m openhands.server

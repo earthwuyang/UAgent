@@ -109,13 +109,13 @@ class DeepResearchAdapter(AgentAdapter):
             yield PlanEvent(
                 branch_id=context.branch_id,
                 node_id=task.id,
-                plan=f"Web research: {task.goal}",
                 steps=[
                     "Search web for relevant sources",
                     "Browse top results",
                     "Extract and synthesize information",
                     "Generate summary",
                 ],
+                reasoning=f"Using web research approach to gather information about: {task.goal}",
             )
 
             # Execute research

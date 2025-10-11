@@ -18,13 +18,19 @@ const sharedConnection: {
   socket: WebSocket | null;
   reconnectTimeout: ReturnType<typeof setTimeout> | null;
   experimentId: string | null;
+  retryCount: number;
+  lastRetryTime: number;
 } = {
   socket: null,
   reconnectTimeout: null,
   experimentId: null,
+  retryCount: 0,
+  lastRetryTime: 0,
 };
 
-const reconnectDelayMs = 3000;
+const BASE_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 30000;
+const MAX_RETRY_ATTEMPTS = 10;
 
 export function useResearchWS({
   experimentId,
@@ -51,8 +57,36 @@ const scheduleReconnect = useCallback(() => {
     return;
   }
 
+  // Check retry limit
+  if (sharedConnection.retryCount >= MAX_RETRY_ATTEMPTS) {
+    console.error(
+      `[Research WS] Max retry attempts (${MAX_RETRY_ATTEMPTS}) reached for experiment ${experimentId}. Giving up.`
+    );
+    const state = useResearchTreeStore.getState();
+    state.setError(
+      `Failed to connect after ${MAX_RETRY_ATTEMPTS} attempts. Please refresh the page.`
+    );
+    return;
+  }
+
+  // Calculate exponential backoff delay
+  const exponentialDelay = Math.min(
+    BASE_RECONNECT_DELAY_MS * Math.pow(2, sharedConnection.retryCount),
+    MAX_RECONNECT_DELAY_MS
+  );
+  // Add jitter to prevent thundering herd
+  const jitter = Math.random() * 1000;
+  const delay = exponentialDelay + jitter;
+
+  sharedConnection.retryCount += 1;
+  console.log(
+    `[Research WS] Scheduling reconnect attempt ${sharedConnection.retryCount}/${MAX_RETRY_ATTEMPTS} in ${Math.round(delay)}ms`
+  );
+
   sharedConnection.reconnectTimeout = setTimeout(() => {
     sharedConnection.reconnectTimeout = null;
+    sharedConnection.lastRetryTime = Date.now();
+    
     // Only attempt reconnect if there are still listeners for this experiment
     const state = useResearchTreeStore.getState();
     if (state.activeConnectionRefs > 0 && state.activeConnectionId === experimentId) {
@@ -62,7 +96,7 @@ const scheduleReconnect = useCallback(() => {
         reconnectFn({ skipAcquire: true });
       }
     }
-  }, reconnectDelayMs);
+  }, delay);
 }, [cleanupReconnect, experimentId]);
 
   const handleClose = useCallback(
@@ -135,7 +169,9 @@ const scheduleReconnect = useCallback(() => {
       ws.current = socket;
 
       socket.onopen = () => {
-        console.log('[Research WS] Connected');
+        console.log('[Research WS] Connected successfully');
+        // Reset retry count on successful connection
+        sharedConnection.retryCount = 0;
         const latestStore = useResearchTreeStore.getState();
         latestStore.setConnected(true);
         latestStore.setLoading(false);
@@ -147,6 +183,11 @@ const scheduleReconnect = useCallback(() => {
           const latestStore = useResearchTreeStore.getState();
 
           switch (message.type) {
+            case 'connected':
+              console.log('[Research WS] Connection confirmed:', message.connection_id);
+              // Connection confirmation received, no additional action needed
+              // The onopen handler already sets connected state
+              break;
             case 'tree_snapshot':
               latestStore.setSnapshot(message);
               break;

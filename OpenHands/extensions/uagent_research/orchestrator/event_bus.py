@@ -311,8 +311,14 @@ class EventBus:
         Returns:
             Dictionary representation
         """
-        # Try using event's dict method if available
-        if hasattr(event, 'dict'):
+        # Try using event's model_dump method if available (Pydantic V2)
+        if hasattr(event, 'model_dump'):
+            try:
+                return event.model_dump()
+            except:
+                pass
+        # Fallback to dict method (Pydantic V1)
+        elif hasattr(event, 'dict'):
             try:
                 return event.dict()
             except:
@@ -666,7 +672,7 @@ class EventBus:
         Returns:
             Dictionary of statistics
         """
-        s = self.stats.copy()
+        s = dict(self.stats)  # Create dict copy instead of using .copy()
         s["active_heartbeats"] = len(self._heartbeat_tasks)
         s["heartbeat_branches"] = list(self._active_branches)
         s["stored_experiment_logs"] = len(self._event_logs)

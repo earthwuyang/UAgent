@@ -70,10 +70,20 @@ make setup-config
 ### Running the Application
 
 ```bash
-# Run full stack (backend + frontend)
+# RECOMMENDED: Start backend with research extension in tmux
+# CRITICAL: Must activate virtual environment BEFORE starting!
+cd /Users/wuy/Desktop/code/UAgent  # Parent directory
+tmux new-session -d -s uagent-backend 'bash -c "source .venv/bin/activate && ./start_openhands_research.sh"'
+# Access the tmux session: tmux attach -t uagent-backend
+# Backend will be available at: http://localhost:2999
+
+# Check if backend is running:
+curl http://localhost:2999/api/options/health
+
+# Alternative: Run full stack (backend + frontend)
 make run
 
-# Run backend only (uvicorn on port 3000)
+# Run backend only (uvicorn on port 3000) - NOT recommended for research mode
 make start-backend
 
 # Run frontend only (Vite on port 3001)
@@ -84,6 +94,9 @@ make docker-run
 
 # Run in development container
 make docker-dev
+
+# Stop backend tmux session
+tmux kill-session -t uagent-backend
 ```
 
 ### Testing
@@ -136,7 +149,31 @@ make build
 
 ## Research Mode Execution
 
-The UAgent extension provides advanced research capabilities:
+### Auto-Trigger Research Mode
+
+Research mode automatically activates when you send a complex task. The system uses an LLM-based classifier (`TaskClassifier`) to detect:
+- Research & investigation tasks (comparing, benchmarking, evaluating)
+- Complex multi-stage work (3+ distinct phases)
+- Experimental systems (ML models, data collection, experiments)
+- Source code modification (database/kernel-level changes)
+- Systematic comparisons (multiple baselines, threshold methods)
+
+**Configuration** (in `.env`):
+```bash
+ENABLE_AUTO_RESEARCH_TRIGGER=true
+RESEARCH_CONFIDENCE_THRESHOLD=0.5  # 0.0-1.0, lower = more sensitive
+```
+
+**Important**: The TaskClassifier uses OpenHands' LLM configuration (from `.env`):
+- `LLM_MODEL`: e.g., `openai/qwen3-coder-plus`
+- `LLM_API_KEY`: Your API key (DashScope, OpenAI, etc.)
+- `LLM_BASE_URL`: API endpoint URL
+
+If LLM classification fails, it falls back to heuristic keyword matching.
+
+### Manual Research Mode
+
+You can also start research mode programmatically:
 
 ```python
 # Example: Execute research task
@@ -287,10 +324,94 @@ make docker-dev
 ```
 
 ### Research mode not starting
-- Verify workspace directory exists and is writable
-- Check proxy settings if behind firewall
-- Ensure all adapters are registered
-- Review logs in event bus output
+
+**Symptom**: Research Tree tab shows "Idle" and "Disconnected", no experiment ID
+
+**Cause**: TaskClassifier failed to trigger research mode (usually due to missing LLM API key)
+
+**Solution**:
+1. Check backend logs for "LLM classification failed" errors:
+   ```bash
+   tmux attach -t uagent-backend
+   # Look for: "TaskClassifier initialized with..."
+   ```
+
+2. Verify LLM configuration in `.env`:
+   ```bash
+   # In /Users/wuy/Desktop/code/UAgent/.env
+   LLM_API_KEY=${DASHSCOPE_API_KEY}  # Must be set
+   LLM_BASE_URL=${DASHSCOPE_BASE_URL}
+   LLM_MODEL=openai/qwen3-coder-plus
+   ```
+
+3. Ensure environment variables are exported:
+   ```bash
+   # In parent directory or in start_openhands_research.sh
+   export DASHSCOPE_API_KEY="your-key-here"
+   export DASHSCOPE_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+   ```
+
+4. Restart backend:
+   ```bash
+   tmux kill-session -t uagent-backend
+   cd /Users/wuy/Desktop/code/UAgent
+   tmux new-session -d -s uagent-backend 'bash start_openhands_research.sh'
+   ```
+
+**WebSocket Connection Issues**:
+- The Research WebSocket connects to: `ws://localhost:2999/api/research/ws/experiment/{experiment_id}`
+- If research mode doesn't trigger, no experiment ID exists, so WebSocket fails with 404
+- Frontend falls back to polling if WebSocket fails
+- Check "Research WS" logs in browser console for connection status
+
+**Fallback**: If LLM classification consistently fails, the system uses heuristic keyword matching
+
+## UAgent Functionality Testing Procedure
+
+### Standard Testing Protocol
+
+When asked to test UAgent-OpenHands functionality, follow this exact procedure:
+
+1. **Environment Setup**:
+   ```bash
+   cd /Users/wuy/Desktop/code/UAgent
+   source .venv/bin/activate
+   ```
+
+2. **Start Backend in tmux**:
+   ```bash
+   tmux new-session -d -s uagent-backend 'source .venv/bin/activate && bash start_openhands_research.sh'
+   # Access the session: tmux attach -t uagent-backend
+   ```
+
+3. **Use Playwright MCP to navigate to localhost:2999**
+
+4. **Start New Conversation and Send Research Message**:
+   Send this exact message:
+   ```
+   research goal: modify postgres and pg_duckdb source code （ to download source code you can utilize the proxy on port localhost:7890, do not use the system-wide postgresql）, first extract pre-opt features from postgres kernel and log to files, then collect dual-execution data (pre-optimization query features that can be found in kernel structures and execution times on dual engine) and train a machine learning model to predict whether postgres engine or duckdb engine executes a query fast and embed the machine learning model into database source code (using the language of the database for example c language) to online route each query to the faster engine, and execute end-to-end experiments to test the ml-based system's performance. A baseline method called threshold-based method should also be implemented, which routes query based on threshold, for example threshold can be 10000 or 50000 or any other value, if postgres estimates the cost of a query is above threshold, then send to duckdb, otherwise send to postgres, and compare the postgres-only, duckdb-only, different threshold-based methods and lightgbm-based method. please record every successful  necessary commands in README.md so that later people can reproduce your results. also record your python packages dependencies in requirements.txt.
+   ```
+
+5. **Monitor and Debug**:
+   - Monitor the parallel research progress in the Research Tree tab
+   - Debug any issues that appear during execution
+   - Check backend logs: `tmux attach -t uagent-backend`
+   - Verify WebSocket connection status in browser console
+
+### Expected Behavior
+
+- Research mode should auto-trigger due to the complex, multi-stage nature of the task
+- TaskClassifier should detect ML model training, database kernel modification, and experimental comparison
+- Research Tree should show active experiment ID and connected WebSocket status
+- Multiple research adapters should be utilized for different aspects of the task
+
+### Troubleshooting During Testing
+
+If research mode doesn't trigger:
+- Check LLM API key configuration in `.env`
+- Verify `ENABLE_AUTO_RESEARCH_TRIGGER=true` in environment
+- Monitor tmux session for TaskClassifier errors
+- Ensure proxy settings are properly configured for source code downloads
 
 ## Key Files
 

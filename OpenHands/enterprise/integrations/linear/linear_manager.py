@@ -17,7 +17,7 @@ from integrations.utils import (
     OPENHANDS_RESOLVER_TEMPLATES_DIR,
     filter_potential_repos_by_user_msg,
 )
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from server.auth.saas_user_auth import get_user_auth_from_keycloak_id
 from server.auth.token_manager import TokenManager
 from server.utils.conversation_callback_utils import register_callback_processor
@@ -39,7 +39,8 @@ class LinearManager(Manager):
         self.integration_store = LinearIntegrationStore.get_instance()
         self.api_url = 'https://api.linear.app/graphql'
         self.jinja_env = Environment(
-            loader=FileSystemLoader(OPENHANDS_RESOLVER_TEMPLATES_DIR + 'linear')
+            loader=FileSystemLoader(OPENHANDS_RESOLVER_TEMPLATES_DIR + 'linear'),
+            autoescape=select_autoescape(['html', 'xml'])
         )
 
     async def authenticate_user(

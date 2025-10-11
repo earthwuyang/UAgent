@@ -487,8 +487,14 @@ class Runtime(FileEditRuntimeMixin):
     def maybe_run_setup_script(self):
         """Run .openhands/setup.sh if it exists in the workspace or repository."""
         setup_script = '.openhands/setup.sh'
-        read_obs = self.read(FileReadAction(path=setup_script))
-        if isinstance(read_obs, ErrorObservation):
+        try:
+            read_obs = self.read(FileReadAction(path=setup_script))
+            if isinstance(read_obs, ErrorObservation):
+                return
+        except Exception as e:
+            # If we can't check for the setup script (e.g., connection issues during initialization),
+            # just log and continue. The setup script is optional anyway.
+            self.log('warning', f'Could not check for setup script {setup_script}: {e}')
             return
 
         if self.status_callback:
@@ -519,8 +525,14 @@ class Runtime(FileEditRuntimeMixin):
     def maybe_setup_git_hooks(self):
         """Set up git hooks if .openhands/pre-commit.sh exists in the workspace or repository."""
         pre_commit_script = '.openhands/pre-commit.sh'
-        read_obs = self.read(FileReadAction(path=pre_commit_script))
-        if isinstance(read_obs, ErrorObservation):
+        try:
+            read_obs = self.read(FileReadAction(path=pre_commit_script))
+            if isinstance(read_obs, ErrorObservation):
+                return
+        except Exception as e:
+            # If we can't check for the pre-commit script (e.g., connection issues during initialization),
+            # just log and continue. Git hooks are optional.
+            self.log('warning', f'Could not check for git hook script {pre_commit_script}: {e}')
             return
 
         if self.status_callback:

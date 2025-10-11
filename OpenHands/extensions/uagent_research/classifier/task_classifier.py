@@ -12,6 +12,9 @@ from typing import Dict, List, Tuple
 import json
 
 import logging
+
+from ..utils.security import mask_secret
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,24 +35,54 @@ class TaskClassifier:
     def __init__(self):
         """Initialize the LLM-based task classifier"""
         self.llm = None
+        self.api_key = None
         self._init_llm()
-    
+
     def _init_llm(self):
-        """Initialize the LLM client"""
+        """Initialize the LLM client using OpenHands' LLM configuration"""
         try:
             from litellm import completion
             self.llm_completion = completion
             
-            # Get LLM configuration from environment
-            self.model = os.getenv('LLM_MODEL', 'dashscope/qwen3-coder-plus')
-            self.api_key = os.getenv('LLM_API_KEY') or os.getenv('DASHSCOPE_API_KEY')
-            self.base_url = os.getenv('LLM_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+            # Try to get LLM configuration from OpenHands' config system
+            try:
+                from openhands.core.config import load_app_config
+                from openhands.core.logger import openhands_logger as config_logger
+                
+                config = load_app_config()
+                
+                # Get the default LLM config
+                llm_config = config.get_llm_config()
+                
+                self.model = llm_config.model
+                self.api_key = llm_config.api_key
+                self.base_url = llm_config.base_url
+                
+                masked_key = mask_secret(self.api_key) if self.api_key else 'None'
+                logger.info("TaskClassifier initialized with OpenHands LLM config: model=%s, base_url=%s, key=%s", 
+                           self.model, self.base_url, masked_key)
+            except Exception as config_error:
+                # Fallback to environment variables if OpenHands config fails
+                logger.warning("Failed to load OpenHands LLM config, falling back to environment: %s", str(config_error))
+                self.model = os.getenv('LLM_MODEL', 'openai/qwen3-coder-plus')
+                self.api_key = os.getenv('LLM_API_KEY') or os.getenv('DASHSCOPE_API_KEY')
+                self.base_url = os.getenv('LLM_BASE_URL')
+                
+                masked_key = mask_secret(self.api_key) if self.api_key else 'None'
+                logger.info("TaskClassifier initialized with env vars: model=%s, base_url=%s, key=%s", 
+                           self.model, self.base_url, masked_key)
             
-            logger.info(f"TaskClassifier initialized with model: {self.model}")
+            if not self.api_key:
+                logger.warning("No API key found for TaskClassifier, LLM classification will be disabled")
+                self.llm_completion = None
+                
         except Exception as e:
-            logger.error(f"Failed to initialize LLM for task classification: {e}")
+            logger.error(
+                "Failed to initialize LLM for task classification: %s",
+                self._sanitize_message(str(e)),
+            )
             self.llm_completion = None
-    
+
     def classify(self, user_message: str) -> Tuple[TaskType, float, Dict]:
         """
         Classify a user message using LLM.
@@ -144,9 +177,33 @@ Respond with JSON only."""
             return task_type, confidence, reasoning
             
         except Exception as e:
-            logger.error(f"LLM classification failed: {e}", exc_info=True)
+            logger.error(
+                "LLM classification failed: %s",
+                self._sanitize_message(str(e)),
+                exc_info=True,
+            )
             logger.info("Falling back to heuristic classification")
             return self._fallback_classify(user_message)
+
+    def _sanitize_message(self, message: str) -> str:
+        """Mask any configured API keys from log output."""
+        if not message:
+            return message
+
+        secrets = {
+            secret
+            for secret in (
+                self.api_key,
+                os.getenv('LLM_API_KEY'),
+                os.getenv('DASHSCOPE_API_KEY'),
+            )
+            if secret
+        }
+
+        sanitized = message
+        for secret in secrets:
+            sanitized = sanitized.replace(secret, mask_secret(secret))
+        return sanitized
     
     def _fallback_classify(self, user_message: str) -> Tuple[TaskType, float, Dict]:
         """

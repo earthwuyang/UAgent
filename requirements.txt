@@ -19,7 +19,7 @@ binaryornot==0.4.4
 bleach==6.2.0
 boto3==1.40.50
 botocore==1.40.50
-browsergym-core==0.14.2
+browsergym-core==0.13.3
 cachetools==5.5.2
 certifi==2025.10.5
 cffi==2.0.0
@@ -234,3 +234,5 @@ xlsxwriter==3.2.9
 yarl==1.22.0
 youtube-transcript-api==1.2.2
 zipp==3.23.0
+pylatexenc==2.10
+python-frontmatter
