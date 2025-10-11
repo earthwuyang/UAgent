@@ -64,12 +64,12 @@ google-auth-httplib2
 google-auth-oauthlib
 google-cloud-aiplatform
 google-cloud-core==2.4.3
-google-cloud-storage<3.0.0
+google-cloud-storage==3.4.1
 google-crc32c==1.7.1
 google-genai
 google-resumable-media==2.7.2
 googleapis-common-protos==1.70.0
-greenlet>=3.1.1,<4.0.0
+greenlet==3.0.3
 grep-ast==0.9.0
 gymnasium==1.2.1
 h11==0.16.0
@@ -171,7 +171,7 @@ pydantic==2.12.0
 pydantic-settings==2.11.0
 pydantic_core==2.41.1
 pydub==0.25.1
-pyee>=12,<14
+pyee==11.1.0
 pyflakes==3.4.0
 pygithub==2.8.1
 pygments==2.19.2

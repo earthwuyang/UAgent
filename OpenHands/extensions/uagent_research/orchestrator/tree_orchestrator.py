@@ -9,7 +9,7 @@ import asyncio
 import logging
 import math
 from typing import Dict, List, Optional, AsyncIterator, Set, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict
 from threading import RLock
 import uuid
@@ -1007,7 +1007,7 @@ class TreeSearchOrchestrator:
                 "version": getattr(self.tree, 'version', 0),
                 "experiment_id": getattr(self.tree, 'research_id', 'unknown'),
                 "data": tree_data,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
             experiment_id = tree_snapshot["experiment_id"]

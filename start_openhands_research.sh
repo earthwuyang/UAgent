@@ -9,6 +9,14 @@ echo "  OpenHands + UAgent Research Extension"
 echo "════════════════════════════════════════════════════"
 echo ""
 
+# Load environment variables from .env.local first (for secrets)
+if [ -f ".env.local" ]; then
+    echo "✓ Loading sensitive config from .env.local"
+    set -a
+    source .env.local
+    set +a
+fi
+
 # Load environment variables from .env
 if [ -f ".env" ]; then
     echo "✓ Loading environment from .env"
@@ -20,12 +28,34 @@ else
     echo "⚠ .env not found, using defaults"
 fi
 
-# Activate .venv
-if [ -f ".venv/bin/activate" ]; then
-    source .venv/bin/activate
-    echo "✓ Using .venv environment"
+# Add uv to PATH if installed
+export PATH="$HOME/.local/bin:$PATH"
+
+# Check if uv is available and create/activate venv
+if command -v uv >/dev/null 2>&1; then
+    echo "✓ Using uv ($(uv --version))"
+    
+    # Create venv if it doesn't exist
+    if [ ! -d ".venv" ]; then
+        echo "→ Creating virtual environment with uv..."
+        uv venv --python 3.12
+    fi
+    
+    # Activate the venv
+    if [ -f ".venv/bin/activate" ]; then
+        source .venv/bin/activate
+        echo "✓ Activated .venv environment"
+    fi
 else
-    echo "✗ .venv not found, using system Python"
+    echo "⚠ uv not found, trying venv fallback"
+    # Fallback to venv activation
+    if [ -f ".venv/bin/activate" ]; then
+        source .venv/bin/activate
+        echo "✓ Using .venv environment"
+    else
+        echo "✗ Neither uv nor .venv found, using system Python"
+        echo "  Install uv with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    fi
 fi
 
 # ============================================================================
@@ -135,6 +165,10 @@ echo "Press Ctrl+C to stop"
 echo "════════════════════════════════════════════════════"
 echo ""
 
-# Change to OpenHands directory and start server
-cd "$SCRIPT_DIR/OpenHands"
+# Configure Python path for OpenHands imports
+export PYTHONPATH="$SCRIPT_DIR/OpenHands:$PYTHONPATH"
+
+# Start the OpenHands server
+echo "✓ Starting OpenHands server"
+cd "$SCRIPT_DIR"
 exec python -m openhands.server

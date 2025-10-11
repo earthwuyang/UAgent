@@ -171,7 +171,9 @@ export default function ResearchTab() {
     setCanRenderTree(false);
     fetchTreeSnapshot(true);
     fetchStatus();
-  }, [experimentId, fetchTreeSnapshot, fetchStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // fetchTreeSnapshot and fetchStatus are already memoized with experimentId as dependency
+  }, [experimentId]);
 
   useEffect(() => {
     if (!experimentId) {
@@ -196,7 +198,8 @@ export default function ResearchTab() {
     return () => {
       clearStatusPolling();
     };
-  }, [experimentId, experimentStatus, fetchStatus, clearStatusPolling]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [experimentId, experimentStatus]); // fetchStatus and clearStatusPolling are memoized
 
   useEffect(() => {
     if (!experimentId) {
@@ -213,7 +216,8 @@ export default function ResearchTab() {
     }, TREE_POLL_INTERVAL);
 
     return () => clearInterval(interval);
-  }, [experimentId, experimentStatus, fetchTreeSnapshot]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [experimentId, experimentStatus]); // fetchTreeSnapshot is memoized with experimentId
 
   // Get connection status from store instead of creating duplicate WebSocket
   const isConnected = useResearchTreeStore((state) => state.isConnected);
@@ -238,7 +242,8 @@ export default function ResearchTab() {
           break;
       }
     },
-    [fetchStatus, fetchTreeSnapshot],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [], // fetchStatus and fetchTreeSnapshot are stable memoized functions
   );
 
   const headerStats = useMemo(

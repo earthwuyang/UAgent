@@ -7,7 +7,7 @@ import time
 import traceback
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Dict, List, Optional, Tuple
 
@@ -133,7 +133,7 @@ class _ActiveTreeStore:
             )
 
     def get(self, experiment_id: str) -> Optional[dict]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with self._lock:
             self._purge_locked(now)
             entry = self._entries.get(experiment_id)
@@ -144,7 +144,7 @@ class _ActiveTreeStore:
             return entry.data
 
     def set(self, experiment_id: str, tree_data: dict) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with self._lock:
             self._entries[experiment_id] = _TreeEntry(tree_data, now)
             self._entries.move_to_end(experiment_id)
@@ -161,19 +161,19 @@ class _ActiveTreeStore:
             )
 
     def keys(self) -> List[str]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with self._lock:
             self._purge_locked(now)
             return list(self._entries.keys())
 
     def items(self) -> List[Tuple[str, dict]]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with self._lock:
             self._purge_locked(now)
             return [(key, entry.data) for key, entry in self._entries.items()]
 
     def stats(self) -> Dict[str, int]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with self._lock:
             self._purge_locked(now)
             return {
@@ -226,7 +226,7 @@ async def get_research_diagnostics():
         store_stats = _active_tree_store.stats()
         diagnostics = {
             "status": "ok",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "api_initialized": _api_initialized,
             "active_experiments": _active_tree_store.keys(),
             "total_experiments": store_stats["count"],
@@ -267,7 +267,7 @@ async def get_research_diagnostics():
             "status": "error",
             "error": str(e),
             "traceback": traceback.format_exc(),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
 

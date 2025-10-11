@@ -4,7 +4,9 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 ## Project Overview
 
-**OpenHands-UAgent** is an AI software engineer system that extends OpenHands with advanced research capabilities. It combines autonomous software engineering with intelligent research through a PUCT-based tree search system.
+**UAgent** is an AI software engineer system that extends OpenHands with advanced research capabilities. The project is located at `/Users/wuy/Desktop/code/UAgent` and contains the OpenHands fork as a subdirectory (`OpenHands/`) plus top-level orchestration scripts.
+
+It combines autonomous software engineering with intelligent research through a PUCT-based tree search system.
 
 ### Core Architecture
 
@@ -26,45 +28,62 @@ The system has two operational modes:
 ### Directory Structure
 
 ```
-openhands/          # Core OpenHands system
-├── agenthub/       # Agent implementations
-├── controller/     # AgentController orchestration
-├── core/           # State, LLM, and event primitives
-├── events/         # Action and Observation types
-├── runtime/        # Docker sandbox and action execution
-├── server/         # FastAPI server, WebSocket, session management
-├── llm/            # LiteLLM integration
-├── memory/         # Long-term memory systems
-└── integrations/   # External service integrations
-
-extensions/uagent_research/  # Research extension
-├── orchestrator/            # TreeSearchOrchestrator
-├── adapters/                # DeepResearchAdapter, RepoMasterAdapter, CodeActAdapter
-├── middleware/              # ResearchMiddleware entry point
-├── event_bus/               # Event coalescing and WebSocket publishing
-└── tests/                   # Unit and integration tests
-
-frontend/           # React/TypeScript frontend
-├── src/
-│   ├── components/features/  # Domain components (browser, chat, code editor, terminal)
-│   ├── routes/              # File-based routing (Remix SPA)
-│   ├── state/               # Redux store
-│   └── api/                 # Backend API calls
+/Users/wuy/Desktop/code/UAgent/        # Project root
+├── OpenHands/                          # OpenHands fork subdirectory
+│   ├── openhands/                     # Core OpenHands system
+│   │   ├── agenthub/                  # Agent implementations
+│   │   ├── controller/                # AgentController orchestration
+│   │   ├── core/                      # State, LLM, and event primitives
+│   │   ├── events/                    # Action and Observation types
+│   │   ├── runtime/                   # Docker sandbox and action execution
+│   │   ├── server/                    # FastAPI server, WebSocket, session management
+│   │   ├── llm/                       # LiteLLM integration
+│   │   ├── memory/                    # Long-term memory systems
+│   │   └── integrations/              # External service integrations
+│   ├── extensions/uagent_research/    # Research extension
+│   │   ├── orchestrator/              # TreeSearchOrchestrator
+│   │   ├── adapters/                  # DeepResearchAdapter, RepoMasterAdapter, CodeActAdapter
+│   │   ├── middleware/                # ResearchMiddleware entry point
+│   │   ├── event_bus/                 # Event coalescing and WebSocket publishing
+│   │   └── tests/                     # Unit and integration tests
+│   ├── frontend/                      # React/TypeScript frontend
+│   │   ├── src/
+│   │   │   ├── components/features/   # Domain components (browser, chat, code editor, terminal)
+│   │   │   ├── routes/                # File-based routing (Remix SPA)
+│   │   │   ├── state/                 # Redux store
+│   │   │   └── api/                   # Backend API calls
+│   ├── Makefile                       # OpenHands build/test commands
+│   ├── pyproject.toml                 # Python dependencies
+│   └── execute_ml_routing_research.py # Example research script
+├── start_openhands_research.sh        # Main startup script (project root)
+├── requirements.txt                   # Top-level Python dependencies
+├── README.md                          # Research session notes
+├── .env*                              # Environment configuration files
+└── workspace/                         # Generated workspace directories
 ```
 
 ## Development Commands
 
 ### Initial Setup
 
+**Important**: The project root is `/Users/wuy/Desktop/code/UAgent`, while build commands are in `OpenHands/` subdirectory.
+
 ```bash
-# Install dependencies (requires Python 3.12, Node.js 22+, Poetry 1.8+, Docker)
-make build
+# Navigate to project root
+cd /Users/wuy/Desktop/code/UAgent
+
+# Install dependencies via OpenHands Makefile (requires Python 3.12, Node.js 22+, Poetry 1.8+, Docker)
+cd OpenHands && make build && cd ..
 
 # Alternative: Setup with specific Poetry groups
-POETRY_GROUP=dev,test,runtime make install-python-dependencies
+cd OpenHands && POETRY_GROUP=dev,test,runtime make install-python-dependencies && cd ..
 
 # Setup configuration file (sets LLM API key, model, workspace)
-make setup-config
+cd OpenHands && make setup-config && cd ..
+
+# Note: Python virtual environment is at /Users/wuy/Desktop/code/UAgent/.venv
+# Always activate it before running Python commands:
+source .venv/bin/activate
 ```
 
 ### Running the Application
@@ -102,49 +121,53 @@ tmux kill-session -t uagent-backend
 ### Testing
 
 ```bash
-# Backend tests
+# Backend tests (from OpenHands directory)
+cd OpenHands
 poetry run pytest tests/unit/              # Unit tests
 poetry run pytest tests/integration/        # Integration tests
 poetry run pytest tests/e2e/                # End-to-end tests
 poetry run pytest -k "test_name"           # Run specific test
+cd ..
 
-# Frontend tests
-cd frontend
+# Frontend tests (from OpenHands directory)
+cd OpenHands/frontend
 npm run test                               # Run all tests
 npm run test:coverage                      # With coverage
 npm run test:e2e                           # Playwright E2E tests
+cd ../..
 
-# Research extension tests
-cd extensions/uagent_research
+# Research extension tests (from OpenHands directory)
+cd OpenHands/extensions/uagent_research
 pytest tests/unit/
 pytest tests/integration/
 python tests/test_tools_integration.py     # Integration test
+cd ../../..
 ```
 
 ### Linting and Formatting
 
 ```bash
-# All linters
-make lint
+# All linters (from OpenHands directory)
+cd OpenHands && make lint && cd ..
 
 # Backend only (ruff, mypy, pre-commit)
-make lint-backend
+cd OpenHands && make lint-backend && cd ..
 
 # Frontend only (eslint, prettier, type-check)
-make lint-frontend
+cd OpenHands && make lint-frontend && cd ..
 
 # Fix frontend issues
-cd frontend && npm run lint:fix
+cd OpenHands/frontend && npm run lint:fix && cd ../..
 ```
 
 ### Building
 
 ```bash
-# Build frontend production bundle
-make build-frontend
+# Build frontend production bundle (from OpenHands directory)
+cd OpenHands && make build-frontend && cd ..
 
-# Full project build
-make build
+# Full project build (from OpenHands directory)
+cd OpenHands && make build && cd ..
 ```
 
 ## Research Mode Execution
@@ -415,11 +438,22 @@ If research mode doesn't trigger:
 
 ## Key Files
 
-- `openhands/core/agent.py` - Base Agent class
-- `openhands/controller/agent_controller.py` - Main orchestration loop
-- `openhands/server/listen.py` - FastAPI server entry point
-- `extensions/uagent_research/orchestrator/tree_orchestrator.py` - Research tree search
-- `extensions/uagent_research/middleware/research_middleware.py` - Research mode entry
-- `frontend/src/routes/_oh.app/route.tsx` - Main app route
-- `pyproject.toml` - Python dependencies
-- `frontend/package.json` - Frontend dependencies
+### Project Root Files
+- `start_openhands_research.sh` - Main startup script with environment setup
+- `requirements.txt` - Top-level Python dependencies
+- `README.md` - Research session notes
+- `.env*` - Environment configuration files (e.g., `.env.qwen3-coder-plus`, `.env.dashscope_kimi`)
+- `WARP.md` - This file (development guide)
+
+### OpenHands Core Files
+- `OpenHands/openhands/core/agent.py` - Base Agent class
+- `OpenHands/openhands/controller/agent_controller.py` - Main orchestration loop
+- `OpenHands/openhands/server/listen.py` - FastAPI server entry point (actual: `openhands/server/__main__.py`)
+- `OpenHands/openhands/server/app.py` - FastAPI app initialization
+- `OpenHands/extensions/uagent_research/orchestrator/tree_orchestrator.py` - Research tree search
+- `OpenHands/extensions/uagent_research/middleware/research_middleware.py` - Research mode entry
+- `OpenHands/frontend/src/routes/_oh.app/route.tsx` - Main app route
+- `OpenHands/pyproject.toml` - Python dependencies
+- `OpenHands/frontend/package.json` - Frontend dependencies
+- `OpenHands/Makefile` - Build, test, and lint commands
+- `OpenHands/execute_ml_routing_research.py` - Example research execution script

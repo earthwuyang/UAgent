@@ -902,7 +902,7 @@ class ResearchMiddleware:
             if session_mgr and ExperimentStatus:
                 try:
                     session_mgr.update_experiment_status(
-                        experiment_id, ExperimentStatus.COMPLETED
+                        experiment_id, ExperimentStatus.COMPLETE
                     )
                 except Exception:
                     logger.exception(
