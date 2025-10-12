@@ -112,7 +112,8 @@ const scheduleReconnect = useCallback(() => {
       cleanupReconnect();
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/research/ws/experiment/${experimentId}`;
+      const backendHost = import.meta.env.VITE_BACKEND_BASE_URL || window.location.host;
+      const wsUrl = `${protocol}//${backendHost}/api/research/ws/experiment/${experimentId}`;
 
       console.log(`[Research WS] Connecting to ${wsUrl}`);
 

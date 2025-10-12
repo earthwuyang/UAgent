@@ -20,7 +20,7 @@ export const useConversationConfig = () => {
   });
 
   React.useEffect(() => {
-    if (query.data) {
+    if (query.data?.runtime_id) {
       const { runtime_id: runtimeId } = query.data;
 
       // eslint-disable-next-line no-console

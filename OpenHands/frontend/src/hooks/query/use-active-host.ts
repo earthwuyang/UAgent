@@ -1,9 +1,9 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
-import axios from "axios";
 import React from "react";
 import ConversationService from "#/api/conversation-service/conversation-service.api";
 import { useConversationId } from "#/hooks/use-conversation-id";
 import { useRuntimeIsReady } from "#/hooks/use-runtime-is-ready";
+import { transformVSCodeUrl } from "#/utils/vscode-url-helper";
 
 export const useActiveHost = () => {
   const [activeHost, setActiveHost] = React.useState<string | null>(null);
@@ -14,7 +14,8 @@ export const useActiveHost = () => {
     queryKey: [conversationId, "hosts"],
     queryFn: async () => {
       const hosts = await ConversationService.getWebHosts(conversationId);
-      return { hosts };
+      const transformedHosts = hosts.map((host) => transformVSCodeUrl(host) ?? host);
+      return { hosts: transformedHosts };
     },
     enabled: runtimeIsReady && !!conversationId,
     initialData: { hosts: [] },
@@ -30,10 +31,10 @@ export const useActiveHost = () => {
         try {
           // Use fetch with mode: 'no-cors' to avoid CORS errors in console
           // We only care if the server is reachable, not the response
-          const response = await fetch(host, {
-            method: 'HEAD',
-            mode: 'no-cors',
-            cache: 'no-cache'
+          await fetch(host, {
+            method: "HEAD",
+            mode: "no-cors",
+            cache: "no-cache",
           });
           return host;
         } catch (e) {

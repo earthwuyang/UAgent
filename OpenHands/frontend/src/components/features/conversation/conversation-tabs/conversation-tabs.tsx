@@ -157,6 +157,7 @@ export function ConversationTabs() {
               icon={icon}
               onClick={onClick}
               isActive={isActive}
+              ariaLabel={tooltipAriaLabel}
             />
           </ChatActionTooltip>
         ),

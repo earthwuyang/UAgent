@@ -1,4 +1,4 @@
-import { TooltipButton } from "#/components/shared/buttons/tooltip-button";
+import { Tooltip } from "@heroui/react";
 
 interface ChatActionTooltipProps {
   children: React.ReactNode;
@@ -12,14 +12,14 @@ export function ChatActionTooltip({
   ariaLabel,
 }: ChatActionTooltipProps) {
   return (
-    <TooltipButton
-      tooltip={tooltip}
-      ariaLabel={ariaLabel}
-      disabled={false}
+    <Tooltip
+      content={tooltip}
+      closeDelay={100}
       placement="bottom"
-      tooltipClassName="bg-white text-black text-xs font-medium leading-5"
+      className="bg-white text-black text-xs font-medium leading-5"
+      aria-label={ariaLabel}
     >
       {children}
-    </TooltipButton>
+    </Tooltip>
   );
 }

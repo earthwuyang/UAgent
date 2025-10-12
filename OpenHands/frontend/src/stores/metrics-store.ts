@@ -17,7 +17,7 @@ interface MetricsStore extends MetricsState {
   setMetrics: (metrics: MetricsState) => void;
 }
 
-const useMetricsStore = create<MetricsStore>((set) => ({
+export const useMetricsStore = create<MetricsStore>((set) => ({
   cost: null,
   max_budget_per_task: null,
   usage: null,

@@ -120,6 +120,7 @@ export ENABLE_AUTO_LINT="${ENABLE_AUTO_LINT:-false}"
 
 echo "Configuration:"
 echo "  • Port:          $port"
+echo "  • Serve build:   $SERVE_FRONTEND"
 echo "  • Workspace base: $WORKSPACE_BASE"
 echo "  • Host workspace: ${UAGENT_WORKSPACE_DIR:-<auto/inferred or not set>}"
 echo "  • Workspace Mount: ${SANDBOX_VOLUMES:-<none>}"
