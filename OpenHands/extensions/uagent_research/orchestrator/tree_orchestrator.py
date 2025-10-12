@@ -216,8 +216,12 @@ class TreeSearchOrchestrator:
             
             # Verify API imports are working
             try:
-                from ..api.research_routes import update_tree_state
-                from ..api.websocket_routes import broadcast_tree_update
+                try:
+                    from uagent_research.api.research_routes import update_tree_state  # type: ignore
+                    from uagent_research.api.websocket_routes import broadcast_tree_update  # type: ignore
+                except ImportError:  # pragma: no cover - legacy fallback
+                    from ..api.research_routes import update_tree_state
+                    from ..api.websocket_routes import broadcast_tree_update
                 logger.info("[ORCHESTRATOR] ✅ API imports verified successfully")
             except ImportError as e:
                 logger.error(f"[ORCHESTRATOR] ❌ API imports FAILED: {e}", exc_info=True)
@@ -894,9 +898,13 @@ class TreeSearchOrchestrator:
         self._last_broadcast_ts = now
         
         try:
-            # Fix: Use relative import instead of absolute
-            from ..api.research_routes import update_tree_state
-            from ..api.websocket_routes import broadcast_tree_update
+            # Import from canonical in-package API module so state is shared with FastAPI routes
+            try:
+                from uagent_research.api.research_routes import update_tree_state  # type: ignore
+                from uagent_research.api.websocket_routes import broadcast_tree_update  # type: ignore
+            except ImportError:  # pragma: no cover - legacy fallback for older layouts
+                from ..api.research_routes import update_tree_state
+                from ..api.websocket_routes import broadcast_tree_update
             logger.info(f"[PUBLISH] Successfully imported API functions")
             
             # Create tree snapshot

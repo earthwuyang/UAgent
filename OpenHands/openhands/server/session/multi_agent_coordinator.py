@@ -191,18 +191,17 @@ class MultiAgentCoordinator:
         Returns:
             experiment_id: Unique identifier for the spawned research
         """
-        
-        logger.info(f"[COORDINATOR] spawn_research_agent() called: goal={goal[:100] if goal else 'N/A'}")
-        logger.info(f"[COORDINATOR] Config: {config}")
+        self.logger.info(f"[COORDINATOR] spawn_research_agent() called: goal={goal[:100] if goal else 'N/A'}")
+        self.logger.info(f"[COORDINATOR] Config: {config}")
         try:
             from uagent_research.middleware.research_middleware import research_middleware
             
             # Extract session_id from config or use coordinator's session_id
-            config = config or {}
+            config = dict(config) if config else {}
             session_id = config.get('session_id', self.session_id)
             
-            self.logger.info(f"Spawning research via middleware for session {session_id}")
-            self.logger.info(f"Goal: {goal[:100]}...")
+            self.logger.info(f"[COORDINATOR] Spawning research via middleware for session {session_id}")
+            self.logger.info(f"[COORDINATOR] Goal: {goal[:100]}...")
             
             # Use middleware to start research (this creates orchestrator and background task)
             experiment_id = await research_middleware.start_research(
@@ -211,20 +210,18 @@ class MultiAgentCoordinator:
                 research_type='scientific',
                 config=config
             )
-            logger.info(f"[COORDINATOR] Middleware returned experiment_id: {experiment_id}")
+            self.logger.info(f"[COORDINATOR] Middleware returned experiment_id: {experiment_id}")
             
             # Track the experiment in coordinator
             if self.track_existing_experiment(experiment_id):
-                logger.info(f"[COORDINATOR] Experiment {experiment_id} tracked successfully")
-                self.logger.info(f"Research experiment {experiment_id} spawned and tracked")
-            else:
-                logger.error(f"[COORDINATOR] Failed to track experiment {experiment_id}")
-                self.logger.warning(f"Research experiment {experiment_id} spawned but tracking failed")
-            
-            return experiment_id
-            
+                self.logger.info(f"[COORDINATOR] Experiment {experiment_id} tracked successfully")
+                return experiment_id
+
+            self.logger.error(f"[COORDINATOR] Failed to track experiment {experiment_id}")
+            raise RuntimeError(f"Failed to track experiment {experiment_id}")
+
         except Exception as e:
-            self.logger.error(f"Failed to spawn research agent: {e}", exc_info=True)
+            self.logger.error(f"[COORDINATOR] Failed to spawn research agent: {e}", exc_info=True)
             raise
 
 
@@ -396,18 +393,17 @@ class MultiAgentCoordinator:
         Returns:
             True if tracking successful, False if experiment not found
         """
-        
-        logger.info(f"[COORDINATOR] track_existing_experiment() called for {experiment_id}")
+        self.logger.info(f"[COORDINATOR] track_existing_experiment() called for {experiment_id}")
         try:
             from uagent_research.middleware.research_middleware import research_middleware
             
             # Get orchestrator metadata from middleware
             exp_data = research_middleware.get_orchestrator_for_tracking(experiment_id)
             if exp_data:
-                logger.info(f"[COORDINATOR] Found experiment data: goal={exp_data.get('goal', 'N/A')[:50] if exp_data.get('goal') else 'N/A'}")
+                self.logger.info(f"[COORDINATOR] Found experiment data: goal={exp_data.get('goal', 'N/A')[:50] if exp_data.get('goal') else 'N/A'}")
             else:
-                logger.error(f"[COORDINATOR] Experiment {experiment_id} not found in middleware")
-                self.logger.warning(f"Cannot track experiment {experiment_id}: not found in middleware")
+                self.logger.error(f"[COORDINATOR] Experiment {experiment_id} not found in middleware")
+                self.logger.warning(f"[COORDINATOR] Cannot track experiment {experiment_id}: not found in middleware")
                 return False
             
             # Extract metadata
@@ -417,11 +413,11 @@ class MultiAgentCoordinator:
             max_iterations = exp_data.get('max_iterations', 50)
             
             if not orchestrator:
-                self.logger.warning(f"Experiment {experiment_id} has no orchestrator")
+                self.logger.warning(f"[COORDINATOR] Experiment {experiment_id} has no orchestrator")
                 return False
             
             # Create SubAgent for tracking
-            logger.info(f"[COORDINATOR] Creating SubAgent for tracking")
+            self.logger.info(f"[COORDINATOR] Creating SubAgent for tracking")
             sub_agent = SubAgent(
                 id=experiment_id,
                 type="research",
@@ -437,7 +433,7 @@ class MultiAgentCoordinator:
             
             # Store in tracking dict
             self.sub_agents[experiment_id] = sub_agent
-            logger.info(f"[COORDINATOR] SubAgent created and stored. Total sub-agents: {len(self.sub_agents)}")
+            self.logger.info(f"[COORDINATOR] SubAgent created and stored. Total sub-agents: {len(self.sub_agents)}")
             
             # Register with MessageBus
             self.message_bus.register_agent(
@@ -458,7 +454,6 @@ class MultiAgentCoordinator:
             )
             
             # Emit AgentSpawnedEvent via MessageBus (broadcast)
-            import asyncio
             asyncio.create_task(
                 self.message_bus.send_message(
                     from_agent_id=self.session_id,
@@ -474,7 +469,7 @@ class MultiAgentCoordinator:
                 )
             )
             
-            self.logger.info(f"Now tracking experiment {experiment_id} via coordinator")
+            self.logger.info(f"[COORDINATOR] Now tracking experiment {experiment_id} via coordinator")
             return True
             
         except Exception as e:

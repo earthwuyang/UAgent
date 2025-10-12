@@ -124,14 +124,14 @@ class BingSearchTool(Tool):
         Returns:
             List of search results with title, url, snippet
         """
-        
+
         logger.info(f"[BING_TOOL] _search_bing() called for query: {query}")
         pool = await get_browser_pool()
 
         async with pool.get_page() as page:
             try:
                 # Navigate to Bing
-                logger.info(f"Searching Bing for: {query}")
+                logger.info(f"[BING_TOOL] Navigating to Bing")
                 await page.goto("https://www.bing.com", wait_until="domcontentloaded")
 
                 # Wait for search box
@@ -144,15 +144,18 @@ class BingSearchTool(Tool):
 
                 # Submit search
                 await search_box.press("Enter")
-                        # Wait for results
-            logger.info(f"[BING_TOOL] Waiting for search results")
-            await page.wait_for_selector('li.b_algo', state="visible", timeout=10000)
+
+                # Wait for results
+                logger.info(f"[BING_TOOL] Waiting for search results")
+                await page.wait_for_selector('li.b_algo', state="visible", timeout=10000)
 
                 # Small delay to mimic human reading
                 await asyncio.sleep(1)
-                        # Extract results
-            logger.info(f"[BING_TOOL] Extracting search results")
-            results = await page.evaluate(f"""
+
+                # Extract results
+                logger.info(f"[BING_TOOL] Extracting search results")
+                results = await page.evaluate(
+                    f"""
                     () => {{
                         const items = Array.from(document.querySelectorAll('li.b_algo'));
                         const maxResults = {num_results};
@@ -169,13 +172,14 @@ class BingSearchTool(Tool):
                             }};
                         }}).filter(item => item.title && item.url);
                     }}
-                """)
+                """
+                )
 
-                logger.info(f"Extracted {len(results)} results from Bing")
+                logger.info(f"[BING_TOOL] Extracted {len(results)} results from Bing")
                 return results
 
             except Exception as e:
-                logger.error(f"Error during Bing search: {e}")
+                logger.error(f"[BING_TOOL] Search failed: {e}", exc_info=True)
                 raise
 
     async def validate_args(self, **kwargs) -> tuple[bool, Optional[str]]:
