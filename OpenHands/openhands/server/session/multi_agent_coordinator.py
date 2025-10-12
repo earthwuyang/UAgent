@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Any, List
 from logging import LoggerAdapter
 
-from extensions.uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
-from extensions.uagent_research.uagent_research.models.research_tree import Budget
-from extensions.uagent_research.orchestrator.event_bus import EventBus, get_event_bus
-from extensions.uagent_research.control.control_bus import ControlBus
+from uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
+from uagent_research.models.research_tree import Budget
+from uagent_research.orchestrator.event_bus import EventBus, get_event_bus
+from uagent_research.control.control_bus import ControlBus
 from openhands.events.observation.sub_agent import (
     SubAgentSpawnedObservation,
     SubAgentProgressObservation,
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # Import centralized adapter registration
-from extensions.uagent_research.adapters.ensure_adapters import ensure_research_adapters_registered as register_research_adapters
+from uagent_research.adapters.ensure_adapters import ensure_research_adapters_registered as register_research_adapters
 
 
 
@@ -195,7 +195,7 @@ class MultiAgentCoordinator:
         logger.info(f"[COORDINATOR] spawn_research_agent() called: goal={goal[:100] if goal else 'N/A'}")
         logger.info(f"[COORDINATOR] Config: {config}")
         try:
-            from extensions.uagent_research.middleware.research_middleware import research_middleware
+            from uagent_research.middleware.research_middleware import research_middleware
             
             # Extract session_id from config or use coordinator's session_id
             config = config or {}
@@ -216,12 +216,9 @@ class MultiAgentCoordinator:
             # Track the experiment in coordinator
             if self.track_existing_experiment(experiment_id):
                 logger.info(f"[COORDINATOR] Experiment {experiment_id} tracked successfully")
-            else:
-                logger.error(f"[COORDINATOR] Failed to track experiment {experiment_id}")
-        
-        if
                 self.logger.info(f"Research experiment {experiment_id} spawned and tracked")
             else:
+                logger.error(f"[COORDINATOR] Failed to track experiment {experiment_id}")
                 self.logger.warning(f"Research experiment {experiment_id} spawned but tracking failed")
             
             return experiment_id
@@ -402,16 +399,14 @@ class MultiAgentCoordinator:
         
         logger.info(f"[COORDINATOR] track_existing_experiment() called for {experiment_id}")
         try:
-            from extensions.uagent_research.middleware.research_middleware import research_middleware
+            from uagent_research.middleware.research_middleware import research_middleware
             
             # Get orchestrator metadata from middleware
             exp_data = research_middleware.get_orchestrator_for_tracking(experiment_id)
-        if exp_data:
-            logger.info(f"[COORDINATOR] Found experiment data: goal={exp_data.get('goal', 'N/A')[:50] if exp_data.get('goal') else 'N/A'}")
-        else:
-            logger.error(f"[COORDINATOR] Experiment {experiment_id} not found in middleware")
-            return False
-            if not exp_data:
+            if exp_data:
+                logger.info(f"[COORDINATOR] Found experiment data: goal={exp_data.get('goal', 'N/A')[:50] if exp_data.get('goal') else 'N/A'}")
+            else:
+                logger.error(f"[COORDINATOR] Experiment {experiment_id} not found in middleware")
                 self.logger.warning(f"Cannot track experiment {experiment_id}: not found in middleware")
                 return False
             
@@ -426,7 +421,7 @@ class MultiAgentCoordinator:
                 return False
             
             # Create SubAgent for tracking
-        logger.info(f"[COORDINATOR] Creating SubAgent for tracking")
+            logger.info(f"[COORDINATOR] Creating SubAgent for tracking")
             sub_agent = SubAgent(
                 id=experiment_id,
                 type="research",
@@ -442,7 +437,7 @@ class MultiAgentCoordinator:
             
             # Store in tracking dict
             self.sub_agents[experiment_id] = sub_agent
-        logger.info(f"[COORDINATOR] SubAgent created and stored. Total sub-agents: {len(self.sub_agents)}")
+            logger.info(f"[COORDINATOR] SubAgent created and stored. Total sub-agents: {len(self.sub_agents)}")
             
             # Register with MessageBus
             self.message_bus.register_agent(
@@ -711,7 +706,7 @@ class MultiAgentCoordinator:
                 payload={"text": "Focus on recent papers"}
             )
         """
-        from extensions.uagent_research.control.control_bus import ControlMessage
+        from uagent_research.control.control_bus import ControlMessage
         
         # Verify sub-agent exists
         if sub_agent_id not in self.sub_agents:

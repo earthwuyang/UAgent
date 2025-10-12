@@ -10,12 +10,17 @@ Provides:
 
 import asyncio
 import logging
+import threading
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+# Global singleton instance for ResearchSessionManager
+_global_session_manager_instance: Optional['ResearchSessionManager'] = None
+_lock = threading.Lock()
 
 
 class ExperimentStatus(str, Enum):
@@ -471,16 +476,103 @@ class ResearchSessionManager:
         logger.info("ResearchSessionManager closed")
 
 
-# Singleton instance (optional convenience)
-_session_manager: Optional[ResearchSessionManager] = None
+def get_global_session_manager(
+    event_bus=None,
+    control_bus=None,
+    llm=None
+) -> 'ResearchSessionManager':
+    """
+    Get or create the global singleton ResearchSessionManager instance.
+    
+    Thread-safe singleton implementation using double-check locking pattern.
+    
+    Args:
+        event_bus: Optional EventBus instance (created if not provided)
+        control_bus: Optional ControlBus instance (created if not provided)
+        llm: Optional LLM instance for research agents
+    
+    Returns:
+        The global ResearchSessionManager singleton instance
+    
+    Example:
+        >>> session_mgr = get_global_session_manager()
+        >>> session_mgr.register(experiment_id, orchestrator)
+    """
+    global _global_session_manager_instance
+    
+    # Fast path: instance already exists
+    if _global_session_manager_instance is not None:
+        return _global_session_manager_instance
+    
+    # Slow path: need to create instance
+    with _lock:
+        # Double-check after acquiring lock
+        if _global_session_manager_instance is None:
+            try:
+                # Get event bus if not provided
+                if event_bus is None:
+                    try:
+                        from ..orchestrator.event_bus import get_event_bus
+                        event_bus = get_event_bus()
+                        logger.info("Using global EventBus for session manager")
+                    except Exception as e:
+                        logger.warning(f"Could not get EventBus: {e}")
+                        event_bus = None
+                
+                # Get control bus if not provided
+                if control_bus is None:
+                    try:
+                        from ..control.control_bus import ControlBus
+                        control_bus = ControlBus()
+                        logger.info("Created ControlBus for session manager")
+                    except Exception as e:
+                        logger.warning(f"Could not create ControlBus: {e}")
+                        control_bus = None
+                
+                # Create the singleton instance
+                _global_session_manager_instance = ResearchSessionManager(
+                    event_bus=event_bus,
+                    control_bus=control_bus
+                )
+                
+                # Store LLM if provided
+                if llm:
+                    _global_session_manager_instance.llm = llm
+                
+                logger.info("✅ Global ResearchSessionManager singleton created")
+                
+            except Exception as e:
+                logger.error(f"Failed to create global session manager: {e}")
+                raise
+        
+        return _global_session_manager_instance
 
 
+def reset_global_session_manager():
+    """
+    Reset the global session manager singleton.
+    
+    This function is primarily for testing purposes to ensure a clean state
+    between test runs.
+    
+    Example:
+        >>> reset_global_session_manager()
+        >>> # Now get_global_session_manager() will create a new instance
+    """
+    global _global_session_manager_instance
+    with _lock:
+        if _global_session_manager_instance is not None:
+            logger.info("Resetting global ResearchSessionManager singleton")
+            _global_session_manager_instance = None
+
+
+# Backward compatibility: keep old function name but use new implementation
 def get_session_manager(event_bus=None, control_bus=None) -> ResearchSessionManager:
-    """Get global session manager instance (singleton pattern)"""
-    global _session_manager
-    if _session_manager is None:
-        _session_manager = ResearchSessionManager(event_bus, control_bus)
-    return _session_manager
+    """Get global session manager instance (deprecated: use get_global_session_manager)"""
+    logger.warning(
+        "get_session_manager() is deprecated, use get_global_session_manager() instead"
+    )
+    return get_global_session_manager(event_bus, control_bus)
 
 
 # Example usage and tests

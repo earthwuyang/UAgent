@@ -146,19 +146,14 @@ class ResearchMiddleware:
         ensure_research_adapters_registered()
 
     def get_session_manager(self) -> Optional['ResearchSessionManager']:
-        """Get or create session manager"""
+        """Get or create session manager using global singleton"""
         if self._session_manager is None and CONTROL_AVAILABLE:
             try:
-                from ..control.control_bus import ControlBus
-                event_bus = get_event_bus()
-                control_bus = ControlBus()
-                self._session_manager = ResearchSessionManager(
-                    event_bus=event_bus,
-                    control_bus=control_bus
-                )
-                logger.info("ResearchSessionManager initialized in middleware")
+                from ..services.research_session_manager import get_global_session_manager
+                self._session_manager = get_global_session_manager()
+                logger.info("✅ Middleware using global ResearchSessionManager singleton")
             except Exception as e:
-                logger.error(f"Failed to create session manager: {e}")
+                logger.error(f"Failed to get global session manager: {e}")
         return self._session_manager
 
     def get_active_experiment_for_session(self, session_id: str) -> Optional[str]:
@@ -728,10 +723,31 @@ class ResearchMiddleware:
                 logger.info(
                     f"[RESEARCH_MIDDLEWARE] Registered experiment {experiment_id} with session manager"
                 )
-            except Exception:
+                
+                # Verify registration succeeded
+                if experiment_id not in session_mgr.experiments:
+                    logger.error(f"CRITICAL: Registration verification failed for {experiment_id}")
+                    logger.error(f"Experiment not found in session_mgr.experiments")
+                    logger.error(f"Active experiments: {list(session_mgr.experiments.keys())}")
+                    # Clean up partial state
+                    if experiment_id in self.active_orchestrators:
+                        del self.active_orchestrators[experiment_id]
+                    raise RuntimeError(f"Experiment registration failed: {experiment_id}")
+                
+                logger.info(f"✅ Registration verified for {experiment_id}")
+                logger.info(f"📊 Total experiments in session manager: {len(session_mgr.experiments)}")
+                
+            except RuntimeError:
+                # Re-raise RuntimeError from verification failure
+                raise
+            except Exception as e:
                 logger.exception(
                     f"[RESEARCH_MIDDLEWARE] Failed to register experiment {experiment_id} with session manager"
                 )
+                # Clean up partial state
+                if experiment_id in self.active_orchestrators:
+                    del self.active_orchestrators[experiment_id]
+                raise
 
         # Start research in background, pass experiment_id as research_id
         logger.info(f"[RESEARCH_MIDDLEWARE] Creating background task for experiment {experiment_id}")

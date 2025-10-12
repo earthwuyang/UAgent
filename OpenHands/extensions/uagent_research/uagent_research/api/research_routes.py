@@ -639,30 +639,19 @@ except ImportError:
 # Global storage for active orchestrators (in production, use Redis/DB)
 _active_orchestrators = {}
 
-# Global session manager for research state tracking
-_session_manager: Optional[ResearchSessionManager] = None
-
 def get_session_manager() -> Optional[ResearchSessionManager]:
-    """Get or create global session manager"""
-    global _session_manager
-
+    """Get global singleton session manager for API routes"""
     if not CONTROL_BUS_AVAILABLE:
         return None
 
-    if _session_manager is None:
-        try:
-            event_bus = get_event_bus()
-            control_bus = ControlBus()
-            _session_manager = ResearchSessionManager(
-                event_bus=event_bus,
-                control_bus=control_bus
-            )
-            logger.info("ResearchSessionManager initialized for API")
-        except Exception as e:
-            logger.error(f"Failed to initialize session manager: {e}")
-            return None
-
-    return _session_manager
+    try:
+        from ...services.research_session_manager import get_global_session_manager
+        session_manager = get_global_session_manager()
+        logger.info("✅ API using global ResearchSessionManager singleton")
+        return session_manager
+    except Exception as e:
+        logger.error(f"Failed to get global session manager: {e}")
+        return None
 
 
 class TreeNodeResponse(BaseModel):

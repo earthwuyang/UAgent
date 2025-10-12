@@ -10,21 +10,24 @@ Phase 3 Enhancement:
 import asyncio
 import json
 import logging
-from typing import Dict, Set, Optional
+from typing import Any, Dict, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from datetime import datetime
 
 # Import control components
 try:
     from ...control.control_bus import ControlMessage
-    from ...services.research_session_manager import ResearchSessionManager
-    from ...orchestrator.event_bus import get_event_bus
+    from ...services.research_session_manager import (
+        ResearchSessionManager,
+        get_global_session_manager,
+    )
     CONTROL_AVAILABLE = True
 except ImportError as e:
     logging.warning(f"Control components not available: {e}")
     CONTROL_AVAILABLE = False
     ControlMessage = None
-    ResearchSessionManager = None
+    ResearchSessionManager = Any  # type: ignore[assignment]
+    get_global_session_manager = None
 
 logger = logging.getLogger(__name__)
 
@@ -150,14 +153,8 @@ def get_session_manager() -> Optional[ResearchSessionManager]:
 
     if _session_manager is None:
         try:
-            from ...control.control_bus import ControlBus
-            event_bus = get_event_bus()
-            control_bus = ControlBus()
-            _session_manager = ResearchSessionManager(
-                event_bus=event_bus,
-                control_bus=control_bus
-            )
-            logger.info("ResearchSessionManager initialized for WebSocket")
+            _session_manager = get_global_session_manager()
+            logger.info("✅ WebSocket using global ResearchSessionManager singleton")
         except Exception as e:
             logger.error(f"Failed to initialize session manager: {e}")
             return None

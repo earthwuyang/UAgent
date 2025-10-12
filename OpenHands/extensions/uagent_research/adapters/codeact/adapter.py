@@ -103,15 +103,17 @@ class CodeActAdapter(AgentAdapter):
         if self.llm_config:
             return self.llm_config
 
-        # Create default LLM config
+        # Load LLM config from environment variables (same as main OpenHands)
         try:
-            from openhands.core.config import LLMConfig
-            return LLMConfig(
-                model="gpt-4o",
-                api_key=None,  # Will use env var
+            from ...utils.config_utils import load_llm_config_from_env
+            config = load_llm_config_from_env()
+            logger.info(
+                f"Loaded LLM config from environment: model={config.model}, "
+                f"base_url={config.base_url if config.base_url else 'default'}"
             )
+            return config
         except Exception as e:
-            logger.error(f"Failed to create default LLM config: {e}")
+            logger.error(f"Failed to load LLM config from environment: {e}")
             raise
 
     async def run(self, task: Task, context: Context) -> AsyncIterator[ResearchEvent]:

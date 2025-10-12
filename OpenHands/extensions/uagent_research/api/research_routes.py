@@ -33,6 +33,15 @@ class ExperimentControlRequest(BaseModel):
     action: str  # pause, resume, cancel
 
 
+class ExperimentStatusResponse(BaseModel):
+    """Response model for experiment status"""
+    experiment_id: str
+    status: str  # idle, running, paused, complete, failed, cancelled
+    stats: dict
+    adapters: dict
+    active_branches: list
+
+
 def initialize_research_api():
     """Initialize the research API with diagnostic logging."""
     global _api_initialized
@@ -87,6 +96,111 @@ async def get_research_diagnostics():
             "traceback": traceback.format_exc(),
             "timestamp": datetime.utcnow().isoformat()
         }
+
+
+@router.get("/experiments/{experiment_id}/status")
+async def get_experiment_status(experiment_id: str) -> ExperimentStatusResponse:
+    """
+    Get the current status of a research experiment.
+
+    This endpoint provides the experiment's execution state, statistics,
+    adapter states, and active branches.
+
+    Args:
+        experiment_id: The unique identifier for the experiment
+
+    Returns:
+        ExperimentStatusResponse with current experiment state
+    """
+    try:
+        logger.info(f"📊 Status requested for experiment {experiment_id}")
+        logger.debug(f"🔍 Checking active trees: {list(_active_trees.keys())}")
+
+        # Check if experiment exists in active trees
+        if experiment_id not in _active_trees:
+            logger.info(f"ℹ️ No active experiment found for {experiment_id}, returning idle status")
+            # Return idle status for experiments that haven't started
+            return ExperimentStatusResponse(
+                experiment_id=experiment_id,
+                status="idle",
+                stats={
+                    "total_nodes": 0,
+                    "total_edges": 0,
+                    "total_cost": 0.0,
+                    "total_tokens": 0,
+                    "completed_nodes": 0,
+                    "failed_nodes": 0,
+                },
+                adapters={},
+                active_branches=[]
+            )
+
+        # Get tree data
+        tree_data = _active_trees[experiment_id]
+        data = tree_data.get('data', {})
+        stats = data.get('stats', {})
+        
+        # Determine status based on node states
+        nodes = data.get('nodes', [])
+        if not nodes:
+            status = "idle"
+        else:
+            # Count node states
+            running_nodes = sum(1 for node in nodes if node.get('status') == 'running')
+            completed_nodes = sum(1 for node in nodes if node.get('status') == 'completed')
+            failed_nodes = sum(1 for node in nodes if node.get('status') == 'failed')
+            total_nodes = len(nodes)
+            
+            # Determine overall status
+            if running_nodes > 0:
+                status = "running"
+            elif completed_nodes == total_nodes:
+                status = "complete"
+            elif failed_nodes > 0:
+                status = "failed"
+            else:
+                status = "idle"
+        
+        # Extract adapter information (placeholder - would come from orchestrator)
+        adapters = {}
+        for node in nodes:
+            adapter_type = node.get('adapter_type')
+            if adapter_type and adapter_type not in adapters:
+                adapters[adapter_type] = {
+                    "status": "active" if node.get('status') == 'running' else "idle",
+                    "current_action": node.get('action', '')
+                }
+        
+        # Extract active branches (nodes currently being explored)
+        active_branches = []
+        for node in nodes:
+            if node.get('status') == 'running':
+                active_branches.append({
+                    "branch_id": node.get('id'),
+                    "adapter": node.get('adapter_type', 'unknown'),
+                    "elapsed_time": 0  # Would be calculated from timestamps
+                })
+        
+        response = ExperimentStatusResponse(
+            experiment_id=experiment_id,
+            status=status,
+            stats=stats,
+            adapters=adapters,
+            active_branches=active_branches
+        )
+        
+        logger.info(
+            f"✅ Status returned for {experiment_id}: "
+            f"status={status}, nodes={len(nodes)}, adapters={len(adapters)}"
+        )
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching status for {experiment_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch status: {str(e)}"
+        )
 
 
 @router.get("/experiments/{experiment_id}/tree")

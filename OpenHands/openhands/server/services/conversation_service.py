@@ -31,8 +31,10 @@ from openhands.storage.data_models.user_secrets import UserSecrets
 from openhands.utils.conversation_summary import get_default_conversation_title
 
 # Import research middleware
+# The extensions directory is added to sys.path in listen.py
+# This allows us to import from uagent_research as a package
 try:
-    from extensions.uagent_research.middleware.research_middleware import research_middleware
+    from uagent_research.middleware.research_middleware import research_middleware
     RESEARCH_MIDDLEWARE_AVAILABLE = True
     logger.info("Research middleware loaded successfully")
 except ImportError as e:

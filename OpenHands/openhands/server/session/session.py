@@ -728,6 +728,22 @@ class WebSession:
                         await self.send(event_dict)
 
                         self.logger.info(f"Research progress reported for experiment {self.active_research_experiment_id}: {total_nodes} nodes")
+                        
+                        # Update global session manager with progress
+                        try:
+                            from extensions.uagent_research.services.research_session_manager import get_global_session_manager
+                            
+                            session_mgr = get_global_session_manager()
+                            if session_mgr and self.active_research_experiment_id:
+                                # Note: ResearchSessionManager doesn't have update_progress method
+                                # The progress is already tracked via the orchestrator in the session manager
+                                # Just log that we're using the singleton
+                                self.logger.debug(f"Progress sync: {total_nodes} nodes for {self.active_research_experiment_id}")
+                        except ImportError:
+                            self.logger.debug("Research session manager not available")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to sync with research session manager: {e}")
+                        
                         self._last_progress_broadcast = now
                     else:
                         # Orchestrator finished or not found - stop reporting
