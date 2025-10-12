@@ -19,17 +19,9 @@ _module_load_status = {
 # Load research_routes with diagnostics
 try:
     logger.debug("🔄 Importing research_routes module")
-    from .research_routes import router, initialize_research_api
+    from .research_routes import router
     _module_load_status["research_routes"]["loaded"] = True
     logger.info("✅ research_routes module loaded successfully")
-    
-    # Initialize the research API
-    try:
-        initialize_research_api()
-        logger.debug("✅ Research API initialized")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to initialize research API: {e}")
-        _module_load_status["research_routes"]["initialization_error"] = str(e)
         
 except Exception as e:
     error_msg = f"Failed to import research_routes: {e}"
