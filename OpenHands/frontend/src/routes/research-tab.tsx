@@ -9,9 +9,6 @@ import { ReactFlowProvider } from "reactflow";
 import { useConversationId } from "#/hooks/use-conversation-id";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 import {
-  ExperimentControls,
-  ExperimentProgress,
-  ExperimentStatus,
   ResearchTreeView,
   ResearchErrorBoundary,
 } from "#/components/research";
@@ -172,7 +169,8 @@ export default function ResearchTab() {
     setCanRenderTree(false);
     fetchTreeSnapshot(true);
     fetchStatus();
-  }, [experimentId, fetchTreeSnapshot, fetchStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [experimentId]);
 
   useEffect(() => {
     if (!experimentId) {
@@ -197,7 +195,8 @@ export default function ResearchTab() {
     return () => {
       clearStatusPolling();
     };
-  }, [experimentId, experimentStatus, fetchStatus, clearStatusPolling]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [experimentId, experimentStatus]);
 
   useEffect(() => {
     if (!experimentId) {
@@ -214,35 +213,13 @@ export default function ResearchTab() {
     }, TREE_POLL_INTERVAL);
 
     return () => clearInterval(interval);
-  }, [experimentId, experimentStatus, fetchTreeSnapshot]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [experimentId, experimentStatus]);
 
   const { isConnected } = useResearchWS({
     experimentId: experimentId ?? "",
     autoConnect: Boolean(experimentId && experimentStatus !== "idle"),
   });
-
-  const handleControlAction = useCallback(
-    (action: string) => {
-      switch (action) {
-        case "start":
-        case "resume":
-          setExperimentStatus("running");
-          fetchStatus();
-          fetchTreeSnapshot(false);
-          break;
-        case "pause":
-          setExperimentStatus("paused");
-          break;
-        case "cancel":
-          setExperimentStatus("cancelled");
-          fetchStatus();
-          break;
-        default:
-          break;
-      }
-    },
-    [fetchStatus, fetchTreeSnapshot],
-  );
 
   const headerStats = useMemo(
     () => [
@@ -289,27 +266,11 @@ export default function ResearchTab() {
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-hidden bg-slate-950 p-4 text-slate-100">
-      <div className="grid gap-4 lg:grid-cols-[2fr,3fr]">
-        <ExperimentStatus
-          experimentId={experimentId}
-          status={experimentStatus}
-          showCost
-          showDuration
-          showTokens
-        />
-        <ExperimentControls
-          experimentId={experimentId}
-          status={experimentStatus}
-          onAction={handleControlAction}
-          goal={researchGoal}
-        />
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-[2fr,3fr]">
-        <ExperimentProgress experimentId={experimentId} />
-        <div className="rounded-lg border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-300">
-          <div className="flex items-center justify-between">
-            <span className="font-medium">Connection</span>
+      {/* Single stats bar - no control buttons */}
+      <div className="rounded-lg border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-300">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <span className="font-medium">Research Tree</span>
             <span
               className={`flex items-center gap-2 text-xs ${
                 isConnected ? "text-emerald-400" : "text-amber-400"
@@ -319,10 +280,10 @@ export default function ResearchTab() {
               {isConnected ? "Connected" : "Disconnected"}
             </span>
           </div>
-          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-400">
+          <div className="flex items-center gap-4 text-xs text-slate-400">
             {headerStats.map((item) => (
-              <div key={item.label} className="flex justify-between">
-                <span>{item.label}</span>
+              <div key={item.label} className="flex items-center gap-1">
+                <span>{item.label}:</span>
                 <span className="text-slate-200">{item.value}</span>
               </div>
             ))}

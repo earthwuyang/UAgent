@@ -1268,10 +1268,12 @@ async def get_experiment_status(
     experiment = result.scalar_one_or_none()
     
     # If not found by ID, try by session_id (for when frontend passes conversation ID)
+    # Use .first() instead of .scalar_one_or_none() to handle duplicate experiments gracefully
     if not experiment:
         result = await session.execute(
             sql_select(Experiment).where(Experiment.session_id == experiment_id)
             .order_by(Experiment.created_at.desc())
+            .limit(1)
         )
         experiment = result.scalar_one_or_none()
 

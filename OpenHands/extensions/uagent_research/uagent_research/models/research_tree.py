@@ -236,11 +236,15 @@ class ResearchTree(BaseModel):
         return 1 + max_child_depth
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON storage"""
+        """Convert to dictionary for JSON storage
+        
+        Returns nodes as an array (not a dict) for frontend compatibility.
+        The frontend expects: { nodes: [{id, type, ...}, ...] }
+        """
         return {
             "research_id": self.research_id,
-            "nodes": {nid: node.to_dict() for nid, node in self.nodes.items()},
-            "edges": [{"from": e.parent_id, "to": e.child_id, "relation": e.relation} for e in self.edges],
+            "nodes": [node.to_dict() for node in self.nodes.values()],
+            "edges": [{"parent_id": e.parent_id, "child_id": e.child_id} for e in self.edges],
             "stats": self.stats,
             "version": self.version
         }
