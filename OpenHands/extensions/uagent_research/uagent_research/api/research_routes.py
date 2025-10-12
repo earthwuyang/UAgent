@@ -642,15 +642,18 @@ _active_orchestrators = {}
 def get_session_manager() -> Optional[ResearchSessionManager]:
     """Get global singleton session manager for API routes"""
     if not CONTROL_BUS_AVAILABLE:
+        logger.warning("Control bus not available, cannot get session manager")
         return None
 
     try:
         from ...services.research_session_manager import get_global_session_manager
         session_manager = get_global_session_manager()
-        logger.info("✅ API using global ResearchSessionManager singleton")
+        logger.info(f"✅ API using global ResearchSessionManager singleton (instance ID: {id(session_manager)})")
+        logger.info(f"   Total experiments in singleton: {len(session_manager.experiments)}")
+        logger.info(f"   Active experiment IDs: {list(session_manager.experiments.keys())}")
         return session_manager
     except Exception as e:
-        logger.error(f"Failed to get global session manager: {e}")
+        logger.error(f"Failed to get global session manager: {e}", exc_info=True)
         return None
 
 

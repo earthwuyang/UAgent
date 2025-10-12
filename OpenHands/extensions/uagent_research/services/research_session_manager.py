@@ -133,7 +133,7 @@ class ResearchSessionManager:
                 self._subscribe_events()
             )
 
-        logger.info("ResearchSessionManager initialized")
+        logger.info(f"ResearchSessionManager initialized (instance ID: {id(self)})")
 
     def register(
         self,
@@ -163,7 +163,10 @@ class ResearchSessionManager:
             status=ExperimentStatus.RUNNING
         )
 
-        logger.info(f"Registered experiment: {experiment_id}")
+        logger.info(f"✅ Registered experiment: {experiment_id}")
+        logger.info(f"   Instance ID: {id(self)}")
+        logger.info(f"   Total experiments: {len(self.experiments)}")
+        logger.info(f"   Active experiments: {list(self.experiments.keys())}")
 
     def unregister(self, experiment_id: str):
         """
@@ -502,6 +505,9 @@ def get_global_session_manager(
     
     # Fast path: instance already exists
     if _global_session_manager_instance is not None:
+        logger.debug(
+            f"Returning existing global session manager singleton (instance ID: {id(_global_session_manager_instance)})"
+        )
         return _global_session_manager_instance
     
     # Slow path: need to create instance
@@ -539,7 +545,10 @@ def get_global_session_manager(
                 if llm:
                     _global_session_manager_instance.llm = llm
                 
-                logger.info("✅ Global ResearchSessionManager singleton created")
+                logger.info(f"✅ Global ResearchSessionManager singleton created (instance ID: {id(_global_session_manager_instance)})")
+                logger.info(f"   Event bus: {'available' if event_bus else 'unavailable'}")
+                logger.info(f"   Control bus: {'available' if control_bus else 'unavailable'}")
+                logger.info(f"   LLM: {'available' if llm else 'unavailable'}")
                 
             except Exception as e:
                 logger.error(f"Failed to create global session manager: {e}")

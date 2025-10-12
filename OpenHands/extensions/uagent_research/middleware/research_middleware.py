@@ -151,9 +151,12 @@ class ResearchMiddleware:
             try:
                 from ..services.research_session_manager import get_global_session_manager
                 self._session_manager = get_global_session_manager()
-                logger.info("✅ Middleware using global ResearchSessionManager singleton")
+                logger.info(f"✅ Middleware using global ResearchSessionManager singleton (instance ID: {id(self._session_manager)})")
+                logger.info(f"   Experiments in singleton: {len(self._session_manager.experiments)}")
             except Exception as e:
                 logger.error(f"Failed to get global session manager: {e}")
+        elif self._session_manager is not None:
+            logger.debug(f"Middleware returning cached session manager (instance ID: {id(self._session_manager)})")
         return self._session_manager
 
     def get_active_experiment_for_session(self, session_id: str) -> Optional[str]:
@@ -727,15 +730,18 @@ class ResearchMiddleware:
                 # Verify registration succeeded
                 if experiment_id not in session_mgr.experiments:
                     logger.error(f"CRITICAL: Registration verification failed for {experiment_id}")
-                    logger.error(f"Experiment not found in session_mgr.experiments")
-                    logger.error(f"Active experiments: {list(session_mgr.experiments.keys())}")
+                    logger.error(f"   Session manager instance ID: {id(session_mgr)}")
+                    logger.error(f"   Experiment not found in session_mgr.experiments")
+                    logger.error(f"   Active experiments: {list(session_mgr.experiments.keys())}")
                     # Clean up partial state
                     if experiment_id in self.active_orchestrators:
                         del self.active_orchestrators[experiment_id]
                     raise RuntimeError(f"Experiment registration failed: {experiment_id}")
                 
                 logger.info(f"✅ Registration verified for {experiment_id}")
-                logger.info(f"📊 Total experiments in session manager: {len(session_mgr.experiments)}")
+                logger.info(f"   Session manager instance ID: {id(session_mgr)}")
+                logger.info(f"   Total experiments in session manager: {len(session_mgr.experiments)}")
+                logger.info(f"   Experiment status: {session_mgr.experiments[experiment_id].status.value}")
                 
             except RuntimeError:
                 # Re-raise RuntimeError from verification failure
