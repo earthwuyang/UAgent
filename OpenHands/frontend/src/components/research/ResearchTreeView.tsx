@@ -138,7 +138,6 @@ export function ResearchTreeView() {
     setFilterStatus,
     setSearchQuery,
     clearFilters,
-    getFilteredNodes,
     isLoading,
   } = useResearchTreeStore((state) => ({
     nodes: state.nodes,
@@ -152,13 +151,27 @@ export function ResearchTreeView() {
     setFilterStatus: state.setFilterStatus,
     setSearchQuery: state.setSearchQuery,
     clearFilters: state.clearFilters,
-    getFilteredNodes: state.getFilteredNodes,
     isLoading: state.isLoading,
   }));
 
-  const filteredNodes = useResearchTreeStore((state) => state.getFilteredNodes());
-
   const hasFilters = Boolean(filterType || filterStatus || searchQuery.trim());
+
+  // Memoize filtered nodes to prevent infinite re-renders
+  // This prevents getFilteredNodes() from returning a new array reference on every render
+  const filteredNodes = useMemo(() => {
+    if (!hasFilters) {
+      return Array.from(storeNodes.values());
+    }
+    return Array.from(storeNodes.values()).filter((node) => {
+      const typeMatch = !filterType || node.type === filterType;
+      const statusMatch = !filterStatus || node.status === filterStatus;
+      const searchMatch = !searchQuery.trim() || 
+        node.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        node.description?.toLowerCase().includes(searchQuery.toLowerCase());
+      return typeMatch && statusMatch && searchMatch;
+    });
+  }, [storeNodes, filterType, filterStatus, searchQuery, hasFilters]);
+
   const filteredIds = useMemo(() => new Set(filteredNodes.map((node) => node.id)), [filteredNodes]);
   const totalNodes = storeNodes.size;
 
@@ -263,6 +276,9 @@ export function ResearchTreeView() {
         maxZoom={2}
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         proOptions={{ hideAttribution: true }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={true}
       >
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#47556920" />
 

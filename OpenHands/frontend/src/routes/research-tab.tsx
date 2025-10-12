@@ -40,7 +40,7 @@ export default function ResearchTab() {
   const [canRenderTree, setCanRenderTree] = useState(false);
 
   const statusPollRef = useRef<NodeJS.Timeout | null>(null);
-
+  const lastTreeHashRef = useRef<string>('');
   // Access store state for display (nodes, edges, stats)
   const nodes = useResearchTreeStore((state) => state.nodes);
   const edges = useResearchTreeStore((state) => state.edges);
@@ -104,10 +104,15 @@ export default function ResearchTab() {
         }
 
         const snapshot = await response.json();
-        useResearchTreeStore.getState().setSnapshot(snapshot);
-        setTreeError(null);
-        // Allow rendering only when there is at least one node
-        setCanRenderTree(Boolean(snapshot?.data?.nodes?.length));
+        // Use JSON.stringify as a simple hash to avoid writing identical snapshots
+        const hash = JSON.stringify(snapshot?.data ?? snapshot);
+        if (hash !== lastTreeHashRef.current) {
+          lastTreeHashRef.current = hash;
+          useResearchTreeStore.getState().setSnapshot(snapshot);
+          setTreeError(null);
+          // Allow rendering only when there is at least one node
+          setCanRenderTree(Boolean(snapshot?.data?.nodes?.length));
+        }
       } catch (error) {
         console.error("Failed to fetch research tree:", error);
         setTreeError(
@@ -130,7 +135,8 @@ export default function ResearchTab() {
 
     try {
       const statusResponse = await getExperimentStatus(experimentId);
-      setExperimentStatus(statusResponse.status);
+      // Only update status if it actually changed (prevents unnecessary re-renders)
+      setExperimentStatus(prev => prev === statusResponse.status ? prev : statusResponse.status);
       setStatusError(null);
 
       if (
