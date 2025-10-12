@@ -6,17 +6,17 @@ import socketio
 
 # Add UAgent Research Extension to sys.path BEFORE importing app
 # This ensures that modules like conversation_service.py can import research middleware
-# We add the 'extensions/uagent_research' directory to match app.py's import style
+# We add the 'extensions' directory so that 'uagent_research' can be imported as a package
 try:
-    # Match app.py's path: extensions/uagent_research (not just extensions)
-    extension_dir = Path(__file__).parent.parent.parent / 'extensions' / 'uagent_research'
-    if extension_dir.exists():
-        extension_dir_str = str(extension_dir)
+    # Add the extensions directory to sys.path so 'uagent_research' can be imported
+    extension_parent_dir = Path(__file__).parent.parent.parent / 'extensions'
+    if extension_parent_dir.exists():
+        extension_dir_str = str(extension_parent_dir)
         if extension_dir_str not in sys.path:
             use_source = os.getenv('USE_UAGENT_RESEARCH_FROM_SOURCE', 'true').lower() == 'true'
             if use_source:
                 sys.path.insert(0, extension_dir_str)  # Use insert(0) for higher priority
-                print(f"🔧 [listen.py] Added extension directory to sys.path: {extension_dir}")
+                print(f"🔧 [listen.py] Added extension directory to sys.path: {extension_parent_dir}")
 except Exception as e:
     print(f"⚠️ [listen.py] Failed to add extension directory to sys.path: {e}")
 

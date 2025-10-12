@@ -40,18 +40,20 @@ try:
     import sys
     from pathlib import Path
 
-    # Add extension to Python path
-    extension_dir = Path(__file__).parent.parent.parent / 'extensions' / 'uagent_research'
+    # Add extension to Python path - we add the parent 'extensions' directory
+    # so that 'uagent_research' can be imported as a package
+    extensions_dir = Path(__file__).parent.parent.parent / 'extensions'
+    extension_dir = extensions_dir / 'uagent_research'
     if extension_dir.exists():
         # Use append to avoid shadowing installed packages
         # Guard with idempotency check
-        extension_dir_str = str(extension_dir)
-        if extension_dir_str not in sys.path:
+        extensions_dir_str = str(extensions_dir)
+        if extensions_dir_str not in sys.path:
             # Honor environment flag for loading from source
             use_source = os.getenv('USE_UAGENT_RESEARCH_FROM_SOURCE', 'true').lower() == 'true'
             if use_source:
-                sys.path.append(extension_dir_str)
-                print(f"📦 UAgent Research: Loading from source at {extension_dir}")
+                sys.path.append(extensions_dir_str)
+                print(f"📦 UAgent Research: Loading from source at {extension_dir} (added {extensions_dir} to sys.path)")
             else:
                 print(f"📦 UAgent Research: Using installed package (USE_UAGENT_RESEARCH_FROM_SOURCE=false)")
 

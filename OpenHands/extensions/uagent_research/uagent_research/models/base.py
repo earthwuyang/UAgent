@@ -15,6 +15,8 @@ Base = declarative_base(metadata=metadata)
 # Global session factory
 _async_session_factory = None
 _engine = None
+_db_url = None
+_initialization_lock = None
 
 
 async def init_database(database_url: str, echo: bool = False):
@@ -25,9 +27,21 @@ async def init_database(database_url: str, echo: bool = False):
         database_url: Database connection URL (e.g., postgresql+asyncpg://user:pass@host/db)
         echo: Whether to echo SQL statements (for debugging)
     """
-    global _async_session_factory, _engine
+    global _async_session_factory, _engine, _db_url, _initialization_lock
 
-    logger.info(f"Initializing database: {database_url}")
+    # Initialize lock on first call
+    if _initialization_lock is None:
+        import asyncio
+        _initialization_lock = asyncio.Lock()
+
+    async with _initialization_lock:
+        # Check if already initialized
+        if _async_session_factory is not None:
+            logger.debug("Database already initialized, skipping")
+            return
+
+        logger.info(f"Initializing database: {database_url}")
+        _db_url = database_url
 
     # Create async engine
     # SQLite doesn't support pool_size and max_overflow
@@ -72,8 +86,19 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         async def endpoint(session: AsyncSession = Depends(get_session)):
             ...
     """
+    global _async_session_factory, _db_url
+    
+    # Lazy initialization if not already initialized
     if _async_session_factory is None:
-        raise RuntimeError("Database not initialized. Call init_database() first.")
+        import os
+        # Try to get DB URL from environment or use default
+        if _db_url is None:
+            _db_url = os.getenv('RESEARCH_DATABASE_URL', 'sqlite+aiosqlite:///./openhands_research.db')
+        logger.info(f"Lazy initializing database: {_db_url}")
+        await init_database(_db_url, echo=False)
+    
+    if _async_session_factory is None:
+        raise RuntimeError("Database initialization failed. Please check logs.")
 
     async with _async_session_factory() as session:
         try:

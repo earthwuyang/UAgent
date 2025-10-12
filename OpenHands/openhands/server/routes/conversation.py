@@ -133,7 +133,7 @@ async def search_events(
         HTTPException: If conversation is not found or access is denied
         ValueError: If limit is less than 1 or greater than 100
     """
-    if limit < 0 or limit > 100:
+    if limit < 1 or limit > 100:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid limit'
         )
@@ -291,13 +291,14 @@ async def get_sub_agents(
     - is_running: Boolean indicating if still running
     """
     try:
-        agent_session = conversation.agent_session
+        agent_session = conversation_manager.get_agent_session(conversation.sid)
+
         if not agent_session:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={'error': 'Agent session not found'},
             )
-        
+
         sub_agents = agent_session.get_sub_agents_status()
         return JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -325,13 +326,13 @@ async def get_sub_agent(
     or 404 if not found.
     """
     try:
-        agent_session = conversation.agent_session
+        agent_session = conversation_manager.get_agent_session(conversation.sid)
         if not agent_session:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={'error': 'Agent session not found'},
             )
-        
+
         sub_agent_status = agent_session.get_sub_agent_status(sub_agent_id)
         if not sub_agent_status:
             return JSONResponse(

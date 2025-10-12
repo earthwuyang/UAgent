@@ -660,8 +660,11 @@ class ResearchMiddleware:
         # Create database record for UI visibility and persistence
         if DATABASE_AVAILABLE:
             try:
+                # Import get_session from base
+                from uagent_research.models.base import get_session
+                
                 logger.info(f"💾 Creating database record for experiment {experiment_id}")
-                async for db_session in get_db_session():
+                async for db_session in get_session():
                     # Map research_type string to ExperimentType enum
                     exp_type_map = {
                         'scientific': DBExperimentType.SCIENTIFIC,

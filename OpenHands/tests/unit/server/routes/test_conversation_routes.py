@@ -8,7 +8,14 @@ from fastapi.responses import JSONResponse
 
 from openhands.microagent.microagent import KnowledgeMicroagent, RepoMicroagent
 from openhands.microagent.types import MicroagentMetadata, MicroagentType
-from openhands.server.routes.conversation import get_microagents
+from fastapi import HTTPException
+
+from openhands.server.routes.conversation import (
+    get_microagents,
+    get_sub_agent,
+    get_sub_agents,
+    search_events,
+)
 from openhands.server.routes.manage_conversations import (
     UpdateConversationRequest,
     update_conversation,
@@ -163,6 +170,118 @@ async def test_get_microagents_exception():
         content = json.loads(response.body)
         assert 'error' in content
         assert 'Test exception' in content['error']
+
+
+@pytest.mark.asyncio
+async def test_get_sub_agents_uses_conversation_manager_snapshot():
+    """Ensure sub-agent endpoint pulls session via the conversation manager."""
+
+    mock_conversation = MagicMock(spec=ServerConversation)
+    mock_conversation.sid = 'test_sid'
+
+    mock_agent_session = MagicMock()
+    mock_agent_session.get_sub_agents_status.return_value = [{'id': 'a1'}]
+
+    with patch(
+        'openhands.server.routes.conversation.conversation_manager'
+    ) as mock_manager:
+        mock_manager.get_agent_session.return_value = mock_agent_session
+
+        response = await get_sub_agents(conversation=mock_conversation)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert json.loads(response.body) == {'sub_agents': [{'id': 'a1'}]}
+        mock_manager.get_agent_session.assert_called_once_with('test_sid')
+
+
+@pytest.mark.asyncio
+async def test_get_sub_agents_returns_404_without_session():
+    mock_conversation = MagicMock(spec=ServerConversation)
+    mock_conversation.sid = 'missing'
+
+    with patch(
+        'openhands.server.routes.conversation.conversation_manager'
+    ) as mock_manager:
+        mock_manager.get_agent_session.return_value = None
+
+        response = await get_sub_agents(conversation=mock_conversation)
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert 'Agent session not found' in json.loads(response.body)['error']
+
+
+@pytest.mark.asyncio
+async def test_get_sub_agent_fetches_status():
+    mock_conversation = MagicMock(spec=ServerConversation)
+    mock_conversation.sid = 'test_sid'
+
+    mock_agent_session = MagicMock()
+    mock_agent_session.get_sub_agent_status.return_value = {'id': 's1'}
+
+    with patch(
+        'openhands.server.routes.conversation.conversation_manager'
+    ) as mock_manager:
+        mock_manager.get_agent_session.return_value = mock_agent_session
+
+        response = await get_sub_agent(
+            sub_agent_id='s1', conversation=mock_conversation
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert json.loads(response.body) == {'id': 's1'}
+        mock_agent_session.get_sub_agent_status.assert_called_once_with('s1')
+
+
+@pytest.mark.asyncio
+async def test_get_sub_agent_returns_404_when_missing_session():
+    mock_conversation = MagicMock(spec=ServerConversation)
+    mock_conversation.sid = 'missing'
+
+    with patch(
+        'openhands.server.routes.conversation.conversation_manager'
+    ) as mock_manager:
+        mock_manager.get_agent_session.return_value = None
+
+        response = await get_sub_agent(
+            sub_agent_id='anything', conversation=mock_conversation
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert 'Agent session not found' in json.loads(response.body)['error']
+
+
+@pytest.mark.asyncio
+async def test_get_sub_agent_returns_404_for_missing_sub_agent():
+    mock_conversation = MagicMock(spec=ServerConversation)
+    mock_conversation.sid = 'test_sid'
+
+    mock_agent_session = MagicMock()
+    mock_agent_session.get_sub_agent_status.return_value = None
+
+    with patch(
+        'openhands.server.routes.conversation.conversation_manager'
+    ) as mock_manager:
+        mock_manager.get_agent_session.return_value = mock_agent_session
+
+        response = await get_sub_agent(
+            sub_agent_id='missing', conversation=mock_conversation
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert 'missing' in json.loads(response.body)['error']
+
+
+@pytest.mark.asyncio
+async def test_search_events_limit_zero_rejected():
+    with pytest.raises(HTTPException) as exc:
+        await search_events(
+            conversation_id='sid',
+            limit=0,
+            metadata=MagicMock(spec=ConversationMetadata),
+            user_id='user',
+        )
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
 
 
 @pytest.mark.update_conversation
