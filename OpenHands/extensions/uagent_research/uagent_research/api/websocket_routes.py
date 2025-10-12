@@ -481,5 +481,18 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         manager.disconnect(websocket, session_id=session_id)
 
 
+# Broadcast helper function for tree updates
+async def broadcast_tree_update(experiment_id: str, message: dict):
+    """
+    Broadcast tree update to all WebSocket clients watching an experiment.
+    
+    Args:
+        experiment_id: Experiment ID
+        message: Update message to broadcast
+    """
+    await manager.send_experiment_update(experiment_id, message)
+    logger.debug(f"Broadcasted tree update for experiment {experiment_id}")
+
+
 # Export manager for use by research engines
-__all__ = ["router", "manager"]
+__all__ = ["router", "manager", "broadcast_tree_update"]

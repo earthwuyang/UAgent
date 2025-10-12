@@ -34,7 +34,7 @@ except Exception as e:
 # Load websocket_routes with diagnostics
 try:
     logger.debug("🔄 Importing websocket_routes module")
-    from .websocket_routes import ws_router, manager, broadcast_tree_update
+    from .websocket_routes import router as ws_router, manager, broadcast_tree_update
     _module_load_status["websocket_routes"]["loaded"] = True
     logger.info("✅ websocket_routes module loaded successfully")
     
