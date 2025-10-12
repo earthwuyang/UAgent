@@ -149,15 +149,20 @@ def get_session_manager() -> Optional[ResearchSessionManager]:
     global _session_manager
 
     if not CONTROL_AVAILABLE:
+        logger.warning("Control components not available for WebSocket")
         return None
 
     if _session_manager is None:
         try:
             _session_manager = get_global_session_manager()
-            logger.info("✅ WebSocket using global ResearchSessionManager singleton")
+            logger.info(f"✅ WebSocket using global ResearchSessionManager singleton (instance ID: {id(_session_manager)})")
+            logger.info(f"   Total experiments in singleton: {len(_session_manager.experiments)}")
+            logger.info(f"   Active experiment IDs: {list(_session_manager.experiments.keys())}")
         except Exception as e:
-            logger.error(f"Failed to initialize session manager: {e}")
+            logger.error(f"Failed to initialize session manager: {e}", exc_info=True)
             return None
+    else:
+        logger.debug(f"WebSocket returning cached session manager (instance ID: {id(_session_manager)})")
 
     return _session_manager
 
