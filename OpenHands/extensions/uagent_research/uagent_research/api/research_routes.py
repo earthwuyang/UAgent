@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select as sql_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,18 +53,18 @@ router = APIRouter(prefix="/api/research", tags=["research"])
 
 # Import orchestrator and related components for background execution
 try:
-    from extensions.uagent_research.orchestrator.tree_orchestrator import TreeSearchOrchestrator
-    from extensions.uagent_research.orchestrator.event_bus import get_event_bus
-    from extensions.uagent_research.uagent_research.models.research_tree import Budget
+    from ...orchestrator.tree_orchestrator import TreeSearchOrchestrator
+    from ...orchestrator.event_bus import get_event_bus as get_orchestrator_event_bus
+    from ..models.research_tree import Budget
     ORCHESTRATOR_AVAILABLE = True
-    print(f"[DEBUG] Orchestrator import successful, ORCHESTRATOR_AVAILABLE={ORCHESTRATOR_AVAILABLE}", flush=True)
+    logger.info(f"✅ Orchestrator import successful")
 except ImportError as e:
     logger.warning(f"Orchestrator not available: {e}")
-    print(f"[DEBUG] Orchestrator import failed: {e}", flush=True)
     import traceback
-    traceback.print_exc()
+    logger.debug(traceback.format_exc())
     ORCHESTRATOR_AVAILABLE = False
     TreeSearchOrchestrator = None
+    Budget = None
 
 # Global storage for active orchestrators
 _active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
@@ -107,7 +107,7 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
         )
 
         # Get event bus
-        event_bus = get_event_bus()
+        event_bus = get_orchestrator_event_bus()
 
         # Create orchestrator
         orchestrator = TreeSearchOrchestrator(
@@ -996,7 +996,8 @@ class CancelNodeRequest(BaseModel):
     action: Literal["cancel_node"] = "cancel_node"
     target: Dict[str, str] = Field(..., description="Must contain 'node_id'")
     
-    @validator('target')
+    @field_validator('target')
+    @classmethod
     def validate_target(cls, v):
         if 'node_id' not in v:
             raise ValueError("target must contain 'node_id'")
@@ -1009,13 +1010,15 @@ class ReprioritizeRequest(BaseModel):
     target: Dict[str, str] = Field(..., description="Must contain 'adapter' or 'node_type'")
     payload: Dict[str, Any] = Field(..., description="Must contain 'delta' (float)")
     
-    @validator('target')
+    @field_validator('target')
+    @classmethod
     def validate_target(cls, v):
         if 'adapter' not in v and 'node_type' not in v:
             raise ValueError("target must contain 'adapter' or 'node_type'")
         return v
     
-    @validator('payload')
+    @field_validator('payload')
+    @classmethod
     def validate_payload(cls, v):
         if 'delta' not in v:
             raise ValueError("payload must contain 'delta'")
@@ -1030,13 +1033,15 @@ class SteerRequest(BaseModel):
     target: Dict[str, str] = Field(..., description="Must contain 'node_id', 'branch_id', or 'adapter'")
     payload: Dict[str, Any] = Field(..., description="Must contain 'text'")
     
-    @validator('target')
+    @field_validator('target')
+    @classmethod
     def validate_target(cls, v):
         if not any(k in v for k in ['node_id', 'branch_id', 'adapter']):
             raise ValueError("target must contain 'node_id', 'branch_id', or 'adapter'")
         return v
     
-    @validator('payload')
+    @field_validator('payload')
+    @classmethod
     def validate_payload(cls, v):
         if 'text' not in v or not v['text']:
             raise ValueError("payload must contain non-empty 'text'")
@@ -1048,7 +1053,8 @@ class AddNodeRequest(BaseModel):
     action: Literal["add_node"] = "add_node"
     payload: Dict[str, Any] = Field(..., description="Must contain 'parent_id' and 'node'")
     
-    @validator('payload')
+    @field_validator('payload')
+    @classmethod
     def validate_payload(cls, v):
         if 'parent_id' not in v:
             raise ValueError("payload must contain 'parent_id'")
