@@ -59,6 +59,25 @@ except ImportError as e:
     ResearchSessionManager = None
     ExperimentStatus = None
 
+# Import database models for experiment persistence
+try:
+    from ..uagent_research.models import (
+        Experiment as DBExperiment,
+        ExperimentStatus as DBExperimentStatus,
+        ExperimentType as DBExperimentType,
+    )
+    from ..uagent_research.models.base import get_session as get_db_session
+    from datetime import datetime
+    DATABASE_AVAILABLE = True
+    logger.info("✅ Database models loaded for experiment persistence")
+except ImportError as e:
+    logger.warning(f"Database models not available: {e}")
+    DATABASE_AVAILABLE = False
+    DBExperiment = None
+    DBExperimentStatus = None
+    DBExperimentType = None
+    get_db_session = None
+
 
 class ResearchMiddleware:
     """
@@ -637,6 +656,39 @@ class ResearchMiddleware:
         logger.info(f"🎯 Goal: {goal[:100]}...")
 
         experiment_id = f"exp_{session_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+
+        # Create database record for UI visibility and persistence
+        if DATABASE_AVAILABLE:
+            try:
+                logger.info(f"💾 Creating database record for experiment {experiment_id}")
+                async for db_session in get_db_session():
+                    # Map research_type string to ExperimentType enum
+                    exp_type_map = {
+                        'scientific': DBExperimentType.SCIENTIFIC,
+                        'code': DBExperimentType.CODE,
+                        'roma': DBExperimentType.ROMA,
+                    }
+                    exp_type = exp_type_map.get(research_type, DBExperimentType.SCIENTIFIC)
+                    
+                    # Create experiment record
+                    new_experiment = DBExperiment(
+                        id=experiment_id,
+                        session_id=session_id,
+                        experiment_type=exp_type,
+                        goal=goal,
+                        status=DBExperimentStatus.RUNNING,
+                        created_at=datetime.utcnow(),
+                    )
+                    db_session.add(new_experiment)
+                    await db_session.commit()
+                    logger.info(f"✅ Database record created successfully for {experiment_id}")
+                    break  # Only need one iteration
+            except Exception as e:
+                # Don't fail research if database creation fails
+                logger.error(f"❌ Failed to create database record for {experiment_id}: {e}")
+                logger.info("ℹ️  Research will continue with in-memory tracking only")
+        else:
+            logger.debug(f"Database not available - experiment {experiment_id} uses in-memory tracking")
 
         # Create orchestrator configuration
         config = config or {}

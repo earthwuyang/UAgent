@@ -11,6 +11,14 @@ from openhands.llm.llm_registry import LLMRegistry
 from openhands.storage.data_models.settings import Settings
 from openhands.storage.files import FileStore
 
+# Import research middleware for auto-triggering
+try:
+    from uagent_research.middleware.research_middleware import research_middleware
+    RESEARCH_MIDDLEWARE_AVAILABLE = True
+except ImportError:
+    RESEARCH_MIDDLEWARE_AVAILABLE = False
+    research_middleware = None
+
 
 async def generate_conversation_title(
     message: str,
@@ -110,6 +118,41 @@ async def auto_generate_title(
                 break
 
         if first_user_message:
+            # ========================================
+            # RESEARCH AUTO-TRIGGER INTEGRATION
+            # ========================================
+            # Intercept first user message and check if it should trigger research mode
+            if RESEARCH_MIDDLEWARE_AVAILABLE and research_middleware:
+                try:
+                    logger.info(f"🔍 Checking if message should trigger research mode for conversation {conversation_id}")
+                    result = await research_middleware.process_message(
+                        user_message=first_user_message,
+                        session_id=conversation_id,
+                        conversation_metadata={
+                            'user_id': user_id,
+                            'conversation_id': conversation_id,
+                        }
+                    )
+                    
+                    if result.get('should_trigger_research'):
+                        experiment_id = result.get('experiment_id', 'N/A')
+                        logger.info(
+                            f"✅ Research mode auto-triggered for conversation {conversation_id}",
+                            extra={
+                                'session_id': conversation_id,
+                                'task_type': result.get('task_type'),
+                                'confidence': result.get('confidence'),
+                                'experiment_id': experiment_id,
+                            }
+                        )
+                        logger.info(f"🌳 Research experiment {experiment_id} started - check Research Tree tab")
+                    else:
+                        logger.info(f"ℹ️ Message does not trigger research mode (confidence: {result.get('confidence', 0):.2f})")
+                except Exception as e:
+                    # Don't let research middleware errors block title generation
+                    logger.error(f"❌ Error processing research middleware: {str(e)}", exc_info=True)
+                    logger.info("Continuing with normal title generation despite research middleware error")
+            
             # Get LLM config from user settings
             try:
                 if settings and settings.llm_model:

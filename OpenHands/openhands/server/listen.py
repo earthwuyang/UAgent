@@ -6,18 +6,19 @@ import socketio
 
 # Add UAgent Research Extension to sys.path BEFORE importing app
 # This ensures that modules like conversation_service.py can import research middleware
-# We add the 'extensions' directory so we can import as 'uagent_research.middleware.research_middleware'
+# We add the 'extensions/uagent_research' directory to match app.py's import style
 try:
-    extensions_dir = Path(__file__).parent.parent.parent / 'extensions'
-    if extensions_dir.exists():
-        extensions_dir_str = str(extensions_dir)
-        if extensions_dir_str not in sys.path:
+    # Match app.py's path: extensions/uagent_research (not just extensions)
+    extension_dir = Path(__file__).parent.parent.parent / 'extensions' / 'uagent_research'
+    if extension_dir.exists():
+        extension_dir_str = str(extension_dir)
+        if extension_dir_str not in sys.path:
             use_source = os.getenv('USE_UAGENT_RESEARCH_FROM_SOURCE', 'true').lower() == 'true'
             if use_source:
-                sys.path.insert(0, extensions_dir_str)  # Use insert(0) for higher priority
-                print(f"🔧 [listen.py] Added extensions directory to sys.path: {extensions_dir}")
+                sys.path.insert(0, extension_dir_str)  # Use insert(0) for higher priority
+                print(f"🔧 [listen.py] Added extension directory to sys.path: {extension_dir}")
 except Exception as e:
-    print(f"⚠️ [listen.py] Failed to add extensions directory to sys.path: {e}")
+    print(f"⚠️ [listen.py] Failed to add extension directory to sys.path: {e}")
 
 from openhands.server.app import app as base_app
 from openhands.server.listen_socket import sio
@@ -28,6 +29,9 @@ from openhands.server.middleware import (
     RateLimitMiddleware,
 )
 from openhands.server.static import SPAStaticFiles
+
+# Note: Database initialization is handled by the lifespan context manager in app.py
+# No need to initialize here - the FastAPI lifespan ensures proper initialization
 
 if os.getenv('SERVE_FRONTEND', 'true').lower() == 'true':
     # Mount static files at root, but this should be done AFTER all API routes

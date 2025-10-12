@@ -104,10 +104,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
         try:
+            logger.info(f"🔄 Initializing research database: {research_db_url}")
             await init_database(research_db_url, echo=False)
-            logger.info(f"✅ Research database initialized: {research_db_url}")
+            logger.info(f"✅ Research database initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize research database: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail startup, but log the error
 
     async with conversation_manager:
         yield
@@ -116,8 +120,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if RESEARCH_EXTENSION_AVAILABLE:
         try:
             await close_database()
-        except Exception:
-            pass
+            logger.info(f"✅ Research database connections closed")
+        except Exception as e:
+            logger.warning(f"⚠️ Error closing research database: {e}")
 
 
 app = FastAPI(
