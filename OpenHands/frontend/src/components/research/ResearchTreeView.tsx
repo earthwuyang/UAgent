@@ -126,33 +126,19 @@ export function ResearchTreeView() {
   const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [showMiniMap, setShowMiniMap] = useState(true);
 
-  const {
-    nodes: storeNodes,
-    edges: storeEdges,
-    selectedNodeId,
-    selectNode,
-    filterType,
-    filterStatus,
-    searchQuery,
-    setFilterType,
-    setFilterStatus,
-    setSearchQuery,
-    clearFilters,
-    isLoading,
-  } = useResearchTreeStore((state) => ({
-    nodes: state.nodes,
-    edges: state.edges,
-    selectedNodeId: state.selectedNodeId,
-    selectNode: state.selectNode,
-    filterType: state.filterType,
-    filterStatus: state.filterStatus,
-    searchQuery: state.searchQuery,
-    setFilterType: state.setFilterType,
-    setFilterStatus: state.setFilterStatus,
-    setSearchQuery: state.setSearchQuery,
-    clearFilters: state.clearFilters,
-    isLoading: state.isLoading,
-  }));
+  // Use separate store selectors to avoid creating new objects on every render
+  const storeNodes = useResearchTreeStore((state) => state.nodes);
+  const storeEdges = useResearchTreeStore((state) => state.edges);
+  const selectedNodeId = useResearchTreeStore((state) => state.selectedNodeId);
+  const selectNode = useResearchTreeStore((state) => state.selectNode);
+  const filterType = useResearchTreeStore((state) => state.filterType);
+  const filterStatus = useResearchTreeStore((state) => state.filterStatus);
+  const searchQuery = useResearchTreeStore((state) => state.searchQuery);
+  const setFilterType = useResearchTreeStore((state) => state.setFilterType);
+  const setFilterStatus = useResearchTreeStore((state) => state.setFilterStatus);
+  const setSearchQuery = useResearchTreeStore((state) => state.setSearchQuery);
+  const clearFilters = useResearchTreeStore((state) => state.clearFilters);
+  const isLoading = useResearchTreeStore((state) => state.isLoading);
 
   const hasFilters = Boolean(filterType || filterStatus || searchQuery.trim());
 

@@ -38,31 +38,18 @@ export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelPr
   const [isMinimized, setIsMinimized] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  const {
-    nodes,
-    edges,
-    stats,
-    isLoading,
-    setLoading,
-    selectedNodeId,
-    selectNode,
-    setExperimentId,
-    error,
-    setError,
-    lastUpdate,
-  } = useResearchTreeStore((state) => ({
-    nodes: state.nodes,
-    edges: state.edges,
-    stats: state.stats,
-    isLoading: state.isLoading,
-    setLoading: state.setLoading,
-    selectedNodeId: state.selectedNodeId,
-    selectNode: state.selectNode,
-    setExperimentId: state.setExperimentId,
-    error: state.error,
-    setError: state.setError,
-    lastUpdate: state.lastUpdate,
-  }));
+  // Use separate store selectors to avoid creating new objects on every render
+  const nodes = useResearchTreeStore((state) => state.nodes);
+  const edges = useResearchTreeStore((state) => state.edges);
+  const stats = useResearchTreeStore((state) => state.stats);
+  const isLoading = useResearchTreeStore((state) => state.isLoading);
+  const setLoading = useResearchTreeStore((state) => state.setLoading);
+  const selectedNodeId = useResearchTreeStore((state) => state.selectedNodeId);
+  const selectNode = useResearchTreeStore((state) => state.selectNode);
+  const setExperimentId = useResearchTreeStore((state) => state.setExperimentId);
+  const error = useResearchTreeStore((state) => state.error);
+  const setError = useResearchTreeStore((state) => state.setError);
+  const lastUpdate = useResearchTreeStore((state) => state.lastUpdate);
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) {

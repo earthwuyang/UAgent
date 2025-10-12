@@ -88,8 +88,9 @@ export default function ResearchTab() {
           useResearchTreeStore.getState().setLoading(true);
         }
 
+        const backendHost = import.meta.env.VITE_BACKEND_BASE_URL || window.location.host;
         const response = await fetch(
-          `/api/research/experiments/${experimentId}/tree`,
+          `${window.location.protocol}//${backendHost}/api/research/experiments/${experimentId}/tree`,
         );
 
         if (response.status === 404) {

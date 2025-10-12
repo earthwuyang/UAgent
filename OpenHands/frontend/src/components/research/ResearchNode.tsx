@@ -99,22 +99,10 @@ const statusAnimation = (status: string) => {
 const springTransition = { type: 'spring', damping: 24, stiffness: 220 };
 
 export const ResearchNode = memo(({ data, selected }: NodeProps<ResearchNodeType>) => {
-  const {
-    expandedNodeIds,
-    toggleExpanded,
-    selectNode,
-  } = useResearchTreeStore((state) => ({
-    expandedNodeIds: state.expandedNodeIds,
-    toggleExpanded: state.toggleExpanded,
-    selectNode: state.selectNode,
-  }));
-
-  const expandedInStore = expandedNodeIds.has(data.id);
-  const [isExpanded, setIsExpanded] = useState(expandedInStore);
-
-  useEffect(() => {
-    setIsExpanded(expandedInStore);
-  }, [expandedInStore]);
+  // Use separate store selectors to avoid creating new objects on every render
+  const isExpanded = useResearchTreeStore((state) => state.expandedNodeIds.has(data.id));
+  const toggleExpanded = useResearchTreeStore((state) => state.toggleExpanded);
+  const selectNode = useResearchTreeStore((state) => state.selectNode);
 
   const statusColor = STATUS_COLORS[data.status] ?? STATUS_COLORS.pending;
   const typeLabel = TYPE_LABELS[data.type] ?? data.type;
