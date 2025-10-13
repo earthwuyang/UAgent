@@ -50,10 +50,16 @@ def ensure_research_adapters_registered() -> bool:
         return True
     
     try:
-        from extensions.uagent_research.adapters.base.agent_adapter import adapter_registry
-        from extensions.uagent_research.adapters.deepresearch.adapter import DeepResearchAdapter
-        from extensions.uagent_research.adapters.repomaster.adapter import RepoMasterAdapter
-        from extensions.uagent_research.adapters.codeact.adapter import CodeActAdapter
+        from .base.agent_adapter import adapter_registry
+        from .deepresearch.adapter import DeepResearchAdapter
+        from .repomaster.adapter import RepoMasterAdapter
+        
+        # Try to import CodeActAdapter, but handle gracefully if it fails
+        CodeActAdapter = None
+        try:
+            from .codeact.adapter import CodeActAdapter
+        except ImportError as e:
+            logger.warning(f"[ADAPTER_REGISTRY] CodeActAdapter import failed (requires full OpenHands environment): {e}")
 
         # Check if adapters are already in registry
         existing = set()
@@ -69,7 +75,7 @@ def ensure_research_adapters_registered() -> bool:
         if 'repomaster' not in existing:
             adapter_registry.register(RepoMasterAdapter(config={}))
             logger.info(f"[ADAPTER_REGISTRY] RepoMasterAdapter registered successfully")
-        if 'codeact' not in existing:
+        if 'codeact' not in existing and CodeActAdapter is not None:
             adapter_registry.register(CodeActAdapter(config={}))
             logger.info(f"[ADAPTER_REGISTRY] CodeActAdapter registered successfully")
 

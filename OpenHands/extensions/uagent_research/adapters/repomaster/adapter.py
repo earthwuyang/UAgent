@@ -74,12 +74,6 @@ class RepoMasterAdapter(AgentAdapter):
 
     async def run(self, task: Task, context: Context) -> AsyncIterator[ResearchEvent]:
         """
-        
-        # DIAGNOSTIC: Log task reception
-        logger.info(f"[DIAGNOSTIC] RepoMasterAdapter received task")
-        logger.info(f"[DIAGNOSTIC]   Task ID: {task.id}")
-        logger.info(f"[DIAGNOSTIC]   Task goal: {task.goal}")
-        logger.info(f"[DIAGNOSTIC]   Branch ID: {context.branch_id if context else 'N/A'}")
         Execute code research task using RepoMaster.
 
         Args:
@@ -96,6 +90,12 @@ class RepoMasterAdapter(AgentAdapter):
             ):
                 print(f"{event.type}: {event}")
         """
+        
+        # DIAGNOSTIC: Log task reception
+        logger.info(f"[DIAGNOSTIC] RepoMasterAdapter received task")
+        logger.info(f"[DIAGNOSTIC]   Task ID: {task.id}")
+        logger.info(f"[DIAGNOSTIC]   Task goal: {task.goal}")
+        logger.info(f"[DIAGNOSTIC]   Branch ID: {context.branch_id if context else 'N/A'}")
         
         logger.info(f"[REPOMASTER] run() called for task {task.id}")
         logger.info(f"[REPOMASTER] Task goal: {task.goal[:100] if task.goal else 'N/A'}")
