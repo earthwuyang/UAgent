@@ -952,6 +952,130 @@ class TreeSearchOrchestrator:
             )
             return False
 
+    def _convert_tree_to_frontend_format(self, tree_dict: dict) -> dict:
+        """
+        Convert internal tree representation to frontend-compatible format.
+        
+        Internal format: {nodes: {node_id: node_data}, edges: [{from, to, relation}], ...}
+        Frontend format: {nodes: [{id, type, position, data}], edges: [{id, source, target, type}], ...}
+        
+        Args:
+            tree_dict: Internal tree dictionary from ResearchTree.to_dict()
+            
+        Returns:
+            Frontend-compatible tree structure
+        """
+        nodes_dict = tree_dict.get('nodes', {})
+        edges_list = tree_dict.get('edges', [])
+        
+        # Convert nodes dictionary to array with frontend structure
+        frontend_nodes = []
+        node_positions = {}  # Track positions for layout
+        
+        # Calculate positions using a simple tree layout algorithm
+        # Root at top, children spread horizontally below
+        root_nodes = []
+        child_nodes_by_parent = {}
+        
+        # First pass: identify root nodes and group children
+        for node_id, node_data in nodes_dict.items():
+            parent_id = node_data.get('parent_id')
+            if not parent_id or parent_id not in nodes_dict:
+                root_nodes.append((node_id, node_data))
+            else:
+                if parent_id not in child_nodes_by_parent:
+                    child_nodes_by_parent[parent_id] = []
+                child_nodes_by_parent[parent_id].append((node_id, node_data))
+        
+        # Layout parameters
+        x_start = 400
+        y_start = 50
+        y_spacing = 150
+        x_spacing = 300
+        
+        # Position root nodes
+        for i, (node_id, node_data) in enumerate(root_nodes):
+            x = x_start + (i - len(root_nodes) / 2) * x_spacing
+            node_positions[node_id] = {'x': x, 'y': y_start}
+        
+        # BFS layout for children
+        from collections import deque
+        queue = deque([(node_id, 1) for node_id, _ in root_nodes])
+        processed = set()
+        
+        while queue:
+            parent_id, depth = queue.popleft()
+            if parent_id in processed:
+                continue
+            processed.add(parent_id)
+            
+            children = child_nodes_by_parent.get(parent_id, [])
+            if not children:
+                continue
+                
+            # Position children horizontally around parent
+            parent_x = node_positions[parent_id]['x']
+            y = y_start + depth * y_spacing
+            
+            for i, (child_id, child_data) in enumerate(children):
+                x = parent_x + (i - len(children) / 2) * x_spacing
+                node_positions[child_id] = {'x': x, 'y': y}
+                queue.append((child_id, depth + 1))
+        
+        # Build frontend node objects
+        for node_id, node_data in nodes_dict.items():
+            position = node_positions.get(node_id, {'x': x_start, 'y': y_start})
+            
+            frontend_node = {
+                'id': node_id,
+                'type': node_data.get('type', 'default'),
+                'position': position,
+                'data': {
+                    'id': node_id,
+                    'type': node_data.get('type', 'default'),
+                    'title': node_data.get('title', ''),
+                    'description': node_data.get('content', ''),
+                    'status': node_data.get('status', 'pending'),
+                    'visit_count': node_data.get('visits', 0),
+                    'avg_value': node_data.get('avg_value', 0.0),
+                    'prior': node_data.get('prior', 0.5),
+                    'puct_score': 0.0,  # Can be calculated if needed
+                    'metadata': {
+                        'score': node_data.get('score'),
+                        'confidence': node_data.get('confidence'),
+                        'novelty': node_data.get('novelty'),
+                        'cost': node_data.get('cost', 0.0),
+                        'tokens_used': node_data.get('tokens_used', 0),
+                        'iterations': node_data.get('iterations', 0),
+                        'created_at': node_data.get('created_at'),
+                        'started_at': node_data.get('started_at'),
+                        'completed_at': node_data.get('completed_at'),
+                        'adapter': node_data.get('adapter'),
+                    }
+                }
+            }
+            frontend_nodes.append(frontend_node)
+        
+        # Convert edges to frontend format
+        frontend_edges = []
+        for i, edge in enumerate(edges_list):
+            edge_id = f"edge_{edge.get('from', '')}_{edge.get('to', '')}"
+            frontend_edge = {
+                'id': edge_id,
+                'source': edge.get('from'),
+                'target': edge.get('to'),
+                'type': 'smoothstep',
+                'label': edge.get('relation', '')
+            }
+            frontend_edges.append(frontend_edge)
+        
+        return {
+            'nodes': frontend_nodes,
+            'edges': frontend_edges,
+            'stats': tree_dict.get('stats', {}),
+            'version': tree_dict.get('version', 0)
+        }
+
     def _publish_tree_to_api(self, force: bool = False):
         """
         Publish tree state to API and broadcast to WebSocket clients.
@@ -985,7 +1109,10 @@ class TreeSearchOrchestrator:
             logger.info(f"[PUBLISH] Successfully imported API functions")
             
             # Create tree snapshot
-            tree_data = self.tree.to_dict() if hasattr(self.tree, 'to_dict') else {}
+            tree_dict = self.tree.to_dict() if hasattr(self.tree, 'to_dict') else {}
+            
+            # Convert tree format from internal dictionary to frontend array format
+            tree_data = self._convert_tree_to_frontend_format(tree_dict)
             
             # Ensure stats are inside data, not at top level
             if 'stats' not in tree_data:
