@@ -35,12 +35,12 @@ class LocalhostCORSMiddleware(CORSMiddleware):
         )
 
     def is_allowed_origin(self, origin: str) -> bool:
-        if origin and not self.allow_origins and not self.allow_origin_regex:
+        if origin:
             parsed = urlparse(origin)
-            hostname = parsed.hostname or ''
+            hostname = (parsed.hostname or '').lower()
 
-            # Allow any localhost/127.0.0.1 origin regardless of port
-            if hostname in ['localhost', '127.0.0.1']:
+            # Allow common loopback hostnames even when explicit origins are configured.
+            if hostname in {'localhost', '127.0.0.1', '::1', '0.0.0.0'}:
                 return True
 
         # For missing origin or other origins, use the parent class's logic

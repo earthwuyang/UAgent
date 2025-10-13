@@ -93,6 +93,25 @@ def test_localhost_cors_middleware_is_allowed_origin_non_localhost(app):
         assert 'access-control-allow-origin' not in response.headers
 
 
+def test_localhost_cors_middleware_allows_localhost_with_configured_origins(app):
+    """Local loopback origins should always be allowed even when explicit CORS origins are set."""
+    with patch.dict(os.environ, {'PERMITTED_CORS_ORIGINS': 'https://example.com'}):
+        app.add_middleware(LocalhostCORSMiddleware)
+        client = TestClient(app)
+
+        response = client.options(
+            '/test',
+            headers={
+                'Origin': 'http://localhost:3001',
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'content-type',
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers['access-control-allow-origin'] == 'http://localhost:3001'
+
+
 def test_localhost_cors_middleware_missing_origin(app):
     """Test behavior when Origin header is missing."""
     with patch.dict(os.environ, {}, clear=True):
