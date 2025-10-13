@@ -5,6 +5,7 @@
  */
 
 import React, { useMemo, useCallback, useState, useRef, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router';
 import ReactFlow, {
   Node,
   Edge,
@@ -30,9 +31,11 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { useResearchTreeStore, ResearchNode as ResearchNodeType } from '#/state/research-tree-store';
+import { setHasRightPanelToggled, setIsRightPanelShown, setSelectedTab } from '#/state/conversation-store';
 import { ResearchNode } from './ResearchNode';
 import { Loader } from '#/components/shared/loader';
 import { cn } from '#/utils/utils';
+import { extractConversationId } from '#/utils/research-tree';
 
 const nodeTypes: NodeTypes = {
   researchNode: ResearchNode,
@@ -125,12 +128,15 @@ const filterOptions = {
 export function ResearchTreeView() {
   const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [showMiniMap, setShowMiniMap] = useState(true);
+  const navigate = useNavigate();
+  const { conversationId: routeConversationId } = useParams<{ conversationId?: string }>();
 
   // Use separate store selectors to avoid creating new objects on every render
   const storeNodes = useResearchTreeStore((state) => state.nodes);
   const storeEdges = useResearchTreeStore((state) => state.edges);
   const selectedNodeId = useResearchTreeStore((state) => state.selectedNodeId);
   const selectNode = useResearchTreeStore((state) => state.selectNode);
+  const expandNode = useResearchTreeStore((state) => state.expandNode);
   const filterType = useResearchTreeStore((state) => state.filterType);
   const filterStatus = useResearchTreeStore((state) => state.filterStatus);
   const searchQuery = useResearchTreeStore((state) => state.searchQuery);
@@ -224,9 +230,40 @@ export function ResearchTreeView() {
     [selectNode]
   );
 
-  const onPaneClick = useCallback(() => {
-    selectNode(null);
-  }, [selectNode]);
+  const onNodeDoubleClick = useCallback(
+    (event: React.MouseEvent, node: Node) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      selectNode(node.id);
+      expandNode(node.id);
+
+      const nodeData = node.data as ResearchNodeType | undefined;
+      const metadata = (nodeData?.metadata ?? storeNodes.get(node.id)?.metadata) as
+        | Record<string, unknown>
+        | undefined;
+      const conversationId = extractConversationId(metadata);
+
+      setHasRightPanelToggled(true);
+      setIsRightPanelShown(true);
+      setSelectedTab('research');
+
+      if (conversationId && conversationId !== routeConversationId) {
+        navigate(`/conversations/${conversationId}`);
+      }
+    },
+    [expandNode, navigate, routeConversationId, selectNode, storeNodes]
+  );
+
+  const onPaneClick = useCallback(
+    (event: React.MouseEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      selectNode(null);
+    },
+    [selectNode]
+  );
 
   const handleClearFilters = useCallback(() => {
     clearFilters();
@@ -252,10 +289,12 @@ export function ResearchTreeView() {
   return (
     <div className="research-tree-view">
       <ReactFlow
+        style={{ width: '100%', height: '100%' }}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
+        onNodeDoubleClick={onNodeDoubleClick}
         onPaneClick={onPaneClick}
         fitView={false}
         minZoom={0.1}

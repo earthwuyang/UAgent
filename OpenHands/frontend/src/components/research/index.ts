@@ -11,6 +11,9 @@ export { ResearchTreeView } from './ResearchTreeView';
 /** Floating container that manages the research tree experience */
 export { ResearchTreePanel } from './ResearchTreePanel';
 
+/** Detail drawer for selected research nodes */
+export { ResearchNodeDetailPanel } from './ResearchNodeDetailPanel';
+
 /** Error boundary specialised for research tree rendering */
 export { ResearchErrorBoundary } from './ResearchErrorBoundary';
 

@@ -11,6 +11,7 @@ import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 import {
   ResearchTreeView,
   ResearchErrorBoundary,
+  ResearchNodeDetailPanel,
 } from "#/components/research";
 import { Loader } from "#/components/shared/loader";
 import {
@@ -312,11 +313,15 @@ export default function ResearchTab() {
 
       <div className="flex-1 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
         {canRenderTree ? (
-          <ReactFlowProvider>
-            <ResearchErrorBoundary>
-              <ResearchTreeView />
-            </ResearchErrorBoundary>
-          </ReactFlowProvider>
+          <div className="research-tree-content">
+            <ReactFlowProvider>
+              <ResearchErrorBoundary>
+                <ResearchTreeView />
+              </ResearchErrorBoundary>
+            </ReactFlowProvider>
+
+            <ResearchNodeDetailPanel />
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center text-slate-400">
             <div className="text-center space-y-2">

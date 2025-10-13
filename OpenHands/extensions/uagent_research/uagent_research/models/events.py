@@ -50,6 +50,7 @@ class Event(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     branch_id: str  # Research branch identifier
     node_id: Optional[str] = None  # Associated tree node
+    experiment_id: Optional[str] = None  # Research experiment identifier
 
 
 class PlanEvent(Event):

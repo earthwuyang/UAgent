@@ -10,7 +10,8 @@ import logging
 import math
 from typing import Dict, List, Optional, AsyncIterator, Set, Any
 from datetime import datetime
-from collections import defaultdict
+from collections import defaultdict, Counter
+import traceback
 import uuid
 
 from ..uagent_research.models.research_tree import (
@@ -110,9 +111,8 @@ class TreeSearchOrchestrator:
                 logger.warning(f"Failed to create IdeaGenerationService: {e}")
                 self.idea_service = None
         
-        self.use_intelligent_expansion = (self.idea_service is not None)
+        self.use_intelligent_expansion = self.idea_service is not None
         if self.use_intelligent_expansion:
-            logger.info(f"[EXPAND] Using LLM to generate children for {node.id}")
             logger.info("Intelligent node expansion ENABLED")
         else:
             logger.warning("Intelligent node expansion DISABLED (using fallback placeholders)")
@@ -133,6 +133,8 @@ class TreeSearchOrchestrator:
             "total_nodes": 0,
             "completed_nodes": 0,
             "failed_nodes": 0,
+            "running_nodes": 0,
+            "pending_nodes": 0,
             "total_cost": 0.0,
             "total_tokens": 0,
             "iterations": 0,
@@ -167,6 +169,31 @@ class TreeSearchOrchestrator:
             )
         """
         
+        try:
+            normalized_iterations = None
+            if max_iterations is not None:
+                if isinstance(max_iterations, str):
+                    max_iterations = max_iterations.strip()
+                normalized_iterations = int(max_iterations)
+        except (TypeError, ValueError):
+            normalized_iterations = None
+
+        if normalized_iterations is None or normalized_iterations <= 0:
+            fallback_iterations = getattr(self.budget, "max_iterations", None)
+            try:
+                if fallback_iterations is not None:
+                    normalized_iterations = int(fallback_iterations)
+            except (TypeError, ValueError):
+                normalized_iterations = None
+
+        if normalized_iterations is None or normalized_iterations <= 0:
+            normalized_iterations = 1
+
+        max_iterations = normalized_iterations
+        self._max_iterations = max_iterations
+        if self.budget:
+            self.budget.max_iterations = max_iterations
+
         logger.info(f"[ORCHESTRATOR] run() called with goal={goal[:100]}, max_iterations={max_iterations}, research_id={research_id}")
         logger.info(f"[ORCHESTRATOR] Budget: max_cost={self.budget.max_cost}, max_iterations={self.budget.max_iterations}")
         logger.info(f"[ORCHESTRATOR] Concurrency: max_parallel={self.max_parallel}")
@@ -182,7 +209,8 @@ class TreeSearchOrchestrator:
                 type=NodeType.ROOT,
                 title="Research Root",
                 content=goal,
-                status=NodeStatus.COMPLETE,
+                status=NodeStatus.RUNNING,
+                started_at=datetime.utcnow(),
             )
 
             # Initialize tree
@@ -190,6 +218,13 @@ class TreeSearchOrchestrator:
 
             # Add root node to tree
             self.tree.add_node(root_node)
+
+            # Seed statistics with the root node so UI reflects active work
+            self.stats["total_nodes"] = 1
+            self.stats["completed_nodes"] = 0
+            self.stats["failed_nodes"] = 0
+            self.stats["running_nodes"] = 1
+            self.stats["pending_nodes"] = 0
 
             # Register orchestrator with MessageBus
             if self.message_bus:
@@ -200,7 +235,7 @@ class TreeSearchOrchestrator:
                 )
 
             # Publish initial tree state so UI reflects activity immediately
-            self._update_tree_stats()
+            self._update_tree_stats(force=True)
 
             self._cancelled = False
             self._paused = False
@@ -309,12 +344,24 @@ class TreeSearchOrchestrator:
                     logger.info(f"[ORCHESTRATOR] Parallel execution completed")
 
                     # Update tree statistics
-                    self._update_tree_stats()
+                    self._update_tree_stats(force=True)
 
                 logger.info(f"[ORCHESTRATOR] PUCT loop finished")
                 logger.info(f"[ORCHESTRATOR] Final tree: {len(self.tree.nodes)} nodes, {len(self.tree.edges)} edges")
                 logger.info(f"[ORCHESTRATOR] Final cost: ${self.stats['total_cost']:.3f}")
                 logger.info(f"\nTree search completed: {self.stats}")
+
+                # Mark root node as complete so UI reflects finished state
+                if self.tree and "root" in self.tree.nodes:
+                    root_node = self.tree.nodes["root"]
+                    if root_node.status != NodeStatus.COMPLETE:
+                        root_node.status = NodeStatus.COMPLETE
+                        root_node.completed_at = datetime.utcnow()
+                    if root_node.visits <= 0:
+                        root_node.visits = 1
+
+                # Ensure final tree snapshot is published
+                self._update_tree_stats(force=True)
 
             finally:
                 # Cleanup: Cancel control loop
@@ -644,7 +691,7 @@ class TreeSearchOrchestrator:
 
         # Publish snapshot immediately after expansion so UI reflects new nodes
         try:
-            self._update_tree_stats()
+            self._update_tree_stats(force=True)
         except Exception:
             logger.debug("Failed to publish tree after expansion", exc_info=True)
 
@@ -811,6 +858,43 @@ class TreeSearchOrchestrator:
                 node.avg_value = 0.0  # Failure value
 
                 self.stats["failed_nodes"] += 1
+
+                error_message = str(e)
+                error_trace = traceback.format_exc()
+
+                try:
+                    # Persist error metadata on node for UI diagnostics
+                    node.metadata = node.metadata or {}
+                    existing_errors = list(node.metadata.get("errors", []))
+                    error_entry = {
+                        "message": error_message,
+                        "traceback": error_trace,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                    existing_errors.append(error_entry)
+                    # Keep only latest 20 errors per node to bound payload size
+                    node.metadata["errors"] = existing_errors[-20:]
+                    node.metadata["last_error"] = error_entry
+                except Exception:
+                    logger.debug("Failed to record error metadata", exc_info=True)
+
+                try:
+                    error_event = ErrorEvent(
+                        branch_id=node.id,
+                        node_id=node.id,
+                        message=error_message,
+                        traceback=error_trace,
+                        experiment_id=self.tree.research_id if self.tree else None,
+                    )
+                    await self.event_bus.publish(error_event)
+                except Exception:
+                    logger.debug("Failed to publish error event", exc_info=True)
+
+                # Push updated tree snapshot so UI sees failure immediately
+                try:
+                    self._update_tree_stats(force=True)
+                except Exception:
+                    logger.debug("Failed to broadcast tree update after error", exc_info=True)
             finally:
                 self._running_tasks.pop(node.id, None)
                 self._steer_map.pop(node.id, None)
@@ -870,7 +954,7 @@ class TreeSearchOrchestrator:
             )
             return False
 
-    def _publish_tree_to_api(self):
+    def _publish_tree_to_api(self, force: bool = False):
         """
         Publish tree state to API and broadcast to WebSocket clients.
         
@@ -891,7 +975,7 @@ class TreeSearchOrchestrator:
         now = time.time()
         time_since_last = (now - self._last_broadcast_ts) * 1000  # convert to ms
         
-        if time_since_last < self._broadcast_debounce_ms:
+        if not force and time_since_last < self._broadcast_debounce_ms:
             logger.debug(f"Skipping broadcast (debounce): {time_since_last:.0f}ms since last")
             return
         
@@ -961,10 +1045,18 @@ class TreeSearchOrchestrator:
         except Exception as e:
             logger.error(f"❌ Failed to publish tree state: {e}", exc_info=True)
 
-    def _update_tree_stats(self):
+    def _update_tree_stats(self, force: bool = False):
         """Update tree-level statistics"""
         if not self.tree:
             return
+
+        # Recompute status counts so progress metrics stay accurate
+        status_counts = Counter(node.status for node in self.tree.nodes.values())
+        self.stats["total_nodes"] = len(self.tree.nodes)
+        self.stats["completed_nodes"] = status_counts.get(NodeStatus.COMPLETE, 0)
+        self.stats["failed_nodes"] = status_counts.get(NodeStatus.FAILED, 0)
+        self.stats["running_nodes"] = status_counts.get(NodeStatus.RUNNING, 0)
+        self.stats["pending_nodes"] = status_counts.get(NodeStatus.PENDING, 0)
 
         # Update stats while preserving existing fields like "created" and "expanded"
         self.tree.stats.update({
@@ -976,7 +1068,7 @@ class TreeSearchOrchestrator:
         })
 
         # Publish tree state to API endpoint
-        self._publish_tree_to_api()
+        self._publish_tree_to_api(force=force)
         
         # Emit ProgressUpdateEvent via MessageBus
         if self.message_bus and self.tree:

@@ -4,7 +4,7 @@
  * Enhanced custom node for ReactFlow with expandable details, animations, and rich metrics.
  */
 
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useMemo } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
 import { motion, AnimatePresence } from 'framer-motion';
 import {

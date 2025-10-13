@@ -6,20 +6,14 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ReactFlowProvider } from 'reactflow';
-import { AnimatePresence, motion } from 'framer-motion';
-import {
-  Activity,
-  DollarSign,
-  Info,
-  TrendingUp,
-  X,
-} from 'lucide-react';
+import { X } from 'lucide-react';
 import { ResearchTreeView } from './ResearchTreeView';
 import { useResearchWS } from '#/hooks/useResearchWS';
 import { Loader } from '#/components/shared/loader';
 import { useResearchTreeStore } from '#/state/research-tree-store';
-import type { ResearchNode } from '#/state/research-tree-store';
+import { useResearchEventStream } from '#/hooks/useResearchEventStream';
 import { ResearchErrorBoundary } from './ResearchErrorBoundary';
+import { ResearchNodeDetailPanel } from './ResearchNodeDetailPanel';
 import { cn } from '#/utils/utils';
 import './research-tree.css';
 
@@ -27,12 +21,6 @@ interface ResearchTreePanelProps {
   experimentId: string;
   onClose: () => void;
 }
-
-const detailPanelTransition = {
-  type: 'spring',
-  damping: 25,
-  stiffness: 240,
-};
 
 export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
@@ -44,40 +32,10 @@ export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelPr
   const stats = useResearchTreeStore((state) => state.stats);
   const isLoading = useResearchTreeStore((state) => state.isLoading);
   const setLoading = useResearchTreeStore((state) => state.setLoading);
-  const selectedNodeId = useResearchTreeStore((state) => state.selectedNodeId);
-  const selectNode = useResearchTreeStore((state) => state.selectNode);
   const setExperimentId = useResearchTreeStore((state) => state.setExperimentId);
   const error = useResearchTreeStore((state) => state.error);
   const setError = useResearchTreeStore((state) => state.setError);
   const lastUpdate = useResearchTreeStore((state) => state.lastUpdate);
-
-  const selectedNode = useMemo(() => {
-    if (!selectedNodeId) {
-      return null;
-    }
-    return nodes.get(selectedNodeId) ?? null;
-  }, [nodes, selectedNodeId]);
-
-  const childNodes = useMemo(() => {
-    if (!selectedNodeId) {
-      return [];
-    }
-    return edges
-      .filter((edge) => edge.parent_id === selectedNodeId)
-      .map((edge) => nodes.get(edge.child_id))
-      .filter(Boolean) as ResearchNode[];
-  }, [edges, nodes, selectedNodeId]);
-
-  const parentNode = useMemo(() => {
-    if (!selectedNodeId) {
-      return null;
-    }
-    const parentEdge = edges.find((edge) => edge.child_id === selectedNodeId);
-    if (!parentEdge) {
-      return null;
-    }
-    return nodes.get(parentEdge.parent_id) ?? null;
-  }, [edges, nodes, selectedNodeId]);
 
   const { isConnected, connect } = useResearchWS({
     experimentId,
@@ -133,6 +91,8 @@ export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelPr
     setExperimentId(experimentId);
     fetchTree(true);
   }, [experimentId, fetchTree, setExperimentId]);
+
+  useResearchEventStream(experimentId);
 
   const statsEntries = useMemo(
     () => [
@@ -219,128 +179,32 @@ export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelPr
           )}
 
           <div className="research-tree-content">
-            <ResearchErrorBoundary onReset={handleReset}>
-              <ReactFlowProvider>
-                <ResearchTreeView />
-              </ReactFlowProvider>
-            </ResearchErrorBoundary>
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                position: 'relative',
+                minWidth: 0,
+                minHeight: 0,
+                height: '100%',
+              }}
+            >
+              <ResearchErrorBoundary onReset={handleReset}>
+                <ReactFlowProvider>
+                  <ResearchTreeView />
+                </ReactFlowProvider>
+              </ResearchErrorBoundary>
+            </div>
 
-            <AnimatePresence>
-              {selectedNode && (
-                <motion.aside
-                  key={selectedNode.id}
-                  className="research-detail-panel custom-scrollbar"
-                  initial={{ x: '100%' }}
-                  animate={{ x: 0 }}
-                  exit={{ x: '100%' }}
-                  transition={detailPanelTransition}
-                >
-                  <header>
-                    <div>
-                      <h3 className="text-base font-semibold text-slate-800 dark:text-slate-100">
-                        {selectedNode.title}
-                      </h3>
-                      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        {selectedNode.type} — {selectedNode.status}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="header-button"
-                      onClick={() => selectNode(null)}
-                      title="Close details"
-                    >
-                      <X size={16} />
-                    </button>
-                  </header>
-
-                  <div className="detail-body custom-scrollbar">
-                    <section className="research-detail-section">
-                      <h5>Summary</h5>
-                      <p className="text-sm text-slate-600 dark:text-slate-300">
-                        {selectedNode.content || 'No summary available yet.'}
-                      </p>
-                    </section>
-
-                    <section className="research-detail-section">
-                      <h5>Metrics</h5>
-                      <div className="research-detail-grid">
-                        <div className="research-detail-metric">
-                          <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
-                            <Activity size={16} /> Visits
-                          </span>
-                          <strong>{selectedNode.visits}</strong>
-                        </div>
-                        <div className="research-detail-metric">
-                          <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
-                            <TrendingUp size={16} /> Q Value
-                          </span>
-                          <strong>{selectedNode.avg_value.toFixed(3)}</strong>
-                        </div>
-                        <div className="research-detail-metric">
-                          <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
-                            <Info size={16} /> Prior
-                          </span>
-                          <strong>{selectedNode.prior.toFixed(3)}</strong>
-                        </div>
-                        <div className="research-detail-metric">
-                          <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
-                            <DollarSign size={16} /> Cost
-                          </span>
-                          <strong>${selectedNode.cost.toFixed(3)}</strong>
-                        </div>
-                      </div>
-                    </section>
-
-                    <section className="research-detail-section">
-                      <h5>Tokens</h5>
-                      <p className="text-sm text-slate-600 dark:text-slate-300">
-                        {selectedNode.tokens_used.toLocaleString()} tokens consumed.
-                      </p>
-                    </section>
-
-                    <section className="research-detail-section">
-                      <h5>Relationships</h5>
-                      <div className="research-detail-links">
-                        {parentNode && (
-                          <button
-                            type="button"
-                            className="research-detail-link"
-                            onClick={() => selectNode(parentNode.id)}
-                          >
-                            Parent: {parentNode.title}
-                          </button>
-                        )}
-                        {childNodes.length > 0 ? (
-                          childNodes.map((child) => (
-                            <button
-                              key={child.id}
-                              type="button"
-                              className="research-detail-link"
-                              onClick={() => selectNode(child.id)}
-                            >
-                              Child: {child.title}
-                            </button>
-                          ))
-                        ) : (
-                          <p className="text-xs text-slate-500 dark:text-slate-400">
-                            No child nodes yet.
-                          </p>
-                        )}
-                      </div>
-                    </section>
-                  </div>
-                </motion.aside>
-              )}
-            </AnimatePresence>
-
-            {isLoading && nodes.size === 0 && (
-              <div className="research-tree-loading">
-                <Loader size="large" />
-                <p>Initializing research tree...</p>
-              </div>
-            )}
+            <ResearchNodeDetailPanel />
           </div>
+
+          {isLoading && nodes.size === 0 && (
+            <div className="research-tree-loading">
+              <Loader size="large" />
+              <p>Initializing research tree...</p>
+            </div>
+          )}
 
           {error && !fetchError && (
             <div className="px-5 pb-4 text-sm text-amber-400">

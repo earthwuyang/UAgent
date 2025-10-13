@@ -23,6 +23,7 @@ export interface ResearchNode {
   completed_at?: string;
   isFilteredMatch?: boolean;
   isFilteredOut?: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ResearchEdge {
@@ -51,6 +52,16 @@ export interface TreeSnapshot {
   };
 }
 
+export interface ResearchNodeEvent {
+  id: string;
+  node_id: string;
+  branch_id?: string | null;
+  event_type: string;
+  message?: string | null;
+  timestamp: string;
+  data?: Record<string, unknown>;
+}
+
 // WebSocket message types
 export interface WSMessage<T = unknown> {
   type: string;
@@ -67,6 +78,7 @@ export interface ResearchTreeState {
   edges: ResearchEdge[];
   stats: TreeStats;
   experimentId: string | null;
+  nodeEvents: Map<string, ResearchNodeEvent[]>;
 
   // UI state
   selectedNodeId: string | null;
@@ -93,6 +105,9 @@ export interface ResearchTreeState {
   applyEdgeAdded: (message: WSMessage<{ parent_id: string; child_id: string }>) => void;
   applyStatsUpdated: (message: WSMessage<{ stats: TreeStats }>) => void;
   applyEventLog: (message: WSMessage) => void;
+  mergeNodeData: (nodeId: string, updates: Partial<ResearchNode>) => void;
+  addNodeEvent: (event: ResearchNodeEvent) => void;
+  getNodeEvents: (nodeId: string) => ResearchNodeEvent[];
 
   // UI actions
   selectNode: (nodeId: string | null) => void;
@@ -155,6 +170,7 @@ const createInitialState = () => ({
   edges: [] as ResearchEdge[],
   stats: {} as TreeStats,
   experimentId: null as string | null,
+  nodeEvents: new Map<string, ResearchNodeEvent[]>(),
   selectedNodeId: null as string | null,
   selectedNodeIds: new Set<string>(),
   expandedNodeIds: new Set<string>(),
@@ -169,6 +185,8 @@ const createInitialState = () => ({
 });
 
 const initialState = createInitialState();
+
+const MAX_EVENTS_PER_NODE = 20;
 
 export const useResearchTreeStore = create<ResearchTreeState>()(
   persist(
@@ -326,6 +344,56 @@ export const useResearchTreeStore = create<ResearchTreeState>()(
         applyEventLog: (message) => {
           console.log('[Research Event]', message.data);
           set({ lastUpdate: message.timestamp });
+        },
+
+        mergeNodeData: (nodeId, updates) => {
+          set((state) => {
+            const existing = state.nodes.get(nodeId);
+            if (!existing) {
+              return {};
+            }
+
+            const mergedMetadata = updates.metadata
+              ? {
+                  ...(existing.metadata ?? {}),
+                  ...(updates.metadata as Record<string, unknown>),
+                }
+              : existing.metadata;
+
+            const nodes = new Map(state.nodes);
+            nodes.set(nodeId, {
+              ...existing,
+              ...updates,
+              metadata: mergedMetadata,
+            });
+
+            return {
+              nodes,
+              lastUpdate: new Date().toISOString(),
+            } as Partial<ResearchTreeState>;
+          });
+        },
+
+        addNodeEvent: (event) => {
+          if (!event?.node_id) {
+            return;
+          }
+
+          set((state) => {
+            const eventsMap = new Map(state.nodeEvents);
+            const existing = eventsMap.get(event.node_id) ?? [];
+            const next = [...existing, event].slice(-MAX_EVENTS_PER_NODE);
+            eventsMap.set(event.node_id, next);
+            return {
+              nodeEvents: eventsMap,
+              lastUpdate: event.timestamp,
+            } as Partial<ResearchTreeState>;
+          });
+        },
+
+        getNodeEvents: (nodeId) => {
+          const events = get().nodeEvents.get(nodeId);
+          return events ? [...events] : [];
         },
 
         selectNode: (nodeId) => {
@@ -511,7 +579,7 @@ export const useResearchTreeStore = create<ResearchTreeState>()(
     {
       name: 'research-tree-ui-state',
       storage,
-      partialize: (state) => ({
+      partialize: (state: ResearchTreeState) => ({
         filterType: state.filterType,
         filterStatus: state.filterStatus,
         searchQuery: state.searchQuery,

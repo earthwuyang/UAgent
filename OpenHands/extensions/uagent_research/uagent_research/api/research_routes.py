@@ -4,16 +4,18 @@ Research API Routes
 FastAPI routes for research experiment management.
 """
 
+import json
 import logging
 import time
 import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select as sql_select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
 from ..models import (
     Experiment,
@@ -56,6 +58,7 @@ try:
     from ...orchestrator.tree_orchestrator import TreeSearchOrchestrator
     from ...orchestrator.event_bus import get_event_bus as get_orchestrator_event_bus
     from ..models.research_tree import Budget
+    from ...uagent_research.models.events import EventType
     ORCHESTRATOR_AVAILABLE = True
     logger.info(f"✅ Orchestrator import successful")
 except ImportError as e:
@@ -65,6 +68,7 @@ except ImportError as e:
     ORCHESTRATOR_AVAILABLE = False
     TreeSearchOrchestrator = None
     Budget = None
+    EventType = None  # type: ignore
 
 # Global storage for active orchestrators
 _active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
@@ -1424,3 +1428,97 @@ async def get_experiment_events(
             "has_gap": False,
             "warning": "Event bus not available, no events retrieved"
         }
+
+
+@router.get("/experiments/{experiment_id}/events/stream")
+async def stream_experiment_events(
+    experiment_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session)
+):
+    """Stream experiment events using Server-Sent Events (SSE)."""
+
+    # Validate experiment exists (by ID or by associated session ID)
+    result = await session.execute(
+        sql_select(Experiment).where(Experiment.id == experiment_id)
+    )
+    experiment = result.scalar_one_or_none()
+
+    if not experiment:
+        result = await session.execute(
+            sql_select(Experiment)
+            .where(Experiment.session_id == experiment_id)
+            .order_by(Experiment.created_at.desc())
+        )
+        experiment = result.scalar_one_or_none()
+
+    if not experiment:
+        raise HTTPException(404, f"Experiment {experiment_id} not found")
+
+    actual_experiment_id = experiment.id
+
+    if not ORCHESTRATOR_AVAILABLE:
+        raise HTTPException(503, "Research orchestrator unavailable")
+
+    try:
+        event_bus = get_orchestrator_event_bus()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(f"Failed to acquire event bus: {exc}")
+        raise HTTPException(503, "Event bus not available") from exc
+
+    if event_bus is None:
+        raise HTTPException(503, "Event bus not available")
+
+    subscriber_id = f"sse-{actual_experiment_id}-{uuid.uuid4().hex[:8]}"
+    event_filter = {EventType.ERROR} if EventType else None
+
+    async def event_generator():
+        try:
+            async for event in event_bus.subscribe(
+                subscriber_id,
+                event_types=event_filter,
+                coalesce_window_ms=0,
+            ):
+                if await request.is_disconnected():
+                    break
+
+                event_experiment_id = getattr(event, "experiment_id", None)
+                if event_experiment_id and event_experiment_id != actual_experiment_id:
+                    continue
+
+                if hasattr(event, "model_dump"):
+                    body = event.model_dump()
+                else:  # pragma: no cover - pydantic v1 fallback
+                    body = event.dict()
+
+                timestamp = body.get("timestamp")
+                if isinstance(timestamp, datetime):
+                    body["timestamp"] = timestamp.isoformat()
+                elif timestamp is None:
+                    body["timestamp"] = datetime.utcnow().isoformat()
+
+                payload = {
+                    "event_type": event.type.value if hasattr(event.type, "value") else str(event.type),
+                    "experiment_id": event_experiment_id or actual_experiment_id,
+                    "branch_id": body.get("branch_id"),
+                    "node_id": body.get("node_id"),
+                    "timestamp": body.get("timestamp"),
+                    "message": body.get("message"),
+                    "recoverable": body.get("recoverable"),
+                    "data": body,
+                }
+
+                yield {
+                    "event": "research_event",
+                    "data": json.dumps(payload, default=str),
+                }
+
+            yield {"event": "end", "data": ""}
+        finally:
+            try:
+                await event_bus.unsubscribe(subscriber_id)
+            except Exception:
+                logger.debug("Error while unsubscribing SSE listener", exc_info=True)
+
+    headers = {"Cache-Control": "no-cache"}
+    return EventSourceResponse(event_generator(), headers=headers)
