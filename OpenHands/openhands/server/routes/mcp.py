@@ -24,7 +24,7 @@ from openhands.server.user_auth import (
 from openhands.storage.data_models.conversation_metadata import ConversationMetadata
 
 mcp_server = FastMCP(
-    'mcp', stateless_http=True, dependencies=get_dependencies(), mask_error_details=True
+    'mcp', stateless_http=True, mask_error_details=True
 )
 
 HOST = f'https://{os.getenv("WEB_HOST", "app.all-hands.dev").strip()}'
