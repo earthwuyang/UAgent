@@ -15,7 +15,12 @@ __license__ = "MIT"
 from typing import Dict, List, Any, Optional
 import logging
 
+# Configure debug logging for research extension
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Enable debug logging for the entire research extension
+logging.getLogger('extensions.uagent_research').setLevel(logging.DEBUG)
 
 # Extension metadata
 EXTENSION_NAME = "uagent_research"
