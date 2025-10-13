@@ -28,7 +28,8 @@ from ..adapters.base.agent_adapter import AgentAdapter, adapter_registry
 from ..router.skill_router import SkillRouter
 from .event_bus import EventBus
 from ..control.control_bus import ControlBus, ControlMessage
-from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
+# Delayed import to avoid circular dependency
+# from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
 from ..services.idea_generation_service import IdeaGenerationService
 
 
@@ -251,12 +252,7 @@ class TreeSearchOrchestrator:
             
             # Verify API imports are working
             try:
-                try:
-                    from uagent_research.api.research_routes import update_tree_state  # type: ignore
-                    from uagent_research.api.websocket_routes import broadcast_tree_update  # type: ignore
-                except ImportError:  # pragma: no cover - legacy fallback
-                    from ..api.research_routes import update_tree_state
-                    from ..api.websocket_routes import broadcast_tree_update
+                from ..uagent_research.api.tree_publisher import update_tree_state, broadcast_tree_update
                 logger.info("[ORCHESTRATOR] ✅ API imports verified successfully")
             except ImportError as e:
                 logger.error(f"[ORCHESTRATOR] ❌ API imports FAILED: {e}", exc_info=True)
@@ -832,6 +828,8 @@ class TreeSearchOrchestrator:
                 # Emit NodeCompleteEvent via MessageBus
                 if self.message_bus and self.tree:
                     try:
+                        # Delayed import to avoid circular dependency
+                        from openhands.events.agent_event import NodeCompleteEvent
                         asyncio.create_task(
                             self.message_bus.send_message(
                                 from_agent_id=self.tree.research_id,
@@ -982,13 +980,8 @@ class TreeSearchOrchestrator:
         self._last_broadcast_ts = now
         
         try:
-            # Import from canonical in-package API module so state is shared with FastAPI routes
-            try:
-                from uagent_research.api.research_routes import update_tree_state  # type: ignore
-                from uagent_research.api.websocket_routes import broadcast_tree_update  # type: ignore
-            except ImportError:  # pragma: no cover - legacy fallback for older layouts
-                from ..api.research_routes import update_tree_state
-                from ..api.websocket_routes import broadcast_tree_update
+            # Import from tree publisher module to avoid circular imports
+            from ..uagent_research.api.tree_publisher import update_tree_state, broadcast_tree_update
             logger.info(f"[PUBLISH] Successfully imported API functions")
             
             # Create tree snapshot
@@ -1073,6 +1066,8 @@ class TreeSearchOrchestrator:
         # Emit ProgressUpdateEvent via MessageBus
         if self.message_bus and self.tree:
             try:
+                # Delayed import to avoid circular dependency
+                from openhands.events.agent_event import ProgressUpdateEvent
                 total_nodes = self.tree.stats.get("total_nodes", 0)
                 iterations = self.stats.get("iterations", 0)
                 max_iterations = getattr(self, '_max_iterations', 50)
@@ -1132,6 +1127,8 @@ class TreeSearchOrchestrator:
             return
         
         try:
+            # Delayed import to avoid circular dependency
+            from openhands.events.agent_event import CommandEvent
             async for message in self.message_bus.subscribe(self.tree.research_id):
                 if isinstance(message, CommandEvent):
                     logger.info(

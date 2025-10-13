@@ -54,17 +54,22 @@ except ImportError as e:
 router = APIRouter(prefix="/api/research", tags=["research"])
 
 # Import orchestrator and related components for background execution
+print("🔍 Attempting to import orchestrator components...")
 try:
+    print("🔍 Importing TreeSearchOrchestrator...")
     from ...orchestrator.tree_orchestrator import TreeSearchOrchestrator
+    print("🔍 Importing event bus...")
     from ...orchestrator.event_bus import get_event_bus as get_orchestrator_event_bus
+    print("🔍 Importing Budget...")
     from ..models.research_tree import Budget
+    print("🔍 Importing EventType...")
     from ...uagent_research.models.events import EventType
     ORCHESTRATOR_AVAILABLE = True
-    logger.info(f"✅ Orchestrator import successful")
+    print(f"✅ Orchestrator import successful - ALL COMPONENTS LOADED")
 except ImportError as e:
-    logger.warning(f"Orchestrator not available: {e}")
+    print(f"❌ Orchestrator not available: {e}")
     import traceback
-    logger.debug(traceback.format_exc())
+    print(f"❌ Full traceback: {traceback.format_exc()}")
     ORCHESTRATOR_AVAILABLE = False
     TreeSearchOrchestrator = None
     Budget = None
@@ -73,8 +78,8 @@ except ImportError as e:
 # Global storage for active orchestrators
 _active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
 
-# In-memory tree snapshots for UI polling (/api/research/experiments/{id}/tree)
-_active_tree_snapshots: Dict[str, dict] = {}
+# Import tree publisher for shared state management
+from .tree_publisher import get_tree_state, clear_tree_state, get_all_tree_snapshots
 
 
 async def run_experiment_async(experiment_id: str, goal: str, config: Optional[Dict[str, Any]] = None):
@@ -357,7 +362,7 @@ async def get_experiment_tree_snapshot(experiment_id: str, session: AsyncSession
     The orchestrator publishes snapshots via update_tree_state(). If no snapshot
     is available yet, try to build from database.
     """
-    snap = _active_tree_snapshots.get(experiment_id)
+    snap = get_tree_state(experiment_id)
     if not snap:
         # Try to build from database
         logger.info(f"No snapshot in memory for {experiment_id}, building from database")
@@ -370,7 +375,8 @@ async def get_experiment_tree_snapshot(experiment_id: str, session: AsyncSession
                 'data': tree_data
             }
             # Cache it for future requests
-            _active_tree_snapshots[experiment_id] = snap
+            from .tree_publisher import update_tree_state
+            update_tree_state(experiment_id, snap)
             return snap
         
         # Return empty tree if no data
@@ -615,17 +621,21 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+@router.get("/orchestrator-status")
+async def orchestrator_status():
+    """Check orchestrator availability status."""
+    return {
+        "orchestrator_available": ORCHESTRATOR_AVAILABLE,
+        "tree_search_orchestrator": TreeSearchOrchestrator is not None,
+        "budget": Budget is not None,
+        "event_type": EventType is not None,
+        "active_orchestrators": len(_active_orchestrators),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
 
 # ===== Tree publishing hook used by orchestrator =====
-def update_tree_state(experiment_id: str, tree_data: dict) -> None:
-    """Update the in-memory snapshot for the experiment's research tree."""
-    _active_tree_snapshots[experiment_id] = tree_data
-    # Also index by session_id so UI polling with conversation_id works
-    if experiment_id.startswith('exp_'):
-        parts = experiment_id.split('_')
-        if len(parts) >= 3:
-            session_id = parts[1]
-            _active_tree_snapshots[session_id] = tree_data
+# Note: update_tree_state is now imported from tree_publisher module
 
 
 # ============================================================================
