@@ -28,6 +28,7 @@ from ..models import (
 from ..models.base import get_session
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # Import for accessing OpenHands conversation/session manager
 try:
@@ -629,7 +630,7 @@ async def orchestrator_status():
         "tree_search_orchestrator": TreeSearchOrchestrator is not None,
         "budget": Budget is not None,
         "event_type": EventType is not None,
-        "active_orchestrators": len(_active_orchestrators),
+        "active_orchestrators": get_total_active_orchestrators(),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -669,6 +670,30 @@ def get_session_manager() -> Optional[ResearchSessionManager]:
     except Exception as e:
         logger.error(f"Failed to get global session manager: {e}", exc_info=True)
         return None
+
+
+def get_total_active_orchestrators() -> int:
+    """Get total count of active orchestrators from all sources"""
+    # Count from global storage
+    global_count = len(_active_orchestrators)
+    
+    # Count from session manager
+    session_count = 0
+    session_mgr = get_session_manager()
+    if session_mgr and hasattr(session_mgr, 'experiments'):
+        session_count = len(session_mgr.experiments)
+    
+    return global_count + session_count
+
+
+def get_orchestrator_from_session_manager(experiment_id: str) -> Optional[Any]:
+    """Get orchestrator from session manager for experiment isolation"""
+    session_manager = get_session_manager()
+    if session_manager and hasattr(session_manager, 'experiments'):
+        if experiment_id in session_manager.experiments:
+            experiment_state = session_manager.experiments[experiment_id]
+            return getattr(experiment_state, 'orchestrator', None)
+    return None
 
 
 class TreeNodeResponse(BaseModel):
@@ -879,6 +904,9 @@ async def get_experiment_tree(
         orchestrator = None
         if MIDDLEWARE_AVAILABLE:
             orchestrator = research_middleware.get_orchestrator(experiment_id)
+        if not orchestrator:
+            # Try session manager for experiment isolation
+            orchestrator = get_orchestrator_from_session_manager(experiment_id)
         if not orchestrator:
             orchestrator = _active_orchestrators.get(experiment_id)
 
@@ -1176,6 +1204,12 @@ async def control_experiment(
                 experiment.status = ExperimentStatus.CANCELLED
                 experiment.completed_at = datetime.utcnow()
                 await session.commit()
+                # Try to remove from session manager
+                session_mgr = get_session_manager()
+                if session_mgr:
+                    # The session manager will handle cleanup of experiment state
+                    pass
+                # Also remove from global storage (for backward compatibility)
                 _active_orchestrators.pop(experiment_id, None)
 
             return {
@@ -1192,7 +1226,10 @@ async def control_experiment(
 
     else:
         # Fallback to direct orchestrator control (legacy)
-        orchestrator = _active_orchestrators.get(experiment_id)
+        # Try session manager for experiment isolation
+        orchestrator = get_orchestrator_from_session_manager(experiment_id)
+        if not orchestrator:
+            orchestrator = _active_orchestrators.get(experiment_id)
 
         if not orchestrator:
             raise HTTPException(400, f"Experiment {experiment_id} not running")
@@ -1203,6 +1240,12 @@ async def control_experiment(
             experiment.status = ExperimentStatus.CANCELLED
             experiment.completed_at = datetime.utcnow()
             await session.commit()
+            # Try to remove from session manager
+            session_mgr = get_session_manager()
+            if session_mgr:
+                # The session manager will handle cleanup of experiment state
+                pass
+            # Also remove from global storage (for backward compatibility)
             _active_orchestrators.pop(experiment_id, None)
 
             return {"status": "cancelled", "experiment_id": experiment_id}
