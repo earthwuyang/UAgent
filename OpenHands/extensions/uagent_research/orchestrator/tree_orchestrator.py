@@ -774,6 +774,11 @@ class TreeSearchOrchestrator:
                 node.status = NodeStatus.RUNNING
                 node.started_at = datetime.utcnow()
 
+                # Initialize per-node event stream (Issue #24 - UAGENT-24-2)
+                if self.event_bus:
+                    self.event_bus.init_node_stream(node.id)
+                    logger.debug(f"[NODE_EVENTS] Initialized event stream for node {node.id}")
+
                 # Generate virtual conversation ID for EXPERIMENT nodes
                 if node.type == NodeType.EXPERIMENT:
                     # Generate unique conversation ID for this experiment
@@ -906,10 +911,15 @@ class TreeSearchOrchestrator:
                 try:
                     logger.info(f"[EXECUTE] Calling adapter.run() for node {node.id}...")
                     
-                    async for event in asyncio.wait_for(
-                        adapter.run(task, context), 
-                        timeout=execution_timeout
-                    ):
+                    # Create task to handle timeout
+                    start_time = asyncio.get_event_loop().time()
+                    
+                    async for event in adapter.run(task, context):
+                        # Check timeout on each event
+                        elapsed = asyncio.get_event_loop().time() - start_time
+                        if elapsed > execution_timeout:
+                            raise asyncio.TimeoutError(f"Execution exceeded {execution_timeout}s")
+                        
                         events_received += 1
                         logger.info(f"[EXECUTE] Node {node.id} received event #{events_received}: {event.type if hasattr(event, 'type') else type(event).__name__}")
 
@@ -927,8 +937,13 @@ class TreeSearchOrchestrator:
                                 # Set attribute directly
                                 event.experiment_id = self.tree.research_id
 
-                        # Publish event to bus
+                        # Publish event to bus (global stream)
                         await self.event_bus.publish(event)
+                        
+                        # Publish to per-node stream (Issue #24 - UAGENT-24-2)
+                        if hasattr(event, 'node_id'):
+                            event.node_id = node.id
+                        await self.event_bus.publish_node_event(node.id, event)
 
                         # Update node on completion
                         if event.type == EventType.COMPLETE:
@@ -969,7 +984,6 @@ class TreeSearchOrchestrator:
                     logger.error(f"   Error message: {str(adapter_error)}")
                     logger.error(f"   Traceback:", exc_info=True)
                     raise  # Re-raise to be caught by outer exception handler
-                    raise Exception(f"Execution timeout after {execution_timeout}s")
                 
                 logger.info(
                     f"Node {node.id} completed ({events_received} events received)"

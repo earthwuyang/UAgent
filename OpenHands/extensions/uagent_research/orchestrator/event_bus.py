@@ -110,6 +110,10 @@ class EventBus:
         self._event_versions: Dict[str, int] = defaultdict(int)  # experiment_id -> current version
         self._max_log_size = 1000  # Max events per experiment
 
+        # Per-node event storage (Issue #24 - UAGENT-24-1)
+        self._node_events: Dict[str, List[ResearchEvent]] = {}  # node_id -> list of events
+        self._node_subscribers: Dict[str, Dict[str, List[Callable]]] = {}  # node_id -> {subscriber_id -> callbacks}
+
         # Statistics
         self.stats = {
             "events_published": 0,
@@ -689,6 +693,100 @@ class EventBus:
             await self.unsubscribe(subscriber_id)
 
         logger.info(f"Event bus closed (stats: {self.stats})")
+
+    # Per-node event storage methods (Issue #24 - UAGENT-24-1)
+    
+    def init_node_stream(self, node_id: str):
+        """Initialize event stream for a specific node."""
+        if node_id not in self._node_events:
+            self._node_events[node_id] = []
+            logger.debug(f"[NODE_EVENTS] Initialized stream for node {node_id}")
+    
+    async def publish_node_event(self, node_id: str, event: ResearchEvent):
+        """
+        Publish event to a specific node's event stream.
+        
+        Args:
+            node_id: Node identifier
+            event: Research event to store
+        """
+        if node_id not in self._node_events:
+            self.init_node_stream(node_id)
+        
+        self._node_events[node_id].append(event)
+        
+        # Notify subscribers
+        if node_id in self._node_subscribers:
+            for callbacks in self._node_subscribers[node_id].values():
+                for callback in callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(event)
+                        else:
+                            callback(event)
+                    except Exception as e:
+                        logger.error(f"Error calling node subscriber callback: {e}", exc_info=True)
+    
+    def get_node_events(
+        self,
+        node_id: str,
+        offset: int = 0,
+        limit: int = 100,
+        event_types: Optional[List[str]] = None,
+        since: Optional[datetime] = None
+    ) -> List[ResearchEvent]:
+        """
+        Retrieve events for a specific node with pagination and filtering.
+        
+        Args:
+            node_id: Node identifier
+            offset: Starting index
+            limit: Maximum number of events to return
+            event_types: Filter by event types
+            since: Only events after this timestamp
+            
+        Returns:
+            List of events matching criteria
+        """
+        if node_id not in self._node_events:
+            return []
+        
+        events = self._node_events[node_id]
+        
+        # Apply filters
+        if event_types:
+            events = [e for e in events if e.type.value in event_types]
+        
+        if since:
+            events = [e for e in events if hasattr(e, 'timestamp') and e.timestamp > since]
+        
+        # Apply pagination
+        return events[offset:offset + limit]
+    
+    def subscribe_node(self, node_id: str, subscriber_id: str, callback: Callable):
+        """Subscribe to events for a specific node."""
+        if node_id not in self._node_subscribers:
+            self._node_subscribers[node_id] = {}
+        
+        if subscriber_id not in self._node_subscribers[node_id]:
+            self._node_subscribers[node_id][subscriber_id] = []
+        
+        self._node_subscribers[node_id][subscriber_id].append(callback)
+        logger.debug(f"[NODE_EVENTS] Subscribed {subscriber_id} to node {node_id}")
+    
+    def unsubscribe_node(self, node_id: str, subscriber_id: str):
+        """Unsubscribe from node events."""
+        if node_id in self._node_subscribers and subscriber_id in self._node_subscribers[node_id]:
+            del self._node_subscribers[node_id][subscriber_id]
+            logger.debug(f"[NODE_EVENTS] Unsubscribed {subscriber_id} from node {node_id}")
+    
+    def clear_node_events(self, node_id: str):
+        """Clear all events for a specific node."""
+        if node_id in self._node_events:
+            del self._node_events[node_id]
+        if node_id in self._node_subscribers:
+            del self._node_subscribers[node_id]
+        logger.debug(f"[NODE_EVENTS] Cleared events for node {node_id}")
 
 
 # Global event bus instance

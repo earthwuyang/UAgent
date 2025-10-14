@@ -481,6 +481,192 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         manager.disconnect(websocket, session_id=session_id)
 
 
+@router.websocket("/experiment/{experiment_id}/node/{node_id}")
+async def node_websocket(websocket: WebSocket, experiment_id: str, node_id: str):
+    """
+    WebSocket endpoint for real-time node-specific event streaming (Issue #24 - UAGENT-24-4).
+    
+    Provides live updates for events published to a specific node's event stream,
+    enabling real-time per-node context switching in the UI.
+    
+    This endpoint streams events from the per-node event storage implemented in
+    Issues #28 and #29, allowing the frontend to display node-specific conversation
+    context in real-time as events are published.
+    
+    Message format (Server → Client):
+    {
+        "type": "node_event",
+        "experiment_id": "exp_123",
+        "node_id": "idea-0",
+        "event": {
+            "type": "STEP",
+            "timestamp": "2025-01-14T10:30:00",
+            "content": "...",
+            "data": { ... }
+        },
+        "timestamp": "2025-01-14T10:30:00Z"
+    }
+    
+    Connection confirmation:
+    {
+        "type": "connected",
+        "experiment_id": "exp_123",
+        "node_id": "idea-0",
+        "message": "Connected to node idea-0",
+        "timestamp": "2025-01-14T10:30:00Z"
+    }
+    
+    Ping/Pong:
+    Client → Server: {"type": "ping"}
+    Server → Client: {"type": "pong", "timestamp": "..."}
+    """
+    logger.info(f"[Node WebSocket] Connection request for experiment {experiment_id}, node {node_id}")
+    
+    # Accept connection
+    await websocket.accept()
+    logger.info(f"[Node WebSocket] Connected to experiment {experiment_id}, node {node_id}")
+    
+    # Track subscription for cleanup
+    subscription_id = None
+    
+    try:
+        # Send initial connection confirmation
+        await websocket.send_json({
+            "type": "connected",
+            "experiment_id": experiment_id,
+            "node_id": node_id,
+            "message": f"Connected to node {node_id}",
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        # Get event bus (lazy import)
+        try:
+            from ...orchestrator.event_bus import get_event_bus
+            event_bus = get_event_bus()
+            
+            if not event_bus:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Event bus not available",
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                return
+            
+            # Subscribe to node events
+            def on_node_event(event):
+                """Callback for node events - send to WebSocket client"""
+                try:
+                    # Serialize event
+                    event_dict = {
+                        "type": event.type.value if hasattr(event.type, 'value') else str(event.type),
+                        "timestamp": event.timestamp.isoformat() if hasattr(event, 'timestamp') else datetime.utcnow().isoformat(),
+                    }
+                    
+                    # Add event-specific fields
+                    if hasattr(event, 'content'):
+                        event_dict['content'] = event.content
+                    if hasattr(event, 'node_id'):
+                        event_dict['node_id'] = event.node_id
+                    if hasattr(event, 'branch_id'):
+                        event_dict['branch_id'] = event.branch_id
+                    if hasattr(event, 'data'):
+                        event_dict['data'] = event.data
+                    
+                    # Serialize full event using dict() if available
+                    if hasattr(event, 'dict'):
+                        try:
+                            event_dict.update(event.dict())
+                        except:
+                            pass
+                    
+                    # Send to client (async, needs to be scheduled)
+                    asyncio.create_task(websocket.send_json({
+                        "type": "node_event",
+                        "experiment_id": experiment_id,
+                        "node_id": node_id,
+                        "event": event_dict,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }))
+                    
+                except Exception as e:
+                    logger.error(f"Error sending node event to WebSocket: {e}", exc_info=True)
+            
+            # Subscribe to all event types for this node
+            subscription_id = event_bus.subscribe_node(node_id, "*", on_node_event)
+            logger.info(f"[Node WebSocket] Subscribed to node {node_id} events (subscription: {subscription_id})")
+            
+            # Keep connection alive and handle client messages
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    
+                    # Parse as JSON
+                    try:
+                        message = json.loads(data)
+                    except json.JSONDecodeError:
+                        # Handle simple text messages
+                        if data == "ping":
+                            await websocket.send_json({
+                                "type": "pong",
+                                "timestamp": datetime.utcnow().isoformat()
+                            })
+                            continue
+                        else:
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": "Invalid JSON format",
+                                "timestamp": datetime.utcnow().isoformat()
+                            })
+                            continue
+                    
+                    # Handle ping
+                    if isinstance(message, dict) and message.get("type") == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                    else:
+                        # Unknown message type
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Unknown message type: {message.get('type') if isinstance(message, dict) else 'invalid'}",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                
+                except WebSocketDisconnect:
+                    logger.info(f"[Node WebSocket] Client disconnected from node {node_id}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error in node WebSocket receive loop: {e}", exc_info=True)
+                    break
+        
+        except Exception as e:
+            logger.error(f"Error setting up node WebSocket: {e}", exc_info=True)
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Error setting up node subscription: {str(e)}",
+                "timestamp": datetime.utcnow().isoformat()
+            })
+    
+    finally:
+        # Cleanup: unsubscribe from node events
+        if subscription_id:
+            try:
+                from ...orchestrator.event_bus import get_event_bus
+                event_bus = get_event_bus()
+                if event_bus:
+                    event_bus.unsubscribe_node(node_id, subscription_id)
+                    logger.info(f"[Node WebSocket] Unsubscribed from node {node_id} (subscription: {subscription_id})")
+            except Exception as e:
+                logger.error(f"Error unsubscribing from node events: {e}", exc_info=True)
+        
+        # Close connection
+        try:
+            await websocket.close()
+        except:
+            pass
+
+
 # Broadcast helper function for tree updates
 async def broadcast_tree_update(experiment_id: str, message: dict):
     """

@@ -1549,6 +1549,180 @@ async def get_experiment_events(
         }
 
 
+@router.get("/experiments/{experiment_id}/nodes/{node_id}/events")
+async def get_node_events(
+    experiment_id: str,
+    node_id: str,
+    offset: int = 0,
+    limit: int = 100,
+    event_types: Optional[str] = None,
+    since: Optional[str] = None,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Get events for a specific node in an experiment (Issue #24 - UAGENT-24-3).
+    
+    This endpoint returns events published specifically to a node's event stream,
+    enabling per-node context switching in the UI.
+    
+    Args:
+        experiment_id: Experiment ID
+        node_id: Node ID within the experiment
+        offset: Number of events to skip (for pagination, default: 0)
+        limit: Maximum number of events to return (1-500, default: 100)
+        event_types: Comma-separated list of event types to filter (optional)
+        since: ISO timestamp - only return events after this time (optional)
+        session: Database session
+    
+    Returns:
+        Dictionary with:
+        - experiment_id: The experiment ID
+        - node_id: The node ID
+        - events: List of event dicts (type, timestamp, data, etc.)
+        - total: Total number of events for this node
+        - offset: The offset applied
+        - limit: The limit applied
+        - has_more: True if more events available
+    
+    Raises:
+        HTTPException: 400 if invalid parameters, 404 if experiment/node not found
+    
+    Example Response:
+        {
+            "experiment_id": "exp_123",
+            "node_id": "idea-0",
+            "events": [
+                {
+                    "type": "STEP",
+                    "timestamp": "2025-01-14T10:30:00",
+                    "data": {...}
+                }
+            ],
+            "total": 25,
+            "offset": 0,
+            "limit": 100,
+            "has_more": false
+        }
+    """
+    # Validate parameters
+    if offset < 0:
+        raise HTTPException(400, "offset must be non-negative")
+    if limit < 1 or limit > 500:
+        raise HTTPException(400, "limit must be between 1 and 500")
+    
+    # Parse event_types filter
+    event_types_list = None
+    if event_types:
+        event_types_list = [et.strip() for et in event_types.split(',') if et.strip()]
+    
+    # Parse since timestamp
+    since_datetime = None
+    if since:
+        try:
+            since_datetime = datetime.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(400, f"Invalid ISO timestamp format for 'since': {since}")
+    
+    # Check experiment exists
+    result = await session.execute(
+        sql_select(Experiment).where(Experiment.id == experiment_id)
+    )
+    experiment = result.scalar_one_or_none()
+    if not experiment:
+        # Try finding by session_id (use first() since there may be multiple experiments per session)
+        result = await session.execute(
+            sql_select(Experiment).where(Experiment.session_id == experiment_id).order_by(Experiment.created_at.desc())
+        )
+        experiment = result.scalars().first()
+        if not experiment:
+            raise HTTPException(404, f"Experiment {experiment_id} not found")
+    
+    # Get event bus (lazy import)
+    if not _lazy_import_orchestrator():
+        return {
+            "experiment_id": experiment_id,
+            "node_id": node_id,
+            "events": [],
+            "total": 0,
+            "offset": offset,
+            "limit": limit,
+            "has_more": False,
+            "warning": "Event bus not available"
+        }
+    
+    try:
+        event_bus = get_orchestrator_event_bus()
+        if not event_bus:
+            return {
+                "experiment_id": experiment_id,
+                "node_id": node_id,
+                "events": [],
+                "total": 0,
+                "offset": offset,
+                "limit": limit,
+                "has_more": False,
+                "warning": "Event bus instance not available"
+            }
+        
+        # Get node events using the new EventBus method
+        node_events = event_bus.get_node_events(
+            node_id=node_id,
+            offset=offset,
+            limit=limit,
+            event_types=event_types_list,
+            since=since_datetime
+        )
+        
+        # Serialize events
+        events_list = []
+        for event in node_events:
+            event_dict = {
+                "type": event.type.value if hasattr(event.type, 'value') else str(event.type),
+                "timestamp": event.timestamp.isoformat() if hasattr(event, 'timestamp') else datetime.utcnow().isoformat(),
+            }
+            
+            # Add event-specific fields
+            if hasattr(event, 'content'):
+                event_dict['content'] = event.content
+            if hasattr(event, 'node_id'):
+                event_dict['node_id'] = event.node_id
+            if hasattr(event, 'branch_id'):
+                event_dict['branch_id'] = event.branch_id
+            if hasattr(event, 'data'):
+                event_dict['data'] = event.data
+            
+            # Serialize the full event using dict() if available
+            if hasattr(event, 'dict'):
+                try:
+                    event_dict.update(event.dict())
+                except:
+                    pass
+            
+            events_list.append(event_dict)
+        
+        # Get total count (from EventBus, might need to get all events without limit)
+        all_events = event_bus.get_node_events(
+            node_id=node_id,
+            event_types=event_types_list,
+            since=since_datetime
+        )
+        total_count = len(all_events)
+        
+        return {
+            "experiment_id": experiment_id,
+            "node_id": node_id,
+            "events": events_list,
+            "total": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": (offset + len(events_list)) < total_count
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting node events: {e}", exc_info=True)
+        raise HTTPException(500, f"Error retrieving node events: {str(e)}")
+
+
 @router.get("/experiments/{experiment_id}/events/stream")
 async def stream_experiment_events(
     experiment_id: str,
