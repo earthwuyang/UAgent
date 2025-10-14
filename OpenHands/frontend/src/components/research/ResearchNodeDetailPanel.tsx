@@ -128,25 +128,25 @@ export function ResearchNodeDetailPanel() {
                   <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
                     <Activity size={16} /> Visits
                   </span>
-                  <strong>{selectedNode.visits}</strong>
+                  <strong>{selectedNode.visits ?? 0}</strong>
                 </div>
                 <div className="research-detail-metric">
                   <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
                     <TrendingUp size={16} /> Q Value
                   </span>
-                  <strong>{selectedNode.avg_value.toFixed(3)}</strong>
+                  <strong>{(selectedNode.avg_value ?? 0).toFixed(3)}</strong>
                 </div>
                 <div className="research-detail-metric">
                   <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
                     <Info size={16} /> Prior
                   </span>
-                  <strong>{selectedNode.prior.toFixed(3)}</strong>
+                  <strong>{(selectedNode.prior ?? 0).toFixed(3)}</strong>
                 </div>
                 <div className="research-detail-metric">
                   <span className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-300">
                     <DollarSign size={16} /> Cost
                   </span>
-                  <strong>${selectedNode.cost.toFixed(3)}</strong>
+                  <strong>${(selectedNode.cost ?? 0).toFixed(3)}</strong>
                 </div>
               </div>
             </section>
@@ -154,7 +154,7 @@ export function ResearchNodeDetailPanel() {
             <section className="research-detail-section">
               <h5>Tokens</h5>
               <p className="text-sm text-slate-600 dark:text-slate-300">
-                {selectedNode.tokens_used.toLocaleString()} tokens consumed.
+                {(selectedNode.tokens_used ?? 0).toLocaleString()} tokens consumed.
               </p>
             </section>
 

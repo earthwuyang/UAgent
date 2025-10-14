@@ -244,7 +244,7 @@ class ResearchTree(BaseModel):
         return {
             "research_id": self.research_id,
             "nodes": [node.to_dict() for node in self.nodes.values()],
-            "edges": [{"parent_id": e.parent_id, "child_id": e.child_id} for e in self.edges],
+            "edges": [{"from": e.parent_id, "to": e.child_id} for e in self.edges],
             "stats": self.stats,
             "version": self.version
         }
