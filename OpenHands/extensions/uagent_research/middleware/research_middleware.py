@@ -872,7 +872,8 @@ class ResearchMiddleware:
 
             exp_data = self.active_orchestrators.get(experiment_id)
             if not exp_data:
-                logger.error(f"Experiment data not found: {experiment_id}")
+                logger.error(f"❌ CRITICAL: Experiment data not found in active_orchestrators: {experiment_id}")
+                logger.error(f"   Available experiments: {list(self.active_orchestrators.keys())}")
                 return
 
             orchestrator = exp_data['orchestrator']
@@ -880,14 +881,30 @@ class ResearchMiddleware:
             max_iterations = exp_data['max_iterations']
             logger.info(f"🎯 Goal: {goal[:100]}...")
             logger.info(f"🔢 Max iterations: {max_iterations}")
+            
+            # Verify orchestrator has required methods
+            if not hasattr(orchestrator, 'run'):
+                logger.error(f"❌ CRITICAL: Orchestrator missing run() method")
+                raise AttributeError("Orchestrator missing run() method")
 
-            # Run orchestrator
+            # Run orchestrator with detailed error logging
             logger.info(f"🌳 Starting tree search orchestrator for {experiment_id}")
-            tree = await orchestrator.run(
-                goal=goal,
-                max_iterations=max_iterations,
-                research_id=experiment_id,
-            )
+            logger.info(f"   Orchestrator instance: {type(orchestrator).__name__}")
+            logger.info(f"   Goal: {goal[:100]}")
+            logger.info(f"   Max iterations: {max_iterations}")
+            
+            try:
+                tree = await orchestrator.run(
+                    goal=goal,
+                    max_iterations=max_iterations,
+                    research_id=experiment_id,
+                )
+            except Exception as orch_error:
+                logger.error(f"❌ ORCHESTRATOR EXECUTION FAILED for {experiment_id}")
+                logger.error(f"   Error type: {type(orch_error).__name__}")
+                logger.error(f"   Error message: {str(orch_error)}")
+                logger.error(f"   Traceback:", exc_info=True)
+                raise
 
             logger.info(f"✅ Tree search completed for {experiment_id}")
             logger.info(f"📊 Final stats: {tree.stats if hasattr(tree, 'stats') else 'N/A'}")
@@ -901,19 +918,24 @@ class ResearchMiddleware:
                     session_mgr.update_experiment_status(
                         experiment_id, ExperimentStatus.COMPLETE
                     )
-                except Exception:
+                    logger.info(f"✅ Experiment {experiment_id} marked as COMPLETE in session manager")
+                except Exception as status_error:
                     logger.exception(
-                        f"[RESEARCH_MIDDLEWARE] Failed to mark experiment {experiment_id} complete"
+                        f"[RESEARCH_MIDDLEWARE] Failed to mark experiment {experiment_id} complete: {status_error}"
                     )
 
         except Exception as e:
-            logger.error(f"Research failed: {experiment_id}, error: {str(e)}", exc_info=True)
+            logger.error(f"❌ RESEARCH FAILED for {experiment_id}")
+            logger.error(f"   Error type: {type(e).__name__}")
+            logger.error(f"   Error message: {str(e)}")
+            logger.error(f"   Full traceback:", exc_info=True)
 
             if session_mgr and ExperimentStatus:
                 try:
                     session_mgr.update_experiment_status(
                         experiment_id, ExperimentStatus.FAILED
                     )
+                    logger.info(f"⚠️ Experiment {experiment_id} marked as FAILED in session manager")
                 except Exception:
                     logger.exception(
                         f"[RESEARCH_MIDDLEWARE] Failed to mark experiment {experiment_id} failed"
@@ -929,6 +951,7 @@ class ResearchMiddleware:
             if session_mgr:
                 try:
                     session_mgr.unregister(experiment_id)
+                    logger.info(f"✅ Experiment {experiment_id} unregistered from session manager")
                 except Exception:
                     logger.debug(
                         f"[RESEARCH_MIDDLEWARE] Failed to unregister experiment {experiment_id}",

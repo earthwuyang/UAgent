@@ -844,23 +844,46 @@ class TreeSearchOrchestrator:
                 )
 
                 # Route to adapter
+                logger.info(f"[EXECUTE] Routing task for node {node.id} (type={node.type})")
                 adapter_name = self.router.route(task, context)
-                logger.info(f"Router selected adapter: {adapter_name} for node {node.id}")
+                logger.info(f"[EXECUTE] Router selected adapter: {adapter_name} for node {node.id}")
                 
                 adapter = adapter_registry.get(adapter_name)
 
                 if not adapter:
-                    logger.error(f"Adapter '{adapter_name}' not found in registry!")
-                    logger.error(f"Available adapters: {list(adapter_registry._adapters.keys()) if hasattr(adapter_registry, '_adapters') else 'unknown'}")
-                    raise Exception(f"Adapter '{adapter_name}' not found")
+                    logger.error(f"❌ CRITICAL: Adapter '{adapter_name}' not found in registry!")
+                    available = list(adapter_registry._adapters.keys()) if hasattr(adapter_registry, '_adapters') else []
+                    logger.error(f"   Available adapters: {available}")
+                    logger.error(f"   Registry instance: {id(adapter_registry)}")
+                    
+                    # Try to register adapters if none found
+                    if len(available) == 0:
+                        logger.error(f"   No adapters registered! Attempting to register now...")
+                        from ..adapters.ensure_adapters import ensure_research_adapters_registered
+                        if ensure_research_adapters_registered():
+                            logger.info(f"   Adapters registered successfully, retrying...")
+                            adapter = adapter_registry.get(adapter_name)
+                            if not adapter:
+                                logger.error(f"   Still cannot find adapter '{adapter_name}' after registration")
+                                raise Exception(f"Adapter '{adapter_name}' not found even after registration attempt")
+                        else:
+                            logger.error(f"   Failed to register adapters")
+                            raise Exception(f"Adapter '{adapter_name}' not found and registration failed")
+                    else:
+                        raise Exception(f"Adapter '{adapter_name}' not found (available: {available})")
 
                 node.adapter = adapter_name
-                logger.info(f"Routed node {node.id} to adapter: {adapter_name}")
+                logger.info(f"✅ Routed node {node.id} to adapter: {adapter_name}")
+                logger.info(f"   Adapter instance: {type(adapter).__name__}")
                 
                 # Verify adapter is properly initialized
                 if not hasattr(adapter, 'run'):
+                    logger.error(f"❌ CRITICAL: Adapter '{adapter_name}' missing run() method")
+                    logger.error(f"   Adapter type: {type(adapter)}")
+                    logger.error(f"   Adapter methods: {dir(adapter)}")
                     raise Exception(f"Adapter '{adapter_name}' missing run() method")
 
+                logger.info(f"✅ Adapter {adapter_name} verified (has run() method)")
                 await self._deliver_pending_steer(node.id, adapter_name)
 
                 # Setup experiment worktree if this is an EXPERIMENT node
@@ -875,14 +898,20 @@ class TreeSearchOrchestrator:
                 events_received = 0
                 execution_timeout = 300  # 5 minutes per node
                 
-                logger.info(f"Starting adapter execution for node {node.id} (timeout={execution_timeout}s)")
+                logger.info(f"[EXECUTE] Starting adapter execution for node {node.id}")
+                logger.info(f"   Adapter: {adapter_name}")
+                logger.info(f"   Timeout: {execution_timeout}s")
+                logger.info(f"   Task: {task.goal[:100] if task.goal else 'N/A'}")
                 
                 try:
+                    logger.info(f"[EXECUTE] Calling adapter.run() for node {node.id}...")
+                    
                     async for event in asyncio.wait_for(
                         adapter.run(task, context), 
                         timeout=execution_timeout
                     ):
                         events_received += 1
+                        logger.info(f"[EXECUTE] Node {node.id} received event #{events_received}: {event.type if hasattr(event, 'type') else type(event).__name__}")
 
                         # Attach experiment_id to event before publishing
                         if self.tree and self.tree.research_id:
@@ -903,6 +932,7 @@ class TreeSearchOrchestrator:
 
                         # Update node on completion
                         if event.type == EventType.COMPLETE:
+                            logger.info(f"[EXECUTE] Node {node.id} received COMPLETE event")
                             node.status = NodeStatus.COMPLETE
                             node.visits += 1
                             node.avg_value = 0.8  # Success value
@@ -913,21 +943,32 @@ class TreeSearchOrchestrator:
                             cost = await adapter.estimate_cost(task, context)
                             node.cost = cost
                             self.stats["total_cost"] += cost
+                            logger.info(f"[EXECUTE] Node {node.id} completed successfully (cost: ${cost:.3f})")
 
                     # If no events received and status hasn't changed, force completion
                     if events_received == 0 and node.status == NodeStatus.RUNNING:
-                        logger.warning(f"Node {node.id} received no events, forcing completion")
+                        logger.warning(f"[EXECUTE] Node {node.id} received no events, forcing completion")
                         node.status = NodeStatus.COMPLETE
                         node.visits += 1
                         node.avg_value = 0.5  # Neutral value for no-op execution
                         self.stats["completed_nodes"] += 1
+                    
+                    logger.info(f"[EXECUTE] Node {node.id} execution finished (received {events_received} events)")
                 
                 except asyncio.TimeoutError:
-                    logger.error(f"Node {node.id} execution TIMED OUT after {execution_timeout}s")
+                    logger.error(f"❌ Node {node.id} execution TIMED OUT after {execution_timeout}s")
                     node.status = NodeStatus.FAILED
                     node.visits += 1
                     node.avg_value = 0.0
                     self.stats["failed_nodes"] += 1
+                    
+                except Exception as adapter_error:
+                    logger.error(f"❌ ADAPTER EXECUTION FAILED for node {node.id}")
+                    logger.error(f"   Adapter: {adapter_name}")
+                    logger.error(f"   Error type: {type(adapter_error).__name__}")
+                    logger.error(f"   Error message: {str(adapter_error)}")
+                    logger.error(f"   Traceback:", exc_info=True)
+                    raise  # Re-raise to be caught by outer exception handler
                     raise Exception(f"Execution timeout after {execution_timeout}s")
                 
                 logger.info(
