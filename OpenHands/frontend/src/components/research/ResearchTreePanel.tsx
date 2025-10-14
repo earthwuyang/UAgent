@@ -99,11 +99,11 @@ export function ResearchTreePanel({ experimentId, onClose }: ResearchTreePanelPr
       { label: 'Nodes', value: nodes.size },
       { label: 'Edges', value: edges.length },
       { label: 'Depth', value: stats.max_depth ?? 0 },
-      { label: 'Cost', value: stats.total_cost ?? 0, formatter: (value: number) => `$${value.toFixed(3)}` },
+      { label: 'Cost', value: stats.total_cost ?? 0, formatter: (value: number) => `$${(value ?? 0).toFixed(3)}` },
       {
         label: 'Tokens',
         value: stats.total_tokens ?? 0,
-        formatter: (value: number) => value.toLocaleString(),
+        formatter: (value: number) => (value ?? 0).toLocaleString(),
       },
     ],
     [edges.length, nodes.size, stats.max_depth, stats.total_cost, stats.total_tokens]

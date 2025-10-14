@@ -135,9 +135,9 @@ const ExperimentStatusComponent: React.FC<ExperimentStatusProps> = ({
           <span className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Cost</span>
           <span
             className="text-sm font-semibold text-slate-700 dark:text-slate-300"
-            title={stats.total_cost ? `Total cost: $${stats.total_cost.toFixed(3)}` : undefined}
+            title={stats?.total_cost !== undefined && stats.total_cost !== null ? `Total cost: $${stats.total_cost.toFixed(3)}` : undefined}
           >
-            {formatCost(stats.total_cost)}
+            {formatCost(stats?.total_cost)}
           </span>
         </div>
       )}
@@ -152,7 +152,7 @@ const ExperimentStatusComponent: React.FC<ExperimentStatusProps> = ({
         <div className="flex flex-col items-center">
           <span className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Tokens</span>
           <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-            {formatTokens(stats.total_tokens)}
+            {formatTokens(stats?.total_tokens)}
           </span>
         </div>
       )}

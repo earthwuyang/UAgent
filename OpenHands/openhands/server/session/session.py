@@ -469,20 +469,27 @@ class WebSession:
                             self._report_research_progress()
                         )
 
-                    # Append research info to initial message
+                    # Append research info to initial message and add monitoring instruction
                     research_info = (
                         "\n\n[System: Research mode activated - "
                         f"Experiment ID: {experiment_id}, "
                         f"Confidence: {result.get('confidence', 0):.2f}. "
-                        "Check the Research Tree tab for live progress.]"
+                        "Multiple research agents are now working in parallel. "
+                        "Check the Research Tree tab for live progress.]\n\n"
+                        "Your task now is to monitor the research progress and provide periodic updates. "
+                        "Check the research experiment status every 2 minutes and report any significant progress or completed branches. "
+                        "Continue monitoring until all research branches are complete, then synthesize the results."
                     )
                     processed_initial_message = MessageAction(
                         content=initial_message.content + research_info,
-                        wait_for_response=initial_message.wait_for_response,
+                        wait_for_response=False,  # Do NOT wait - agent should monitor research progress
                         images_urls=getattr(initial_message, 'images_urls', None),
-                        thought=getattr(initial_message, 'thought', None),
+                        thought="I've activated research mode with multiple parallel research agents. I will now enter monitoring mode.",
                     )
                     self.logger.info(f"✅ Research mode activated for initial message, experiment_id={experiment_id}")
+                    
+                    # Store experiment ID for monitoring
+                    self.active_research_experiment_id = experiment_id
             except Exception as e:
                 self.logger.error(f"Failed to process initial message through research middleware: {e}", exc_info=True)
 

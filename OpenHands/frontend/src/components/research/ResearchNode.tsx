@@ -198,21 +198,21 @@ export const ResearchNode = memo(({ data, selected }: NodeProps<ResearchNodeType
       <div className="research-node-stats">
         <div className="research-node-stat" title="Visits (PUCT N)">
           <span className="stat-label">N</span>
-          <span className="stat-value">{data.visits}</span>
+          <span className="stat-value">{data.visits ?? 0}</span>
         </div>
         <div className="research-node-stat" title="Q value (average)">
           <span className="stat-label">Q</span>
-          <span className="stat-value">{data.avg_value.toFixed(2)}</span>
+          <span className="stat-value">{(data.avg_value ?? 0).toFixed(2)}</span>
         </div>
         <div className="research-node-stat" title="Prior (PUCT P)">
           <span className="stat-label">P</span>
-          <span className="stat-value">{data.prior.toFixed(2)}</span>
+          <span className="stat-value">{(data.prior ?? 0).toFixed(2)}</span>
         </div>
       </div>
 
       <div className="research-node-footer">
         <div className="research-node-cost" title="Execution cost">
-          ${data.cost.toFixed(3)}
+          ${(data.cost ?? 0).toFixed(3)}
         </div>
         {data.tokens_used > 0 && (
           <div className="research-node-tokens" title="Tokens used">
@@ -261,7 +261,7 @@ export const ResearchNode = memo(({ data, selected }: NodeProps<ResearchNodeType
                     Prior probability guiding exploration to promising branches.
                   </p>
                 </div>
-                <span className="metric-value">{data.prior.toFixed(3)}</span>
+                <span className="metric-value">{(data.prior ?? 0).toFixed(3)}</span>
               </div>
               <div className="metric-item" title="Value estimate">
                 <TrendingValue value={data.avg_value} />
@@ -303,7 +303,7 @@ function TrendingValue({ value }: TrendingValueProps) {
         <span className="metric-label">Confidence</span>
         <p className="metric-description">Balanced by visit count for exploitation.</p>
       </div>
-      <span className="metric-value">{value.toFixed(2)}</span>
+      <span className="metric-value">{(value ?? 0).toFixed(2)}</span>
     </div>
   );
 }
