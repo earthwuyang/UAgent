@@ -499,6 +499,13 @@ class ResearchMiddleware:
                 'control_result': control_result
             }
 
+        # Check for explicit "research goal:" prefix - always trigger if present
+        explicit_research_trigger = user_message.lower().strip().startswith('research goal:')
+        logger.info(f"📝 Processing message for session {session_id}")
+        logger.info(f"   Message preview: {user_message[:100]}...")
+        logger.info(f"   Explicit research trigger: {explicit_research_trigger}")
+        logger.info(f"   SINGLE_GOAL_MODE: {SINGLE_GOAL_MODE}")
+        
         # Single-goal mode: if goal not yet set, attempt to detect and launch; else do not auto-trigger
         if SINGLE_GOAL_MODE:
             goal_already_set = False
@@ -518,12 +525,26 @@ class ResearchMiddleware:
                             if exp_id.startswith(f"exp_{session_id}_"):
                                 goal_already_set = True
                                 break
+            
+            logger.info(f"   Goal already set: {goal_already_set}")
+            logger.info(f"   Active orchestrators: {list(self.active_orchestrators.keys())}")
+            
             if not goal_already_set:
-                should_trigger, task_type, confidence, reasoning = task_classifier.should_trigger_research(
-                    user_message,
-                    confidence_threshold=self.confidence_threshold,
-                )
+                # Explicit "research goal:" prefix always triggers, otherwise use classifier
+                if explicit_research_trigger:
+                    should_trigger = True
+                    task_type = TaskType.COMPLEX_RESEARCH
+                    confidence = 1.0
+                    reasoning = {'decision': 'Explicit research goal prefix detected'}
+                else:
+                    should_trigger, task_type, confidence, reasoning = task_classifier.should_trigger_research(
+                        user_message,
+                        confidence_threshold=self.confidence_threshold,
+                    )
+                
                 if should_trigger:
+                    logger.info(f"🚀 Starting research for session {session_id}")
+                    logger.info(f"   Task type: {task_type}, Confidence: {confidence}")
                     try:
                         experiment_id = await self.start_research(
                             goal=user_message,
@@ -554,6 +575,8 @@ class ResearchMiddleware:
                             'error': str(e),
                         }
             # Goal already set or no trigger: no auto start
+            logger.info(f"❌ Research not triggered for session {session_id}")
+            logger.info(f"   Reason: Single-goal mode; goal already set or message not complex enough")
             return {
                 'mode': 'normal',
                 'should_trigger_research': False,
