@@ -760,6 +760,7 @@ class TreeSearchOrchestrator:
                 logger.info(f"[DIAGNOSTIC]   Acquiring semaphore (max_parallel={self.max_parallel})")
                 
                 node.status = NodeStatus.RUNNING
+                node.started_at = datetime.utcnow()
 
                 # Create task for node
                 task = Task(
@@ -775,52 +776,83 @@ class TreeSearchOrchestrator:
 
                 # Route to adapter
                 adapter_name = self.router.route(task, context)
+                logger.info(f"Router selected adapter: {adapter_name} for node {node.id}")
+                
                 adapter = adapter_registry.get(adapter_name)
 
                 if not adapter:
+                    logger.error(f"Adapter '{adapter_name}' not found in registry!")
+                    logger.error(f"Available adapters: {list(adapter_registry._adapters.keys()) if hasattr(adapter_registry, '_adapters') else 'unknown'}")
                     raise Exception(f"Adapter '{adapter_name}' not found")
 
                 node.adapter = adapter_name
                 logger.info(f"Routed node {node.id} to adapter: {adapter_name}")
+                
+                # Verify adapter is properly initialized
+                if not hasattr(adapter, 'run'):
+                    raise Exception(f"Adapter '{adapter_name}' missing run() method")
 
                 await self._deliver_pending_steer(node.id, adapter_name)
 
-                # Execute via adapter
+                # Execute via adapter with timeout
                 events_received = 0
+                execution_timeout = 300  # 5 minutes per node
+                
+                logger.info(f"Starting adapter execution for node {node.id} (timeout={execution_timeout}s)")
+                
+                try:
+                    async for event in asyncio.wait_for(
+                        adapter.run(task, context), 
+                        timeout=execution_timeout
+                    ):
+                        events_received += 1
 
-                async for event in adapter.run(task, context):
-                    events_received += 1
-
-                    # Attach experiment_id to event before publishing
-                    if self.tree and self.tree.research_id:
-                        # Create shallow copy or update event with experiment_id
-                        if hasattr(event, 'copy'):
-                            # If Pydantic model with copy method
-                            try:
-                                event = event.copy(update={'experiment_id': self.tree.research_id})
-                            except:
-                                # Fallback: set attribute directly
+                        # Attach experiment_id to event before publishing
+                        if self.tree and self.tree.research_id:
+                            # Create shallow copy or update event with experiment_id
+                            if hasattr(event, 'copy'):
+                                # If Pydantic model with copy method
+                                try:
+                                    event = event.copy(update={'experiment_id': self.tree.research_id})
+                                except:
+                                    # Fallback: set attribute directly
+                                    event.experiment_id = self.tree.research_id
+                            else:
+                                # Set attribute directly
                                 event.experiment_id = self.tree.research_id
-                        else:
-                            # Set attribute directly
-                            event.experiment_id = self.tree.research_id
 
-                    # Publish event to bus
-                    await self.event_bus.publish(event)
+                        # Publish event to bus
+                        await self.event_bus.publish(event)
 
-                    # Update node on completion
-                    if event.type == EventType.COMPLETE:
+                        # Update node on completion
+                        if event.type == EventType.COMPLETE:
+                            node.status = NodeStatus.COMPLETE
+                            node.visits += 1
+                            node.avg_value = 0.8  # Success value
+
+                            self.stats["completed_nodes"] += 1
+
+                            # Update costs
+                            cost = await adapter.estimate_cost(task, context)
+                            node.cost = cost
+                            self.stats["total_cost"] += cost
+
+                    # If no events received and status hasn't changed, force completion
+                    if events_received == 0 and node.status == NodeStatus.RUNNING:
+                        logger.warning(f"Node {node.id} received no events, forcing completion")
                         node.status = NodeStatus.COMPLETE
                         node.visits += 1
-                        node.avg_value = 0.8  # Success value
-
+                        node.avg_value = 0.5  # Neutral value for no-op execution
                         self.stats["completed_nodes"] += 1
-
-                        # Update costs
-                        cost = await adapter.estimate_cost(task, context)
-                        node.cost = cost
-                        self.stats["total_cost"] += cost
-
+                
+                except asyncio.TimeoutError:
+                    logger.error(f"Node {node.id} execution TIMED OUT after {execution_timeout}s")
+                    node.status = NodeStatus.FAILED
+                    node.visits += 1
+                    node.avg_value = 0.0
+                    self.stats["failed_nodes"] += 1
+                    raise Exception(f"Execution timeout after {execution_timeout}s")
+                
                 logger.info(
                     f"Node {node.id} completed ({events_received} events received)"
                 )
