@@ -259,6 +259,32 @@ class Task(BaseModel):
     constraints: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ExperimentContext(BaseModel):
+    """Experiment-specific context for git worktree isolation.
+    
+    Contains configuration for running experiments in isolated git worktrees,
+    enabling parallel experiment execution without interference.
+    
+    Attributes:
+        conversation_id: Virtual conversation ID for this experiment
+        worktree_branch: Git branch name for the worktree
+        worktree_path: Filesystem path to the worktree directory
+        parent_branch: Parent branch to create worktree from
+    
+    Example:
+        exp_context = ExperimentContext(
+            conversation_id="exp_research_abc123_idea-1-h",
+            worktree_branch="exp_exp_research_abc123_idea-1-h",
+            worktree_path="../worktrees/exp_exp_research_abc123_idea-1-h",
+            parent_branch="main"
+        )
+    """
+    conversation_id: str
+    worktree_branch: str
+    worktree_path: str
+    parent_branch: str = "main"
+
+
 class Context(BaseModel):
     """Execution context for agent adapters"""
     branch_id: Optional[str] = None  # Current branch/node ID
@@ -267,3 +293,6 @@ class Context(BaseModel):
     secrets: Dict[str, str] = Field(default_factory=dict)  # API keys, etc.
     workspace_dir: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Experiment context for git worktree isolation (optional, only for EXPERIMENT nodes)
+    experiment_context: Optional[ExperimentContext] = None

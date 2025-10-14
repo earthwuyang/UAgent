@@ -22,6 +22,7 @@ from ..uagent_research.models.research_tree import (
     Task,
     Context,
     Budget,
+    ExperimentContext,
 )
 from ..uagent_research.models.events import ResearchEvent, EventType, CompleteEvent
 from ..adapters.base.agent_adapter import AgentAdapter, adapter_registry
@@ -31,6 +32,14 @@ from ..control.control_bus import ControlBus, ControlMessage
 # Delayed import to avoid circular dependency
 # from openhands.events.agent_event import ProgressUpdateEvent, NodeCompleteEvent, CommandEvent
 from ..services.idea_generation_service import IdeaGenerationService
+
+# Import SubAgent observation events for experiment tracking
+try:
+    from openhands.events.observation.sub_agent import SubAgentSpawnedObservation
+    SUB_AGENT_EVENTS_AVAILABLE = True
+except ImportError:
+    SUB_AGENT_EVENTS_AVAILABLE = False
+    logger.warning("SubAgent observation events not available")
 
 
 logger = logging.getLogger(__name__)
@@ -749,6 +758,9 @@ class TreeSearchOrchestrator:
         Args:
             node: Node to execute
         """
+        # Initialize context to None for finally block access
+        context = None
+        
         async with self._semaphore:
             try:
                 logger.info(f"Executing node {node.id} (type={node.type})")
@@ -762,6 +774,40 @@ class TreeSearchOrchestrator:
                 node.status = NodeStatus.RUNNING
                 node.started_at = datetime.utcnow()
 
+                # Generate virtual conversation ID for EXPERIMENT nodes
+                if node.type == NodeType.EXPERIMENT:
+                    # Generate unique conversation ID for this experiment
+                    experiment_id = f"exp_{self.tree.research_id}_{node.id[:8]}"
+                    worktree_branch = f"exp_{experiment_id}"
+                    
+                    # Initialize node.metadata if not exists
+                    if not hasattr(node, 'metadata') or node.metadata is None:
+                        node.metadata = {}
+                    
+                    # Store conversation context in node metadata for UI access
+                    node.metadata['conversation_id'] = experiment_id
+                    node.metadata['worktree_branch'] = worktree_branch
+                    node.metadata['parent_session_id'] = self.tree.research_id
+                    
+                    logger.info(f"[EXPERIMENT] Generated virtual conversation ID: {experiment_id}")
+                    logger.info(f"[EXPERIMENT] Worktree branch: {worktree_branch}")
+                    
+                    # Emit SubAgentSpawnedObservation event if available
+                    if SUB_AGENT_EVENTS_AVAILABLE and self.event_bus:
+                        try:
+                            spawn_event = SubAgentSpawnedObservation(
+                                content=f"Experiment {node.title} started",
+                                sub_agent_id=experiment_id,
+                                sub_agent_type='experiment',
+                                goal=node.content or node.title,
+                                session_id=self.tree.research_id
+                            )
+                            # Publish event to event bus
+                            await self.event_bus.publish(spawn_event)
+                            logger.info(f"[EXPERIMENT] SubAgentSpawnedObservation emitted for {experiment_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to emit SubAgentSpawnedObservation: {e}")
+
                 # Create task for node
                 task = Task(
                     id=node.id,
@@ -769,9 +815,32 @@ class TreeSearchOrchestrator:
                     context=node.title,
                 )
 
+                # Create experiment context for EXPERIMENT nodes
+                experiment_context = None
+                if node.type == NodeType.EXPERIMENT:
+                    # Extract experiment metadata created earlier
+                    experiment_id = node.metadata.get('conversation_id')
+                    worktree_branch = node.metadata.get('worktree_branch')
+                    
+                    if experiment_id and worktree_branch:
+                        # Determine parent branch (try to get from config or use default)
+                        parent_branch = self.config.get('parent_branch', 'main') if hasattr(self, 'config') and isinstance(self.config, dict) else 'main'
+                        
+                        # Create ExperimentContext
+                        experiment_context = ExperimentContext(
+                            conversation_id=experiment_id,
+                            worktree_branch=worktree_branch,
+                            worktree_path=f"../worktrees/{worktree_branch}",
+                            parent_branch=parent_branch
+                        )
+                        
+                        logger.info(f"[EXPERIMENT] Created ExperimentContext: worktree_path={experiment_context.worktree_path}")
+
+                # Create context with optional experiment_context
                 context = Context(
                     branch_id=node.id,
                     parent_nodes=[],
+                    experiment_context=experiment_context
                 )
 
                 # Route to adapter
@@ -793,6 +862,14 @@ class TreeSearchOrchestrator:
                     raise Exception(f"Adapter '{adapter_name}' missing run() method")
 
                 await self._deliver_pending_steer(node.id, adapter_name)
+
+                # Setup experiment worktree if this is an EXPERIMENT node
+                if context.experiment_context:
+                    try:
+                        await self._setup_experiment_worktree(context.experiment_context)
+                    except Exception as e:
+                        logger.error(f"[EXPERIMENT] Failed to setup worktree: {e}")
+                        raise  # Re-raise to mark node as failed
 
                 # Execute via adapter with timeout
                 events_received = 0
@@ -926,6 +1003,14 @@ class TreeSearchOrchestrator:
                 except Exception:
                     logger.debug("Failed to broadcast tree update after error", exc_info=True)
             finally:
+                # Cleanup experiment worktree if this was an EXPERIMENT node
+                if context and context.experiment_context:
+                    try:
+                        await self._cleanup_experiment_worktree(context.experiment_context.worktree_path)
+                    except Exception as e:
+                        logger.warning(f"[EXPERIMENT] Error during worktree cleanup: {e}")
+                        # Don't re-raise, just log - cleanup failures shouldn't fail the node
+                
                 self._running_tasks.pop(node.id, None)
                 self._steer_map.pop(node.id, None)
                 self.event_bus.stop_branch_heartbeat(node.id)
@@ -983,6 +1068,127 @@ class TreeSearchOrchestrator:
                 exc_info=True,
             )
             return False
+
+    async def _setup_experiment_worktree(self, experiment_context: ExperimentContext) -> None:
+        """Setup git worktree for experiment isolation.
+        
+        Creates a git worktree with a new branch for the experiment.
+        All experiment code execution happens in this isolated worktree directory.
+        Git worktrees share the .git directory (lightweight) but have separate
+        working directories, enabling parallel experiments without interference.
+        
+        Args:
+            experiment_context: Experiment configuration with worktree details
+            
+        Raises:
+            RuntimeError: If worktree creation fails
+        """
+        import subprocess
+        import os
+        
+        worktree_path = experiment_context.worktree_path
+        branch_name = experiment_context.worktree_branch
+        parent_branch = experiment_context.parent_branch
+        
+        logger.info(f"[WORKTREE] Setting up experiment worktree: {worktree_path}")
+        logger.info(f"[WORKTREE] Branch: {branch_name}, Parent: {parent_branch}")
+        
+        # Check if worktree already exists (reuse for idempotency)
+        if os.path.exists(worktree_path):
+            logger.info(f"[WORKTREE] Worktree {worktree_path} already exists, reusing")
+            return
+        
+        # Ensure parent worktrees directory exists
+        worktrees_dir = os.path.dirname(worktree_path)
+        if worktrees_dir and not os.path.exists(worktrees_dir):
+            try:
+                os.makedirs(worktrees_dir, exist_ok=True)
+                logger.info(f"[WORKTREE] Created worktrees directory: {worktrees_dir}")
+            except Exception as e:
+                logger.error(f"[WORKTREE] Failed to create worktrees directory: {e}")
+                raise RuntimeError(f"Failed to create worktrees directory: {e}")
+        
+        # Create git worktree with new branch
+        try:
+            # Use git worktree add with -b to create new branch
+            cmd = ['git', 'worktree', 'add', worktree_path, '-b', branch_name]
+            
+            logger.debug(f"[WORKTREE] Executing: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=os.getcwd()  # Ensure we're in a git repo
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                logger.error(f"[WORKTREE] Failed to create worktree: {error_msg}")
+                logger.error(f"[WORKTREE] Command: {' '.join(cmd)}")
+                logger.error(f"[WORKTREE] Stdout: {result.stdout}")
+                raise RuntimeError(f"Failed to create worktree: {error_msg}")
+            
+            logger.info(f"[WORKTREE] Successfully created worktree at {worktree_path}")
+            logger.debug(f"[WORKTREE] Git output: {result.stdout.strip()}")
+            
+        except FileNotFoundError:
+            logger.error(f"[WORKTREE] Git command not found. Is git installed?")
+            raise RuntimeError("Git command not found. Please ensure git is installed.")
+        except Exception as e:
+            logger.error(f"[WORKTREE] Unexpected error creating worktree: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to create worktree: {e}")
+
+    async def _cleanup_experiment_worktree(self, worktree_path: str) -> None:
+        """Remove experiment worktree after completion.
+        
+        Cleans up the git worktree directory and associated branch.
+        Uses --force to handle cases where worktree might be partially created
+        or has uncommitted changes.
+        
+        Args:
+            worktree_path: Path to the worktree directory to remove
+        """
+        import subprocess
+        import os
+        
+        if not worktree_path:
+            logger.warning(f"[WORKTREE] Empty worktree_path provided for cleanup, skipping")
+            return
+        
+        # Check if worktree exists
+        if not os.path.exists(worktree_path):
+            logger.debug(f"[WORKTREE] Worktree {worktree_path} doesn't exist, no cleanup needed")
+            return
+        
+        logger.info(f"[WORKTREE] Cleaning up experiment worktree: {worktree_path}")
+        
+        try:
+            # Use --force to remove even if there are uncommitted changes
+            cmd = ['git', 'worktree', 'remove', worktree_path, '--force']
+            
+            logger.debug(f"[WORKTREE] Executing: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=os.getcwd()
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                logger.warning(f"[WORKTREE] Failed to remove worktree: {error_msg}")
+                logger.debug(f"[WORKTREE] Command: {' '.join(cmd)}")
+                logger.debug(f"[WORKTREE] Stdout: {result.stdout}")
+                # Don't raise exception on cleanup failure, just log it
+            else:
+                logger.info(f"[WORKTREE] Successfully removed worktree {worktree_path}")
+                logger.debug(f"[WORKTREE] Git output: {result.stdout.strip()}")
+                
+        except FileNotFoundError:
+            logger.warning(f"[WORKTREE] Git command not found during cleanup")
+        except Exception as e:
+            logger.warning(f"[WORKTREE] Unexpected error during cleanup: {e}")
+            # Don't raise exception on cleanup failure
 
     def _convert_tree_to_frontend_format(self, tree_dict: dict) -> dict:
         """
