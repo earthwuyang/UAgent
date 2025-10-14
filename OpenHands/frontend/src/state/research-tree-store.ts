@@ -256,17 +256,31 @@ export const useResearchTreeStore = create<ResearchTreeState>()(
 
           const nodesMap = new Map<string, ResearchNode>();
           const nodes = Array.isArray(snapshot.data?.nodes) ? snapshot.data.nodes : [];
-          nodes.forEach((node) => {
+          nodes.forEach((node: any) => {
             if (node && typeof node === 'object' && node.id) {
-              nodesMap.set(node.id, node);
+              // Handle both formats: flat ResearchNode or ReactFlow node with nested data
+              const researchNode: ResearchNode = node.data && typeof node.data === 'object' && node.data.id
+                ? node.data  // ReactFlow format - extract nested data
+                : node;      // Already flat ResearchNode format
+              
+              if (researchNode.id) {
+                nodesMap.set(researchNode.id, researchNode);
+              }
             }
           });
+
+          // Transform ReactFlow edges to simple parent-child format
+          const rawEdges = Array.isArray(snapshot.data?.edges) ? snapshot.data.edges : [];
+          const edges: ResearchEdge[] = rawEdges.map((edge: any) => ({
+            parent_id: edge.source || edge.parent_id,
+            child_id: edge.target || edge.child_id,
+          }));
 
           set({
             version: snapshot.version ?? 0,
             lastUpdate: snapshot.timestamp ?? new Date().toISOString(),
             nodes: nodesMap,
-            edges: Array.isArray(snapshot.data?.edges) ? snapshot.data.edges : [],
+            edges,
             stats: snapshot.data?.stats ?? {},
             experimentId: snapshot.experiment_id ?? null,
             isLoading: false,
