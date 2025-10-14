@@ -42,23 +42,22 @@ const nodeTypes: NodeTypes = {
 };
 
 // Stable layout function - uses JSON.stringify to create stable cache keys
-const layoutCache = new Map<string, { nodes: Node[]; edges: Edge[] }>();
+const layoutCache = new Map<string, Map<string, { x: number; y: number }>>();
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
-  // Create a stable cache key based on node IDs and positions
+  // Create a stable cache key based on node IDs and edges
   const cacheKey = JSON.stringify({
     nodeIds: nodes.map(n => n.id).sort(),
     edgeIds: edges.map(e => `${e.source}-${e.target}`).sort(),
   });
 
-  // Return cached result if available
+  // Return cached result if available - use Map for O(1) lookup by node ID
   if (layoutCache.has(cacheKey)) {
-    const cached = layoutCache.get(cacheKey)!;
-    // Return nodes and edges with updated data but same positions
+    const cachedPositions = layoutCache.get(cacheKey)!;
     return {
-      nodes: nodes.map((node, idx) => ({
+      nodes: nodes.map((node) => ({
         ...node,
-        position: cached.nodes[idx]?.position || node.position,
+        position: cachedPositions.get(node.id) || { x: 0, y: 0 },
         targetPosition: Position.Top,
         sourcePosition: Position.Bottom,
       })),
@@ -80,29 +79,33 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
 
   dagre.layout(dagreGraph);
 
+  // Create position map for caching
+  const positionMap = new Map<string, { x: number; y: number }>();
+  
   const layoutedNodes = nodes.map((node) => {
     const nodeWithPosition = dagreGraph.node(node.id);
+    const position = {
+      x: nodeWithPosition.x - 140,
+      y: nodeWithPosition.y - 110,
+    };
+    positionMap.set(node.id, position);
+    
     return {
       ...node,
-      position: {
-        x: nodeWithPosition.x - 140,
-        y: nodeWithPosition.y - 110,
-      },
+      position,
       targetPosition: Position.Top,
       sourcePosition: Position.Bottom,
     };
   });
 
-  const result = { nodes: layoutedNodes, edges };
-  
-  // Cache the result (limit cache size)
+  // Cache the position map (limit cache size)
   if (layoutCache.size > 50) {
     const firstKey = layoutCache.keys().next().value;
     layoutCache.delete(firstKey);
   }
-  layoutCache.set(cacheKey, result);
+  layoutCache.set(cacheKey, positionMap);
 
-  return result;
+  return { nodes: layoutedNodes, edges };
 };
 
 const filterOptions = {
