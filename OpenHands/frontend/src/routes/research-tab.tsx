@@ -21,16 +21,42 @@ import {
 } from "#/api/research-api";
 import { useResearchWS } from "#/hooks/useResearchWS";
 import { useResearchTreeStore } from "#/state/research-tree-store";
+import { useWsClient } from "#/context/ws-client-provider";
 
 const TREE_POLL_INTERVAL = 5000;
 const STATUS_POLL_INTERVAL = 5000;
+
+/**
+ * Extract experiment ID from system messages
+ * Looks for pattern: "[System: Research mode activated - Experiment ID: {id}, ..."
+ */
+function extractExperimentIdFromMessages(messages: Array<any> | undefined): string | null {
+  if (!messages) return null;
+
+  for (const msg of messages) {
+    // Check if this is a MessageAction with content
+    if (msg.action === "message" && msg.args?.content) {
+      const content = msg.args.content;
+      const match = content.match(/\[System: Research mode activated - Experiment ID: ([^,]+),/);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+  }
+  return null;
+}
 
 export default function ResearchTab() {
   const { conversationId } = useConversationId();
   const { data: activeConversation } = useActiveConversation();
 
+  // Get messages from WebSocket client to extract experiment ID
+  const { parsedEvents } = useWsClient();
+
+  // Try to extract experiment ID from system messages first, then fall back to conversation metadata
+  const extractedExperimentId = extractExperimentIdFromMessages(parsedEvents);
   const resolvedExperimentId =
-    activeConversation?.research_experiment_id ?? conversationId ?? null;
+    extractedExperimentId ?? activeConversation?.research_experiment_id ?? conversationId ?? null;
   const researchGoal = activeConversation?.title ?? undefined;
 
   const [isClient, setIsClient] = useState(false);

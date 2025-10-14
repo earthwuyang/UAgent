@@ -423,6 +423,69 @@ class WebSession:
             custom_secrets = settings.custom_secrets
             conversation_instructions = settings.conversation_instructions
 
+        # Check if initial message should trigger research mode
+        processed_initial_message = initial_message
+        if (RESEARCH_MIDDLEWARE_AVAILABLE
+            and initial_message
+            and isinstance(initial_message, MessageAction)
+            and initial_message.content):
+            try:
+                self.logger.info(f"🔬 Processing initial message through research middleware")
+                result = await research_middleware.process_message(
+                    user_message=initial_message.content,
+                    session_id=self.sid,
+                    conversation_metadata={'source': 'initial_message'},
+                )
+
+                if result.get('should_trigger_research'):
+                    experiment_id = result.get('experiment_id')
+                    self.logger.info(
+                        f"🔬 Research mode triggered by initial message",
+                        extra={
+                            'session_id': self.sid,
+                            'experiment_id': experiment_id,
+                        },
+                    )
+
+                    self.active_research_experiment_id = experiment_id
+                    self._last_progress_broadcast = 0.0
+
+                    # Register with coordinator
+                    coordinator = self.get_or_create_coordinator()
+                    try:
+                        if coordinator.track_existing_experiment(experiment_id):
+                            self.logger.info(f"✅ Research experiment {experiment_id} tracked by coordinator")
+                        else:
+                            self.logger.warning(f"⚠️ Failed to track experiment {experiment_id} in coordinator")
+
+                        self.register_experiment(experiment_id)
+                    except Exception as e:
+                        self.logger.error(f"❌ Failed to register research with coordinator: {e}", exc_info=True)
+
+                    # Start progress reporter
+                    if self._progress_reporter_task is None or self._progress_reporter_task.done():
+                        self.logger.info(f"📊 Starting progress reporter for {experiment_id}")
+                        self._progress_reporter_task = asyncio.create_task(
+                            self._report_research_progress()
+                        )
+
+                    # Append research info to initial message
+                    research_info = (
+                        "\n\n[System: Research mode activated - "
+                        f"Experiment ID: {experiment_id}, "
+                        f"Confidence: {result.get('confidence', 0):.2f}. "
+                        "Check the Research Tree tab for live progress.]"
+                    )
+                    processed_initial_message = MessageAction(
+                        content=initial_message.content + research_info,
+                        wait_for_response=initial_message.wait_for_response,
+                        images_urls=getattr(initial_message, 'images_urls', None),
+                        thought=getattr(initial_message, 'thought', None),
+                    )
+                    self.logger.info(f"✅ Research mode activated for initial message, experiment_id={experiment_id}")
+            except Exception as e:
+                self.logger.error(f"Failed to process initial message through research middleware: {e}", exc_info=True)
+
         try:
             await self.agent_session.start(
                 runtime_name=self.config.runtime,
@@ -436,7 +499,7 @@ class WebSession:
                 custom_secrets=custom_secrets,
                 selected_repository=selected_repository,
                 selected_branch=selected_branch,
-                initial_message=initial_message,
+                initial_message=processed_initial_message,
                 conversation_instructions=conversation_instructions,
                 replay_json=replay_json,
             )

@@ -965,18 +965,26 @@ class TreeSearchOrchestrator:
         Returns:
             Frontend-compatible tree structure
         """
-        nodes_dict = tree_dict.get('nodes', {})
+        nodes_data = tree_dict.get('nodes', {})
         edges_list = tree_dict.get('edges', [])
-        
+
+        # Handle both dict and list formats for nodes
+        # ResearchTree.to_dict() returns nodes as a list, not dict
+        if isinstance(nodes_data, list):
+            # Convert list to dict for easier processing
+            nodes_dict = {node['id']: node for node in nodes_data}
+        else:
+            nodes_dict = nodes_data
+
         # Convert nodes dictionary to array with frontend structure
         frontend_nodes = []
         node_positions = {}  # Track positions for layout
-        
+
         # Calculate positions using a simple tree layout algorithm
         # Root at top, children spread horizontally below
         root_nodes = []
         child_nodes_by_parent = {}
-        
+
         # First pass: identify root nodes and group children
         for node_id, node_data in nodes_dict.items():
             parent_id = node_data.get('parent_id')
@@ -1035,21 +1043,22 @@ class TreeSearchOrchestrator:
                     'type': node_data.get('type', 'default'),
                     'title': node_data.get('title', ''),
                     'description': node_data.get('content', ''),
+                    'content': node_data.get('content', ''),  # Frontend expects this for display
                     'status': node_data.get('status', 'pending'),
-                    'visit_count': node_data.get('visits', 0),
+                    'visits': node_data.get('visits', 0),  # Frontend uses 'visits' not 'visit_count'
                     'avg_value': node_data.get('avg_value', 0.0),
                     'prior': node_data.get('prior', 0.5),
                     'puct_score': 0.0,  # Can be calculated if needed
+                    'cost': node_data.get('cost', 0.0),  # Frontend expects at top level
+                    'tokens_used': node_data.get('tokens_used', 0),  # Frontend expects at top level
+                    'created_at': node_data.get('created_at'),
+                    'completed_at': node_data.get('completed_at'),
                     'metadata': {
                         'score': node_data.get('score'),
                         'confidence': node_data.get('confidence'),
                         'novelty': node_data.get('novelty'),
-                        'cost': node_data.get('cost', 0.0),
-                        'tokens_used': node_data.get('tokens_used', 0),
                         'iterations': node_data.get('iterations', 0),
-                        'created_at': node_data.get('created_at'),
                         'started_at': node_data.get('started_at'),
-                        'completed_at': node_data.get('completed_at'),
                         'adapter': node_data.get('adapter'),
                     }
                 }

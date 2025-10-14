@@ -9,7 +9,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request
 from pydantic import BaseModel, Field, field_validator
@@ -40,44 +40,78 @@ except ImportError:
 
 
 # Import control and session management
-try:
-    from ...control.control_bus import ControlBus, ControlMessage
-    from ...services.research_session_manager import ResearchSessionManager
-    from ...orchestrator.event_bus import get_event_bus
-    CONTROL_BUS_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"Control bus not available: {e}")
-    CONTROL_BUS_AVAILABLE = False
-    ControlBus = None
-    ControlMessage = None
-    ResearchSessionManager = None
+# Use lazy imports to avoid circular dependency issues
+CONTROL_BUS_AVAILABLE = True
+ControlBus = None
+ControlMessage = None
+ResearchSessionManager = None
+
+def _lazy_import_control_bus():
+    """Lazy import control bus to avoid circular dependencies"""
+    global ControlBus, ControlMessage, ResearchSessionManager
+    if ControlBus is None:
+        try:
+            from ...control.control_bus import ControlBus as _ControlBus, ControlMessage as _ControlMessage
+            from ...services.research_session_manager import ResearchSessionManager as _ResearchSessionManager
+            ControlBus = _ControlBus
+            ControlMessage = _ControlMessage
+            ResearchSessionManager = _ResearchSessionManager
+            return True
+        except ImportError as e:
+            logger.warning(f"Control bus not available: {e}")
+            return False
+    return True
 
 router = APIRouter(prefix="/api/research", tags=["research"])
 
-# Import orchestrator and related components for background execution
-print("🔍 Attempting to import orchestrator components...")
-try:
-    print("🔍 Importing TreeSearchOrchestrator...")
+# Type hints for orchestrator components (only for type checking, not runtime)
+if TYPE_CHECKING:
     from ...orchestrator.tree_orchestrator import TreeSearchOrchestrator
-    print("🔍 Importing event bus...")
-    from ...orchestrator.event_bus import get_event_bus as get_orchestrator_event_bus
-    print("🔍 Importing Budget...")
-    from ..models.research_tree import Budget
-    print("🔍 Importing EventType...")
-    from ...uagent_research.models.events import EventType
-    ORCHESTRATOR_AVAILABLE = True
-    print(f"✅ Orchestrator import successful - ALL COMPONENTS LOADED")
-except ImportError as e:
-    print(f"❌ Orchestrator not available: {e}")
-    import traceback
-    print(f"❌ Full traceback: {traceback.format_exc()}")
-    ORCHESTRATOR_AVAILABLE = False
-    TreeSearchOrchestrator = None
-    Budget = None
-    EventType = None  # type: ignore
+    from ...orchestrator.event_bus import EventBus as EventBusType
+    from ..models.research_tree import Budget as BudgetType
+    from ...uagent_research.models.events import EventType as EventTypeType
+
+# Lazy import orchestrator components at runtime to avoid circular dependency
+# These will be imported inside functions that actually use them
+ORCHESTRATOR_AVAILABLE = False
+TreeSearchOrchestrator = None
+Budget = None
+EventType = None
+get_orchestrator_event_bus = None
+
+def _lazy_import_orchestrator():
+    """Lazy import orchestrator to avoid circular dependencies"""
+    global ORCHESTRATOR_AVAILABLE, TreeSearchOrchestrator, Budget, EventType, get_orchestrator_event_bus
+    if TreeSearchOrchestrator is not None:
+        return True  # Already imported
+
+    print("🔍 Attempting to import orchestrator components...")
+    try:
+        print("🔍 Importing TreeSearchOrchestrator...")
+        from ...orchestrator.tree_orchestrator import TreeSearchOrchestrator as _TreeSearchOrchestrator
+        print("🔍 Importing event bus...")
+        from ...orchestrator.event_bus import get_event_bus as _get_event_bus
+        print("🔍 Importing Budget...")
+        from ..models.research_tree import Budget as _Budget
+        print("🔍 Importing EventType...")
+        from ...uagent_research.models.events import EventType as _EventType
+
+        TreeSearchOrchestrator = _TreeSearchOrchestrator
+        Budget = _Budget
+        EventType = _EventType
+        get_orchestrator_event_bus = _get_event_bus
+        ORCHESTRATOR_AVAILABLE = True
+        print(f"✅ Orchestrator import successful - ALL COMPONENTS LOADED")
+        return True
+    except ImportError as e:
+        print(f"❌ Orchestrator not available: {e}")
+        import traceback
+        print(f"❌ Full traceback: {traceback.format_exc()}")
+        ORCHESTRATOR_AVAILABLE = False
+        return False
 
 # Global storage for active orchestrators
-_active_orchestrators: Dict[str, TreeSearchOrchestrator] = {}
+_active_orchestrators: Dict[str, Any] = {}  # Use Any instead of TreeSearchOrchestrator to avoid circular import
 
 # Import tree publisher for shared state management
 from .tree_publisher import get_tree_state, clear_tree_state, get_all_tree_snapshots
@@ -93,9 +127,11 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
         config: Optional configuration
     """
     print(f"[DEBUG] run_experiment_async called for {experiment_id}", flush=True)
-    if not ORCHESTRATOR_AVAILABLE:
+
+    # Lazy import orchestrator components
+    if not _lazy_import_orchestrator():
         logger.error(f"Cannot run experiment {experiment_id}: Orchestrator not available")
-        print(f"[DEBUG] ORCHESTRATOR_AVAILABLE is False, exiting", flush=True)
+        print(f"[DEBUG] Orchestrator import failed, exiting", flush=True)
         return
 
     try:
@@ -169,18 +205,18 @@ async def run_experiment_async(experiment_id: str, goal: str, config: Optional[D
         session_mgr = get_session_manager()
         if session_mgr:
             try:
-                session_mgr.update_experiment_status(experiment_id, ExperimentStatus.COMPLETE)
+                session_mgr.update_experiment_status(experiment_id, ExperimentStatus.COMPLETED)
             except Exception as e:
                 logger.warning(f"Failed to update session manager status: {e}")
 
-        # Update experiment status to COMPLETE
+        # Update experiment status to COMPLETED
         async for db_session in get_session():
             result = await db_session.execute(
                 sql_select(Experiment).where(Experiment.id == experiment_id)
             )
             experiment = result.scalar_one_or_none()
             if experiment:
-                experiment.status = ExperimentStatus.COMPLETE
+                experiment.status = ExperimentStatus.COMPLETED
                 experiment.completed_at = datetime.utcnow()
                 experiment.results = {
                     'total_nodes': len(tree.nodes) if tree else 0,
@@ -327,6 +363,9 @@ async def start_experiment(
             logger.warning(f"Failed to update session with research_experiment_id: {e}")
 
     # Start experiment in background
+    # Try lazy import to check orchestrator availability
+    _lazy_import_orchestrator()
+
     if ORCHESTRATOR_AVAILABLE:
         background_tasks.add_task(
             run_experiment_async,
@@ -625,6 +664,9 @@ async def health_check():
 @router.get("/orchestrator-status")
 async def orchestrator_status():
     """Check orchestrator availability status."""
+    # Try lazy import to get current status
+    _lazy_import_orchestrator()
+
     return {
         "orchestrator_available": ORCHESTRATOR_AVAILABLE,
         "tree_search_orchestrator": TreeSearchOrchestrator is not None,
@@ -656,13 +698,37 @@ _active_orchestrators = {}
 
 def get_session_manager() -> Optional[ResearchSessionManager]:
     """Get global singleton session manager for API routes"""
-    if not CONTROL_BUS_AVAILABLE:
+    # Lazy import control bus components
+    if not _lazy_import_control_bus():
         logger.warning("Control bus not available, cannot get session manager")
         return None
 
     try:
-        from ...services.research_session_manager import get_global_session_manager
-        session_manager = get_global_session_manager()
+        import sys
+        import importlib
+
+        # Force import from the SAME module that middleware uses
+        # Check if middleware's module already exists
+        middleware_module_name = 'extensions.uagent_research.services.research_session_manager'
+
+        if middleware_module_name in sys.modules:
+            # Use the same module as middleware
+            research_session_manager = sys.modules[middleware_module_name]
+            logger.info(f"✅ Using existing middleware module: {middleware_module_name}")
+        else:
+            # Try to import using the correct absolute path
+            try:
+                research_session_manager = importlib.import_module(middleware_module_name)
+                logger.info(f"✅ Imported using absolute path: {middleware_module_name}")
+            except ImportError:
+                # Fallback to relative import
+                from ...services import research_session_manager
+                logger.warning(f"⚠️ Fallback to relative import, module name: {research_session_manager.__name__}")
+
+        logger.info(f"🔍 Using module: {research_session_manager.__name__} (ID: {id(research_session_manager)})")
+        logger.info(f"🔍 Global variable: {id(research_session_manager._global_session_manager_instance) if research_session_manager._global_session_manager_instance else 'None'}")
+
+        session_manager = research_session_manager.get_global_session_manager()
         logger.info(f"✅ API using global ResearchSessionManager singleton (instance ID: {id(session_manager)})")
         logger.info(f"   Total experiments in singleton: {len(session_manager.experiments)}")
         logger.info(f"   Active experiment IDs: {list(session_manager.experiments.keys())}")
@@ -1187,7 +1253,7 @@ async def control_experiment(
     # Try to use session manager first (if available)
     session_mgr = get_session_manager()
 
-    if session_mgr and CONTROL_BUS_AVAILABLE:
+    if session_mgr and _lazy_import_control_bus() and ControlMessage is not None:
         # Use ControlBus for all control actions
         try:
             control_msg = ControlMessage(
@@ -1510,7 +1576,8 @@ async def stream_experiment_events(
 
     actual_experiment_id = experiment.id
 
-    if not ORCHESTRATOR_AVAILABLE:
+    # Try lazy import for orchestrator components
+    if not _lazy_import_orchestrator():
         raise HTTPException(503, "Research orchestrator unavailable")
 
     try:

@@ -86,6 +86,9 @@ class ExperimentState:
     # Last update time
     last_update: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
+    # Tree state snapshot (for frontend visualization)
+    tree_data: Optional[Dict[str, Any]] = None
+
 
 class ResearchSessionManager:
     """
