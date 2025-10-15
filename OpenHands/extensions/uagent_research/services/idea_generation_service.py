@@ -370,6 +370,126 @@ Expected Outcome: {exp_data.get('expected_outcome', '')}
         
         return []
 
+    async def generate_experiments_for_idea(
+        self,
+        idea_content: str,
+        parent_node: ResearchNode,
+        hypotheses: List[ResearchNode],
+        max_experiments: Optional[int] = None
+    ) -> List[ResearchNode]:
+        """
+        Generate experiments for an IDEA node (new sibling structure).
+        
+        Each experiment tests ALL hypotheses of the parent IDEA in parallel.
+        
+        Args:
+            idea_content: The content of the parent IDEA
+            parent_node: The parent ResearchNode (IDEA type)
+            hypotheses: List of hypothesis nodes that are siblings
+            max_experiments: Number of experiments to generate (overrides config)
+        
+        Returns:
+            List of ResearchNode objects with type=EXPERIMENT, each with metadata
+            containing all parent hypothesis IDs
+        """
+        if not self.engine:
+            logger.warning("No research engine available, returning empty list")
+            return []
+        
+        max_experiments = max_experiments or self.max_experiments
+        
+        logger.info(f"Generating {max_experiments} experiments for IDEA: {parent_node.title[:50]}...")
+        logger.info(f"  Experiments will test {len(hypotheses)} hypotheses in parallel")
+        
+        # Build hypotheses summary for prompt
+        hypotheses_summary = "\\n".join([
+            f"{i+1}. {h.title}: {h.content[:100]}"
+            for i, h in enumerate(hypotheses)
+        ])
+        
+        for attempt in range(self.retry_count + 1):
+            try:
+                # Create prompt for experiment generation
+                prompt = f"""Given the research idea: "{idea_content}"
+
+And the following hypotheses to test:
+{hypotheses_summary}
+
+Design {max_experiments} concrete experiment(s) that can test ALL of these hypotheses simultaneously.
+Each experiment should:
+1. Have a clear methodology that addresses all hypotheses
+2. Specify required data/resources
+3. Define expected outcomes for each hypothesis
+4. Include success criteria
+
+Return a JSON array of objects with:
+- title: Brief title of the experiment
+- methodology: Detailed experimental approach
+- expected_outcomes: What results would support/refute each hypothesis
+- confidence: Confidence in the experimental design (0.0-1.0)
+
+Example format:
+[{{"title": "Experiment 1", "methodology": "Step-by-step approach...", "expected_outcomes": "For hypothesis 1..., For hypothesis 2...", "confidence": 0.70}}]
+"""
+                
+                # Call LLM
+                response = await self.llm.completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7
+                )
+                
+                # Parse response with robust JSON extraction
+                response_text = self._extract_llm_text(response)
+                experiments_data = self._extract_json_from_text(response_text)
+                
+                if not experiments_data or not isinstance(experiments_data, list):
+                    logger.warning("Failed to extract valid JSON array from LLM response")
+                    experiments_data = []
+                
+                # Transform to ResearchNode objects
+                nodes = []
+                hypothesis_ids = [h.id for h in hypotheses]
+                
+                for idx, exp_data in enumerate(experiments_data[:max_experiments]):
+                    content = f"""Methodology: {exp_data.get('methodology', '')}
+
+Expected Outcomes: {exp_data.get('expected_outcomes', '')}
+
+This experiment tests ALL {len(hypotheses)} hypotheses of the parent idea.
+"""
+                    # Initialize metadata with parent hypotheses
+                    metadata = {
+                        'parent_hypotheses': hypothesis_ids,
+                        'parent_idea': parent_node.id,
+                        'num_hypotheses': len(hypotheses)
+                    }
+                    
+                    node = ResearchNode(
+                        id=f"experiment-{uuid.uuid4().hex[:8]}",
+                        type=NodeType.EXPERIMENT,
+                        title=exp_data.get('title', f"Experiment {idx + 1} for {parent_node.title[:30]}"),
+                        content=content,
+                        status=NodeStatus.PENDING,
+                        prior=float(exp_data.get('confidence', 0.6)),
+                        parent_id=parent_node.id,
+                        metadata=metadata
+                    )
+                    nodes.append(node)
+                
+                logger.info(f"Successfully generated {len(nodes)} experiments for IDEA node")
+                for node in nodes:
+                    logger.info(f"  - {node.id}: tests {len(hypothesis_ids)} hypotheses")
+                
+                return nodes
+                
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}/{self.retry_count + 1} failed: {e}")
+                if attempt == self.retry_count:
+                    logger.error(f"Failed to generate experiments for IDEA after {self.retry_count + 1} attempts", exc_info=True)
+                    return []
+        
+        return []
+
     def _calculate_prior_from_idea(self, idea) -> float:
         """
         Calculate prior probability from an idea object.

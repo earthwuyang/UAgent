@@ -202,9 +202,10 @@ export function ConversationSubscriptionsProvider({
 
       try {
         // Create socket connection
+        // UAG-38 FIX: Backend uses '/socket.io/' with trailing slash - must match exactly
         const socket = io(baseUrl, {
           transports: ["websocket"],
-          path: socketPath ?? "/socket.io",
+          path: socketPath ?? "/socket.io/",
           query: {
             conversation_id: conversationId,
             session_api_key: sessionApiKey,

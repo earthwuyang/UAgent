@@ -21,6 +21,8 @@ class EventType(str, Enum):
     CRITIQUE = "critique"
     COMPLETE = "complete"
     ERROR = "error"
+    PROGRESS = "progress"  # Progress updates from long-running tasks
+    REPORT = "report"  # Final research report generated
 
 
 class ArtifactType(str, Enum):
@@ -114,6 +116,25 @@ class ErrorEvent(Event):
     recoverable: bool = False
 
 
+class ProgressEvent(Event):
+    """Progress update event for long-running tasks (experiments)"""
+    type: EventType = EventType.PROGRESS
+    status: str  # Current status (e.g., "running", "processing", "analyzing")
+    progress_pct: float = 0.0  # 0-100 completion percentage
+    current_step: Optional[str] = None  # Current step description
+    elapsed_seconds: float = 0.0  # Elapsed time since start
+    message: Optional[str] = None  # Optional progress message
+
+
+class ReportCompleteEvent(Event):
+    """Final research report completion event"""
+    type: EventType = EventType.REPORT
+    report_content: str  # Markdown-formatted report
+    hypotheses_count: int = 0  # Number of hypotheses tested
+    experiments_count: int = 0  # Number of experiments run
+    summary: str  # Executive summary
+
+
 # Union type for all events
 ResearchEvent = (
     PlanEvent
@@ -124,4 +145,6 @@ ResearchEvent = (
     | CritiqueEvent
     | CompleteEvent
     | ErrorEvent
+    | ProgressEvent
+    | ReportCompleteEvent
 )

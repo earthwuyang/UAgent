@@ -74,7 +74,9 @@ export const useCreateConversationAndSubscribeMultiple = () => {
 
       let { baseUrl } = conversationData;
       if (url && !url.startsWith("/")) {
-        baseUrl = new URL(url).host;
+        // UAG-38 FIX: Socket.IO needs full URL with protocol, not just host
+        const u = new URL(url);
+        baseUrl = `${u.protocol}//${u.host}`;
       }
 
       if (status === "RUNNING") {
@@ -157,15 +159,19 @@ export const useCreateConversationAndSubscribeMultiple = () => {
             let socketPath: string;
             if (data?.url && !data.url.startsWith("/")) {
               const u = new URL(data.url);
-              baseUrl = u.host;
+              // UAG-38 FIX: Socket.IO needs full URL with protocol, not just host
+              baseUrl = `${u.protocol}//${u.host}`;
               const pathBeforeApi =
                 u.pathname.split("/api/conversations")[0] || "/";
-              socketPath = `${pathBeforeApi.replace(/\/$/, "")}/socket.io`;
+              // UAG-38 FIX: Must include trailing slash to match backend
+              socketPath = `${pathBeforeApi.replace(/\/$/, "")}/socket.io/`;
             } else {
-              baseUrl =
-                (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ||
+              // UAG-38 FIX: Socket.IO needs full URL with protocol
+              const host = (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ||
                 window?.location.host;
-              socketPath = "/socket.io";
+              baseUrl = host.startsWith('http') ? host : `http://${host}`;
+              // UAG-38 FIX: Must include trailing slash to match backend
+              socketPath = "/socket.io/";
             }
 
             // Store conversation data for polling and eventual subscription

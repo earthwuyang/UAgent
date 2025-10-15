@@ -26,13 +26,36 @@ PROGRESS_CACHE_TTL = float(os.getenv('PROGRESS_CACHE_TTL', '2.0'))
 # Enable LLM-based node generation (vs hardcoded placeholders)
 ENABLE_INTELLIGENT_EXPANSION = os.getenv('RESEARCH_ENABLE_INTELLIGENT_EXPANSION', 'true').lower() == 'true'
 
+# Tree Structure Configuration
+# ===========================
+# Architecture: ROOT → IDEA → (HYPOTHESES + EXPERIMENTS)
+# 
+# New sibling structure (default):
+# - IDEA nodes generate both HYPOTHESES and EXPERIMENTS as siblings (not parent-child chain)
+# - Each EXPERIMENT tests ALL hypotheses of its parent IDEA in parallel
+# - Main agent (ROOT/IDEA/HYPOTHESIS) only generates ideas/hypotheses (no code execution)
+# - EXPERIMENT nodes execute actual CodeAct work with full code execution capabilities
+#
+# Example tree structure:
+#   ROOT
+#   └── IDEA-1
+#       ├── HYPOTHESIS-1 (sibling)
+#       ├── HYPOTHESIS-2 (sibling)
+#       ├── EXPERIMENT-1 (sibling, tests both hypotheses)
+#       └── EXPERIMENT-2 (sibling, tests both hypotheses)
+
 # Maximum number of ideas to generate from root
 MAX_RESEARCH_IDEAS = int(os.getenv('RESEARCH_MAX_IDEAS', '3'))
 
-# Maximum hypotheses per idea
+# Maximum hypotheses per idea (siblings under IDEA node)
 MAX_HYPOTHESES_PER_IDEA = int(os.getenv('RESEARCH_MAX_HYPOTHESES', '2'))
 
-# Maximum experiments per hypothesis
+# Maximum experiments per IDEA (siblings of hypotheses, not children of hypotheses)
+# Each experiment tests ALL hypotheses of the parent IDEA
+MAX_EXPERIMENTS_PER_IDEA = int(os.getenv('RESEARCH_MAX_EXPERIMENTS_PER_IDEA', '2'))
+
+# DEPRECATED: Use MAX_EXPERIMENTS_PER_IDEA instead
+# Kept for backward compatibility with old tree structure
 MAX_EXPERIMENTS_PER_HYPOTHESIS = int(os.getenv('RESEARCH_MAX_EXPERIMENTS', '1'))
 
 # Number of retries for failed LLM calls

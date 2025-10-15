@@ -510,6 +510,34 @@ class WebSession:
                 conversation_instructions=conversation_instructions,
                 replay_json=replay_json,
             )
+            
+            # After initialization, agent should be in AWAITING_USER_INPUT if no initial message
+            # The agent controller already sets the correct state internally
+            if self.agent_session.controller:
+                try:
+                    # Only set to RUNNING if there was an initial message that's being processed
+                    if initial_message:
+                        await self.agent_session.controller.set_agent_state_to(AgentState.RUNNING)
+                        self.logger.info(f"✅ Set agent state to RUNNING (processing initial message) for {self.sid}")
+                        
+                        # Emit state change to frontend
+                        state_change_event = AgentStateChangedObservation('', AgentState.RUNNING.value)
+                        await self.send(event_to_dict(state_change_event))
+                        self.logger.info(f"✅ Emitted agent state change to RUNNING for {self.sid}")
+                    else:
+                        # No initial message - ensure state is AWAITING_USER_INPUT
+                        await self.agent_session.controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+                        self.logger.info(f"✅ Set agent state to AWAITING_USER_INPUT (no initial message) for {self.sid}")
+                        
+                        # Emit state change to frontend
+                        state_change_event = AgentStateChangedObservation('', AgentState.AWAITING_USER_INPUT.value)
+                        await self.send(event_to_dict(state_change_event))
+                        self.logger.info(f"✅ Emitted agent state change to AWAITING_USER_INPUT for {self.sid}")
+                except Exception as state_error:
+                    self.logger.error(f"❌ Failed to set agent state: {state_error}", exc_info=True)
+            else:
+                self.logger.warning(f"⚠️ Agent controller not available after start for {self.sid}")
+            
         except MicroagentValidationError as e:
             self.logger.exception(f'Error creating agent_session: {e}')
             # For microagent validation errors, provide more helpful information
@@ -534,6 +562,19 @@ class WebSession:
                 f'Failed to create agent session: {e.__class__.__name__}'
             )
             return
+
+        # After agent_session.start() completes, if no initial message was provided
+        # and research middleware is available, prompt user for research goal
+        # Note: RESEARCH_MIDDLEWARE_AVAILABLE is already imported at module level
+        # DISABLED: This automatic prompting is causing import errors and is optional
+        # Users can manually send research goals starting with "research goal:" to trigger research
+        # if (
+        #     RESEARCH_MIDDLEWARE_AVAILABLE
+        #     and not initial_message
+        #     and self.agent_session.controller
+        # ):
+        #     ... (disabled code)
+        pass
 
     def _notify_on_llm_retry(self, retries: int, max: int) -> None:
         self.queue_status_message(
@@ -584,9 +625,11 @@ class WebSession:
 
     async def dispatch(self, data: dict) -> None:
         event = event_from_dict(data.copy())
+        self.logger.info(f"🎯 [UAG-35 DEBUG] dispatch() called, event type: {type(event).__name__}, research_middleware available: {RESEARCH_MIDDLEWARE_AVAILABLE}")
 
         result: dict | None = None
         if RESEARCH_MIDDLEWARE_AVAILABLE and isinstance(event, MessageAction) and event.content:
+            self.logger.info(f"✅ [UAG-35 DEBUG] Calling research_middleware.process_message() for message: {event.content[:100]}...")
             try:
                 result = await research_middleware.process_message(
                     user_message=event.content,
@@ -642,7 +685,17 @@ class WebSession:
                         f"Confidence: {result.get('confidence', 0):.2f}. "
                         "Check the Research Tree tab for live progress.]"
                     )
-                    event.content += research_info
+                    # Send the research activation message to the user
+                    self.agent_session.event_stream.add_event(
+                        MessageAction(content=event.content + research_info),
+                        EventSource.AGENT,
+                    )
+                    # Set agent state to AWAITING_USER_INPUT since orchestrator is handling the research
+                    controller = self.agent_session.controller
+                    if controller is not None:
+                        await controller.set_agent_state_to(AgentState.AWAITING_USER_INPUT)
+                    # Don't pass the event to the agent - orchestrator will handle it
+                    return
 
             except Exception:
                 self.logger.error(

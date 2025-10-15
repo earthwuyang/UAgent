@@ -20,6 +20,7 @@ def ensure_research_adapters_registered() -> bool:
     and only registers them once to avoid duplication.
     
     Registers:
+    - PlannerAdapter: Main agent for ideas and hypotheses (LLM-only, no code execution)
     - DeepResearchAdapter: Web research and information gathering
     - RepoMasterAdapter: Code repository search and analysis
     - CodeActAdapter: Code execution and validation
@@ -36,7 +37,7 @@ def ensure_research_adapters_registered() -> bool:
         current_adapters = list(adapter_registry.get_all_adapters())
         logger.info(f"[ADAPTER_REGISTRY] Current state: {len(current_adapters)} adapters")
         
-        if len(current_adapters) >= 3:
+        if len(current_adapters) >= 4:
             logger.info(f"[ADAPTER_REGISTRY] Adapters already registered: {[a.name for a in current_adapters]}")
             return True
     except Exception as e:
@@ -51,6 +52,7 @@ def ensure_research_adapters_registered() -> bool:
     
     try:
         from .base.agent_adapter import adapter_registry
+        from .planner.adapter import PlannerAdapter
         from .deepresearch.adapter import DeepResearchAdapter
         from .repomaster.adapter import RepoMasterAdapter
         
@@ -69,6 +71,9 @@ def ensure_research_adapters_registered() -> bool:
             existing = set(adapter_registry.adapters.keys())
         
         # Only register if not already present
+        if 'planner' not in existing:
+            adapter_registry.register(PlannerAdapter(config={}))
+            logger.info(f"[ADAPTER_REGISTRY] PlannerAdapter registered successfully")
         if 'deepresearch' not in existing:
             adapter_registry.register(DeepResearchAdapter(config={}))
             logger.info(f"[ADAPTER_REGISTRY] DeepResearchAdapter registered successfully")
@@ -86,7 +91,7 @@ def ensure_research_adapters_registered() -> bool:
         if hasattr(adapter_registry, '_adapters'):
             final_adapters = set(adapter_registry._adapters.keys())
         logger.info(f"[ADAPTER_REGISTRY] Registration complete. Final adapters: {final_adapters}")
-        logger.info("Research adapters registered successfully: deepresearch, repomaster, codeact")
+        logger.info("Research adapters registered successfully: planner, deepresearch, repomaster, codeact")
         return True
         
     except Exception as e:

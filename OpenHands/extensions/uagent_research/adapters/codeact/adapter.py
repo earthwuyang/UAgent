@@ -16,6 +16,7 @@ from ...uagent_research.models.events import (
     StepEvent,
     ErrorEvent,
     CompleteEvent,
+    ProgressEvent,
 )
 from .session_runner import HeadlessAgentSession
 from ...bridges.openhands_bridge import OpenHandsEventBridge
@@ -237,6 +238,9 @@ class CodeActAdapter(AgentAdapter):
 
             # Stream bridged events
             event_count = 0
+            start_time = asyncio.get_event_loop().time()
+            last_progress_time = start_time
+            
             try:
                 async for research_event in event_bridge.stream():
                     # Check cancellation
@@ -252,6 +256,23 @@ class CodeActAdapter(AgentAdapter):
 
                     event_count += 1
                     yield research_event
+                    
+                    # Emit progress heartbeat every 20 seconds
+                    current_time = asyncio.get_event_loop().time()
+                    elapsed = current_time - start_time
+                    if current_time - last_progress_time >= 20:
+                        last_progress_time = current_time
+                        # Estimate progress based on max_iterations
+                        progress_pct = min(95.0, (event_count / self.max_iterations) * 100) if self.max_iterations > 0 else 50.0
+                        yield ProgressEvent(
+                            branch_id=context.branch_id,
+                            node_id=task.id,
+                            status="running",
+                            progress_pct=progress_pct,
+                            current_step=f"Event {event_count}",
+                            elapsed_seconds=elapsed,
+                            message=f"Processing experiment ({event_count} events)"
+                        )
 
                     # Check if this was a completion event
                     if isinstance(research_event, CompleteEvent):

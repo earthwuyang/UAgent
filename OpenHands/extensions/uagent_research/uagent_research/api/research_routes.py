@@ -1816,3 +1816,198 @@ async def stream_experiment_events(
 
     headers = {"Cache-Control": "no-cache"}
     return EventSourceResponse(event_generator(), headers=headers)
+
+
+class SteerNodeRequest(BaseModel):
+    """Request model for node steering"""
+    message: str = Field(..., min_length=1, max_length=10000, description="Steering message to send to node")
+
+
+class SteerNodeResponse(BaseModel):
+    """Response model for node steering"""
+    success: bool
+    message: str
+    node_id: str
+
+
+@router.post("/experiments/{experiment_id}/nodes/{node_id}/steer", response_model=SteerNodeResponse)
+async def steer_node(
+    experiment_id: str,
+    node_id: str,
+    request: SteerNodeRequest
+):
+    """
+    Send steering message to a specific node in a running experiment.
+    
+    Allows users to guide specific experiments or child nodes without affecting
+    the main agent. Routes message to the node's adapter via the orchestrator.
+    
+    Args:
+        experiment_id: ID of the research experiment
+        node_id: ID of the node to steer
+        request: Steering message request
+        
+    Returns:
+        Success status and message
+        
+    Example:
+        POST /api/research/experiments/exp_123/nodes/node_456/steer
+        Body: {"message": "Focus on edge cases in your testing"}
+    """
+    logger.info(f"[STEER API] Steering node {node_id} in experiment {experiment_id}")
+    
+    # Import orchestrator manager
+    if not _lazy_import_control_bus():
+        raise HTTPException(
+            status_code=503,
+            detail="Research session management not available"
+        )
+    
+    # Get session manager
+    session_manager = ResearchSessionManager.get_instance()
+    if not session_manager:
+        raise HTTPException(
+            status_code=503,
+            detail="Research session manager not initialized"
+        )
+    
+    # Get orchestrator for this experiment
+    orchestrator = session_manager.get_orchestrator(experiment_id)
+    if not orchestrator:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment {experiment_id} not found or not running"
+        )
+    
+    # Validate node exists in tree
+    if not orchestrator.tree or node_id not in orchestrator.tree.nodes:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node {node_id} not found in experiment tree"
+        )
+    
+    node = orchestrator.tree.nodes[node_id]
+    
+    # Check if node is running
+    if node_id not in orchestrator._running_tasks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Node {node_id} is not currently running (status: {node.status})"
+        )
+    
+    # Send steering message via orchestrator
+    try:
+        success = await orchestrator.steer_node(node_id, request.message)
+        
+        if success:
+            return SteerNodeResponse(
+                success=True,
+                message=f"Steering message delivered to node {node_id}",
+                node_id=node_id
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to deliver steering message to node {node_id}"
+            )
+    except Exception as e:
+        logger.error(f"[STEER API] Error steering node {node_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error steering node: {str(e)}"
+        )
+
+
+class NodeReportResponse(BaseModel):
+    """Response model for node report retrieval"""
+    node_id: str
+    report: str  # Markdown-formatted report
+    generated_at: Optional[str] = None
+    hypotheses_count: int = 0
+    experiments_count: int = 0
+
+
+@router.get("/experiments/{experiment_id}/nodes/{node_id}/report", response_model=NodeReportResponse)
+async def get_node_report(
+    experiment_id: str,
+    node_id: str
+):
+    """
+    Retrieve final research report for an IDEA node.
+    
+    Returns the aggregated report containing hypothesis and experiment results.
+    Reports are automatically generated when all children complete.
+    
+    Args:
+        experiment_id: ID of the research experiment
+        node_id: ID of the IDEA node
+        
+    Returns:
+        Report content and metadata
+        
+    Example:
+        GET /api/research/experiments/exp_123/nodes/idea_456/report
+    """
+    logger.info(f"[REPORT API] Retrieving report for node {node_id} in experiment {experiment_id}")
+    
+    # Import orchestrator manager
+    if not _lazy_import_control_bus():
+        raise HTTPException(
+            status_code=503,
+            detail="Research session management not available"
+        )
+    
+    # Get session manager
+    session_manager = ResearchSessionManager.get_instance()
+    if not session_manager:
+        raise HTTPException(
+            status_code=503,
+            detail="Research session manager not initialized"
+        )
+    
+    # Get orchestrator for this experiment
+    orchestrator = session_manager.get_orchestrator(experiment_id)
+    if not orchestrator:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment {experiment_id} not found or not running"
+        )
+    
+    # Validate node exists
+    if not orchestrator.tree or node_id not in orchestrator.tree.nodes:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node {node_id} not found in experiment tree"
+        )
+    
+    node = orchestrator.tree.nodes[node_id]
+    
+    # Check if report exists in metadata
+    if not node.metadata or 'final_report' not in node.metadata:
+        # Try to generate report if all children complete
+        children = orchestrator.tree.get_children(node_id)
+        if all(c.status == NodeStatus.COMPLETE for c in children):
+            try:
+                await orchestrator.generate_final_report(node_id)
+            except Exception as e:
+                logger.error(f"[REPORT API] Error generating report: {e}")
+        
+        # Check again
+        if not node.metadata or 'final_report' not in node.metadata:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Report not available for node {node_id}. Children may not be complete."
+            )
+    
+    # Count hypotheses and experiments
+    children = orchestrator.tree.get_children(node_id)
+    hypotheses_count = sum(1 for c in children if c.type == NodeType.HYPOTHESIS)
+    experiments_count = sum(1 for c in children if c.type == NodeType.EXPERIMENT)
+    
+    return NodeReportResponse(
+        node_id=node_id,
+        report=node.metadata['final_report'],
+        generated_at=node.metadata.get('report_generated_at'),
+        hypotheses_count=hypotheses_count,
+        experiments_count=experiments_count
+    )

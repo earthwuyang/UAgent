@@ -28,6 +28,7 @@ import { ConversationName } from "#/components/features/conversation/conversatio
 
 import { ConversationTabs } from "#/components/features/conversation/conversation-tabs/conversation-tabs";
 import { useStartConversation } from "#/hooks/mutation/use-start-conversation";
+import { useConversationSubscriptions } from "#/context/conversation-subscriptions-provider";
 
 function AppContent() {
   useConversationConfig();
@@ -39,6 +40,7 @@ function AppContent() {
   const { providers } = useUserProviders();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { subscribeToConversation, isSubscribedToConversation } = useConversationSubscriptions();
 
   // Track if we've already started the conversation to prevent infinite loops
   const startedConversationRef = React.useRef<string | null>(null);
@@ -55,6 +57,63 @@ function AppContent() {
       queryKey: ["user", "conversation", conversationId],
     });
   }, [conversationId, queryClient]);
+
+  // UAG-37 FIX: Subscribe to WebSocket for existing RUNNING conversations
+  // This handles the case when navigating to an existing conversation
+  // (not creating a new one), which doesn't go through the create-and-subscribe flow
+  React.useEffect(() => {
+    console.log("[UAG-37 DEBUG] Subscription effect running", {
+      conversation: conversation?.conversation_id,
+      status: conversation?.status,
+      isSubscribed: conversation ? isSubscribedToConversation(conversation.conversation_id) : 'no conversation',
+    });
+    
+    if (
+      conversation &&
+      conversation.status === "RUNNING" &&
+      !isSubscribedToConversation(conversation.conversation_id)
+    ) {
+      console.log("[UAG-37] Subscribing to existing RUNNING conversation:", conversation.conversation_id);
+      // Determine the correct base URL and socket path
+      let baseUrl = "";
+      let socketPath = "/socket.io/"; // UAG-38 FIX: Must include trailing slash to match backend
+      
+      if (conversation.url && !conversation.url.startsWith("/")) {
+        const u = new URL(conversation.url);
+        // UAG-38 FIX: Socket.IO needs full URL with protocol, not just host
+        baseUrl = `${u.protocol}//${u.host}`;
+        const pathBeforeApi =
+          u.pathname.split("/api/conversations")[0] || "/";
+        socketPath = `${pathBeforeApi.replace(/\/$/, "")}/socket.io/`;
+      } else {
+        // UAG-38 FIX: Socket.IO needs full URL with protocol
+        const host = (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ||
+          window?.location.host;
+        // If VITE_BACKEND_BASE_URL already has protocol, use as-is, otherwise add http://
+        baseUrl = host.startsWith('http') ? host : `http://${host}`;
+      }
+
+      console.log("[UAG-38 DEBUG] Socket.IO connection params:", { baseUrl, socketPath });
+
+      // Subscribe to the conversation's WebSocket
+      subscribeToConversation({
+        conversationId: conversation.conversation_id,
+        sessionApiKey: conversation.session_api_key,
+        providersSet: providers,
+        baseUrl,
+        socketPath,
+      });
+    }
+  }, [
+    conversation,
+    conversation?.conversation_id,
+    conversation?.status,
+    conversation?.url,
+    conversation?.session_api_key,
+    isSubscribedToConversation,
+    subscribeToConversation,
+    providers,
+  ]);
 
   React.useEffect(() => {
     if (isFetched && !conversation && isAuthed) {
@@ -92,6 +151,8 @@ function AppContent() {
     // These are functions that don't have stable references and would cause infinite loops
   ]);
 
+
+
   React.useEffect(() => {
     clearTerminal();
     clearJupyter();
@@ -107,22 +168,32 @@ function AppContent() {
   });
 
   return (
+    <div
+      data-testid="app-route"
+      className="p-3 md:p-0 flex flex-col h-full gap-3"
+    >
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4.5 pt-2 lg:pt-0">
+        <ConversationName />
+        <ConversationTabs />
+      </div>
+
+      <div className="flex h-full overflow-auto">
+        <ConversationMain />
+      </div>
+    </div>
+  );
+}
+
+// Wrapper component that provides ConversationSubscriptionsProvider context
+// before AppContent tries to use it
+function AppWithProviders() {
+  const { conversationId } = useConversationId();
+  
+  return (
     <WsClientProvider conversationId={conversationId}>
       <ConversationSubscriptionsProvider>
         <EventHandler>
-          <div
-            data-testid="app-route"
-            className="p-3 md:p-0 flex flex-col h-full gap-3"
-          >
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4.5 pt-2 lg:pt-0">
-              <ConversationName />
-              <ConversationTabs />
-            </div>
-
-            <div className="flex h-full overflow-auto">
-              <ConversationMain />
-            </div>
-          </div>
+          <AppContent />
         </EventHandler>
       </ConversationSubscriptionsProvider>
     </WsClientProvider>
@@ -130,7 +201,7 @@ function AppContent() {
 }
 
 function App() {
-  return <AppContent />;
+  return <AppWithProviders />;
 }
 
 export default App;

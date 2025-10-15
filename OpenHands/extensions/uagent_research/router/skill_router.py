@@ -88,23 +88,47 @@ class SkillRouter:
     def route(self, task: Task, context: Context) -> str:
         """
         Route task to appropriate adapter.
-
+        
+        Routing priority:
+        1. Node-type-based routing (if node_type in context.metadata):
+           - ROOT, IDEA, HYPOTHESIS → 'planner' (main agent, LLM-only)
+           - EXPERIMENT → 'codeact' (code execution)
+        2. Fallback to skill scoring for other node types
+        
         Args:
             task: Task to route
             context: Execution context
 
         Returns:
-            Adapter name ("deepresearch", "repomaster", or "codeact")
+            Adapter name ("planner", "deepresearch", "repomaster", or "codeact")
 
         Example:
             router = SkillRouter()
             adapter_name = router.route(
-                task=Task(goal="Search for neural architecture search papers"),
-                context=Context()
+                task=Task(goal="Generate research ideas"),
+                context=Context(metadata={'node_type': NodeType.IDEA})
             )
-            # Returns: "deepresearch"
+            # Returns: "planner"
         """
-        # Score each skill type
+        # Check for node-type-based routing (new architecture)
+        node_type = context.metadata.get('node_type') if context.metadata else None
+        
+        if node_type:
+            # Main agent nodes (planning only, no code execution)
+            if node_type in [NodeType.ROOT, NodeType.IDEA, NodeType.HYPOTHESIS]:
+                logger.info(f"Node-type routing: {node_type} → planner (main agent)")
+                return "planner"
+            
+            # Experiment nodes (full code execution)
+            elif node_type == NodeType.EXPERIMENT:
+                logger.info(f"Node-type routing: {node_type} → codeact (code execution)")
+                return "codeact"
+            
+            # Other node types: fall through to skill scoring
+            else:
+                logger.info(f"Node type {node_type} not in routing rules, using skill scoring")
+        
+        # Fallback: Score each skill type (legacy routing)
         scores = self._score_skills(task, context)
 
         # Log scores

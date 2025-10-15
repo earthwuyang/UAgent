@@ -100,7 +100,7 @@ class TreeSearchOrchestrator:
         # Intelligent node expansion
         self.llm = llm
         self.idea_service = idea_service
-        if self.idea_service is None and self.llm is not None and ENABLE_INTELLIGENT_EXPANSION:
+        if self.idea_service is None and self.llm is not None:
             try:
                 from ..config import (
                     ENABLE_INTELLIGENT_EXPANSION,
@@ -109,14 +109,15 @@ class TreeSearchOrchestrator:
                     MAX_EXPERIMENTS_PER_HYPOTHESIS,
                     IDEA_GENERATION_RETRY_COUNT,
                 )
-                config = {
-                    'max_ideas': MAX_RESEARCH_IDEAS,
-                    'max_hypotheses': MAX_HYPOTHESES_PER_IDEA,
-                    'max_experiments': MAX_EXPERIMENTS_PER_HYPOTHESIS,
-                    'retry_count': IDEA_GENERATION_RETRY_COUNT,
-                }
-                self.idea_service = IdeaGenerationService(llm=self.llm, config=config)
-                logger.info("Created IdeaGenerationService for intelligent node expansion")
+                if ENABLE_INTELLIGENT_EXPANSION:
+                    config = {
+                        'max_ideas': MAX_RESEARCH_IDEAS,
+                        'max_hypotheses': MAX_HYPOTHESES_PER_IDEA,
+                        'max_experiments': MAX_EXPERIMENTS_PER_HYPOTHESIS,
+                        'retry_count': IDEA_GENERATION_RETRY_COUNT,
+                    }
+                    self.idea_service = IdeaGenerationService(llm=self.llm, config=config)
+                    logger.info("Created IdeaGenerationService for intelligent node expansion")
             except Exception as e:
                 logger.warning(f"Failed to create IdeaGenerationService: {e}")
                 self.idea_service = None
@@ -424,7 +425,11 @@ class TreeSearchOrchestrator:
 
         for node in self.tree.nodes.values():
             # Apply max_children check to all nodes including ROOT
-            if node.status == NodeStatus.COMPLETE or node.type == NodeType.ROOT:
+            # IDEA nodes should be expandable immediately (don't wait for COMPLETE)
+            # because they're conceptual and need to generate HYPOTHESIS + EXPERIMENT children
+            if (node.status == NodeStatus.COMPLETE or 
+                node.type == NodeType.ROOT or 
+                node.type == NodeType.IDEA):
                 child_count = len(self.tree.get_children(node.id))
                 max_children = self._get_max_children(node.type)
 
@@ -487,27 +492,38 @@ class TreeSearchOrchestrator:
         return best_node
 
     def _get_max_children(self, node_type: NodeType) -> int:
-        """Get maximum children for node type, reading from config."""
+        """
+        Get maximum children for node type, reading from config.
+        
+        Supports new sibling structure:
+        - ROOT: generates IDEAS
+        - IDEA: generates HYPOTHESES + EXPERIMENTS as siblings (not chain)
+        - HYPOTHESIS: leaf node (no children in new structure)
+        """
         # Try to import config values
         try:
             from ..config import (
                 MAX_RESEARCH_IDEAS,
                 MAX_HYPOTHESES_PER_IDEA,
-                MAX_EXPERIMENTS_PER_HYPOTHESIS,
+                MAX_EXPERIMENTS_PER_IDEA,
+                MAX_EXPERIMENTS_PER_HYPOTHESIS,  # Deprecated, kept for backward compat
             )
             max_ideas = MAX_RESEARCH_IDEAS
             max_hypotheses = MAX_HYPOTHESES_PER_IDEA
-            max_experiments = MAX_EXPERIMENTS_PER_HYPOTHESIS
+            # Use new constant if available, fallback to old for backward compatibility
+            max_experiments_per_idea = MAX_EXPERIMENTS_PER_IDEA
         except ImportError:
             # Fallback to defaults if config not available
             max_ideas = 3
             max_hypotheses = 2
-            max_experiments = 1
+            max_experiments_per_idea = 2
         
         max_children_map = {
             NodeType.ROOT: max_ideas,
-            NodeType.IDEA: max_hypotheses,
-            NodeType.HYPOTHESIS: max_experiments,
+            # IDEA generates both hypotheses and experiments as siblings
+            NodeType.IDEA: max_hypotheses + max_experiments_per_idea,
+            # HYPOTHESIS is now a leaf node (no children)
+            NodeType.HYPOTHESIS: 0,
             NodeType.WEB_SEARCH: 0,  # Leaf node
             NodeType.CODE_SEARCH: 0,  # Leaf node
             NodeType.EXPERIMENT: 0,  # Leaf node
@@ -608,25 +624,37 @@ class TreeSearchOrchestrator:
                 
                 elif node.type == NodeType.IDEA:
                     logger.info(f"Using intelligent expansion for IDEA node: {node.title[:50]}")
-                    children = await self.idea_service.generate_hypotheses(
+                    # Generate hypotheses first
+                    hypotheses = await self.idea_service.generate_hypotheses(
                         idea_content=node.content,
                         parent_node=node
                     )
-                    if children:
-                        logger.info(f"Intelligent expansion generated {len(children)} hypotheses")
+                    if hypotheses:
+                        logger.info(f"Intelligent expansion generated {len(hypotheses)} hypotheses")
                     else:
                         logger.warning("Intelligent expansion returned no hypotheses, using fallback")
-                
-                elif node.type == NodeType.HYPOTHESIS:
-                    logger.info(f"Using intelligent expansion for HYPOTHESIS node: {node.title[:50]}")
-                    children = await self.idea_service.generate_experiments(
-                        hypothesis_content=node.content,
-                        parent_node=node
+                        hypotheses = []
+                    
+                    # Generate experiments as siblings of hypotheses
+                    experiments = await self.idea_service.generate_experiments_for_idea(
+                        idea_content=node.content,
+                        parent_node=node,
+                        hypotheses=hypotheses
                     )
-                    if children:
-                        logger.info(f"Intelligent expansion generated {len(children)} experiments")
+                    if experiments:
+                        logger.info(f"Intelligent expansion generated {len(experiments)} experiments")
                     else:
                         logger.warning("Intelligent expansion returned no experiments, using fallback")
+                        experiments = []
+                    
+                    # Combine hypotheses and experiments as siblings
+                    children = hypotheses + experiments
+                    logger.info(f"IDEA node will have {len(hypotheses)} hypotheses + {len(experiments)} experiments = {len(children)} children")
+                
+                elif node.type == NodeType.HYPOTHESIS:
+                    # HYPOTHESIS nodes are now leaf nodes (no children)
+                    logger.info(f"HYPOTHESIS node {node.id} is a leaf node, no children generated")
+                    children = []
             
             except Exception as e:
                 logger.error(f"Intelligent expansion failed: {e}", exc_info=True)
@@ -661,8 +689,8 @@ class TreeSearchOrchestrator:
                 ]
 
             elif node.type == NodeType.IDEA:
-                # Generate hypotheses
-                children = [
+                # Generate hypotheses as siblings
+                hypotheses = [
                     ResearchNode(
                         id=f"{node.id}-hyp-{i}",
                         type=NodeType.HYPOTHESIS,
@@ -673,19 +701,36 @@ class TreeSearchOrchestrator:
                     )
                     for i in range(2)
                 ]
-
-            elif node.type == NodeType.HYPOTHESIS:
-                # Generate experiment
-                children = [
-                    ResearchNode(
-                        id=f"{node.id}-exp",
+                
+                # Generate experiments as siblings (not children of hypotheses)
+                # Collect hypothesis IDs for metadata
+                hypothesis_ids = [h.id for h in hypotheses]
+                
+                experiments = []
+                for i in range(2):  # Generate 2 experiments per IDEA
+                    metadata = {
+                        'parent_hypotheses': hypothesis_ids,
+                        'parent_idea': node.id,
+                        'num_hypotheses': len(hypotheses)
+                    }
+                    experiments.append(ResearchNode(
+                        id=f"{node.id}-exp-{i}",
                         type=NodeType.EXPERIMENT,
-                        title="Run Experiment",
-                        content=f"Execute experiment for: {node.content}",
+                        title=f"Experiment {i+1}",
+                        content=f"Execute experiment to test all hypotheses of: {node.content}",
                         status=NodeStatus.PENDING,
                         prior=0.5,
-                    )
-                ]
+                        metadata=metadata
+                    ))
+                
+                # Combine as siblings
+                children = hypotheses + experiments
+                logger.info(f"Fallback: Generated {len(hypotheses)} hypotheses + {len(experiments)} experiments = {len(children)} children")
+
+            elif node.type == NodeType.HYPOTHESIS:
+                # HYPOTHESIS nodes are now leaf nodes (no children)
+                logger.info(f"HYPOTHESIS node {node.id} is a leaf node in new structure")
+                children = []
 
         # Add children to tree
         for child in children:
@@ -842,10 +887,12 @@ class TreeSearchOrchestrator:
                         logger.info(f"[EXPERIMENT] Created ExperimentContext: worktree_path={experiment_context.worktree_path}")
 
                 # Create context with optional experiment_context
+                # Include node_type in metadata for router to make routing decisions
                 context = Context(
                     branch_id=node.id,
                     parent_nodes=[],
-                    experiment_context=experiment_context
+                    experiment_context=experiment_context,
+                    metadata={'node_type': node.type}
                 )
 
                 # Route to adapter
@@ -1711,6 +1758,167 @@ class TreeSearchOrchestrator:
             logger.info(f"Control loop cancelled for {self.tree.research_id}")
         except Exception as e:
             logger.error(f"Error in control loop: {e}", exc_info=True)
+
+    async def generate_final_report(self, idea_node_id: str) -> Optional[str]:
+        """
+        Generate final research report for an IDEA node after all children complete.
+        
+        Aggregates results from hypotheses and experiments, generates synthesis report.
+        
+        Args:
+            idea_node_id: ID of the IDEA node
+            
+        Returns:
+            Markdown-formatted report, or None if generation fails
+        """
+        logger.info(f"[REPORT] Generating final report for IDEA node {idea_node_id}")
+        
+        if not self.tree or idea_node_id not in self.tree.nodes:
+            logger.warning(f"[REPORT] Node {idea_node_id} not found")
+            return None
+        
+        idea_node = self.tree.nodes[idea_node_id]
+        children = self.tree.get_children(idea_node_id)
+        
+        # Separate hypotheses and experiments
+        hypotheses = [c for c in children if c.type == NodeType.HYPOTHESIS]
+        experiments = [c for c in children if c.type == NodeType.EXPERIMENT]
+        
+        logger.info(f"[REPORT] Aggregating {len(hypotheses)} hypotheses and {len(experiments)} experiments")
+        
+        # Build simple markdown report
+        report_lines = [
+            f"# Research Report: {idea_node.title}",
+            "",
+            f"**Research Goal:** {idea_node.content}",
+            "",
+            f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            "",
+            "## Hypotheses Tested",
+            ""
+        ]
+        
+        for i, hyp in enumerate(hypotheses, 1):
+            report_lines.extend([
+                f"### Hypothesis {i}: {hyp.title}",
+                f"{hyp.content}",
+                f"- **Status:** {hyp.status.value}",
+                f"- **Confidence:** {hyp.prior:.2f}",
+                ""
+            ])
+        
+        report_lines.extend([
+            "## Experiments Conducted",
+            ""
+        ])
+        
+        for i, exp in enumerate(experiments, 1):
+            report_lines.extend([
+                f"### Experiment {i}: {exp.title}",
+                f"{exp.content[:200]}...",
+                f"- **Status:** {exp.status.value}",
+                f"- **Cost:** ${exp.cost:.3f}",
+                f"- **Iterations:** {exp.iterations}",
+                ""
+            ])
+        
+        report_lines.extend([
+            "## Summary",
+            "",
+            f"Tested {len(hypotheses)} hypotheses through {len(experiments)} experiments.",
+            f"Total cost: ${sum(e.cost for e in experiments):.3f}",
+            ""
+        ])
+        
+        report = "\n".join(report_lines)
+        
+        # Store in node metadata
+        if not idea_node.metadata:
+            idea_node.metadata = {}
+        idea_node.metadata['final_report'] = report
+        idea_node.metadata['report_generated_at'] = datetime.utcnow().isoformat()
+        
+        logger.info(f"[REPORT] Report generated ({len(report)} chars)")
+        
+        # Emit report complete event
+        try:
+            from ..models.events import ReportCompleteEvent
+            report_event = ReportCompleteEvent(
+                branch_id=idea_node_id,
+                node_id=idea_node_id,
+                report_content=report,
+                hypotheses_count=len(hypotheses),
+                experiments_count=len(experiments),
+                summary=f"Tested {len(hypotheses)} hypotheses through {len(experiments)} experiments"
+            )
+            await self.event_bus.publish(report_event)
+        except Exception as e:
+            logger.warning(f"[REPORT] Failed to emit ReportCompleteEvent: {e}")
+        
+        return report
+
+    async def steer_node(self, node_id: str, message: str) -> bool:
+        """
+        Send steering message to a specific running node.
+        
+        Allows users to guide specific experiments or child nodes without
+        affecting the main agent. Routes message to the node's adapter via
+        send_message() interface.
+        
+        Args:
+            node_id: ID of the node to steer
+            message: Steering message to send
+            
+        Returns:
+            True if message was delivered, False otherwise
+            
+        Example:
+            success = await orchestrator.steer_node(
+                node_id="experiment-abc123",
+                message="Focus on edge cases in your testing"
+            )
+        """
+        logger.info(f"[STEER] Steering node {node_id}: {message[:100]}")
+        
+        # Validate node exists
+        if not self.tree or node_id not in self.tree.nodes:
+            logger.warning(f"[STEER] Node {node_id} not found in tree")
+            return False
+        
+        node = self.tree.nodes[node_id]
+        
+        # Check if node has a running task
+        if node_id not in self._running_tasks:
+            logger.warning(f"[STEER] Node {node_id} is not currently running")
+            return False
+        
+        # Get adapter for this node
+        adapter_name = node.adapter
+        if not adapter_name:
+            logger.warning(f"[STEER] Node {node_id} has no adapter assigned")
+            return False
+        
+        # Get adapter instance from registry
+        from ..adapters.base.agent_adapter import adapter_registry
+        adapter = adapter_registry.get(adapter_name)
+        
+        if not adapter:
+            logger.warning(f"[STEER] Adapter '{adapter_name}' not found in registry")
+            return False
+        
+        # Check if adapter supports send_message
+        if not hasattr(adapter, 'send_message'):
+            logger.warning(f"[STEER] Adapter '{adapter_name}' does not support steering")
+            return False
+        
+        # Send message via adapter
+        try:
+            await adapter.send_message(message)
+            logger.info(f"[STEER] Successfully delivered message to node {node_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[STEER] Failed to deliver message to node {node_id}: {e}")
+            return False
 
     async def cancel(self):
         """Cancel ongoing tree search"""

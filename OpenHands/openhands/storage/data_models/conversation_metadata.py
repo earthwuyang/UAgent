@@ -38,3 +38,4 @@ class ConversationMetadata:
     # Research goal enforcement
     research_goal: str | None = None
     research_locked: bool = False
+    research_experiment_id: str | None = None

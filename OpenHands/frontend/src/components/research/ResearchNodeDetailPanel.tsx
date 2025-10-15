@@ -1,10 +1,11 @@
 import React, { useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Activity, DollarSign, Info, TrendingUp, X } from 'lucide-react';
+import { Activity, DollarSign, ExternalLink, Info, TrendingUp, X } from 'lucide-react';
 import {
   useResearchTreeStore,
   type ResearchNode as ResearchNodeType,
 } from '#/state/research-tree-store';
+import { useConversationId } from '#/hooks/use-conversation-id';
 
 const detailPanelTransition = {
   type: 'spring',
@@ -13,11 +14,13 @@ const detailPanelTransition = {
 };
 
 export function ResearchNodeDetailPanel() {
+  const { conversationId } = useConversationId();
   const nodes = useResearchTreeStore((state) => state.nodes);
   const edges = useResearchTreeStore((state) => state.edges);
   const selectedNodeId = useResearchTreeStore((state) => state.selectedNodeId);
   const selectNode = useResearchTreeStore((state) => state.selectNode);
   const getNodeEvents = useResearchTreeStore((state) => state.getNodeEvents);
+  const experimentId = useResearchTreeStore((state) => state.experimentId);
 
   const selectedNode = useMemo<ResearchNodeType | null>(() => {
     if (!selectedNodeId) {
@@ -52,6 +55,13 @@ export function ResearchNodeDetailPanel() {
     [getNodeEvents, selectedNode]
   );
 
+  const handleViewProgress = () => {
+    if (!selectedNode || !experimentId) return;
+    
+    const url = `/conversations/${conversationId}/nodes/${selectedNode.id}?experimentId=${experimentId}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <AnimatePresence>
       {selectedNode && (
@@ -72,14 +82,29 @@ export function ResearchNodeDetailPanel() {
                 {selectedNode.type} — {selectedNode.status}
               </p>
             </div>
-            <button
-              type="button"
-              className="header-button"
-              onClick={() => selectNode(null)}
-              title="Close details"
-            >
-              <X size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="header-button"
+                onClick={handleViewProgress}
+                disabled={!experimentId}
+                title={
+                  experimentId
+                    ? 'View node progress in new tab'
+                    : 'Node progress unavailable'
+                }
+              >
+                <ExternalLink size={16} />
+              </button>
+              <button
+                type="button"
+                className="header-button"
+                onClick={() => selectNode(null)}
+                title="Close details"
+              >
+                <X size={16} />
+              </button>
+            </div>
           </header>
 
           <div className="detail-body custom-scrollbar">

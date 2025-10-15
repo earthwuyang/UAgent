@@ -111,6 +111,9 @@ class ResearchMiddleware:
         self.active_orchestrators: Dict[str, Dict[str, Any]] = {}
         # Track goal by session for single-goal mode
         self._session_goal: Dict[str, str] = {}
+        # Store background research tasks to prevent garbage collection
+        self._research_tasks: Dict[str, asyncio.Task] = {}
+        logger.info("🔧 [UAG-34 FIX LOADED] ResearchMiddleware initialized with _research_tasks storage")
 
         # Session manager for progress queries
         self._session_manager = session_manager
@@ -427,6 +430,7 @@ class ResearchMiddleware:
                 if experiment_id in self.active_orchestrators:
                     del self.active_orchestrators[experiment_id]
                 self._progress_cache.pop(experiment_id, None)
+                self._research_tasks.pop(experiment_id, None)  # Clean up task reference
 
             return {
                 'type': 'control_intent',
@@ -509,9 +513,15 @@ class ResearchMiddleware:
         # Single-goal mode: if goal not yet set, attempt to detect and launch; else do not auto-trigger
         if SINGLE_GOAL_MODE:
             goal_already_set = False
+            experiment_exists = False
+            
             # Check explicit metadata first
             if conversation_metadata and isinstance(conversation_metadata, dict):
                 goal_already_set = bool(conversation_metadata.get('research_goal')) or bool(conversation_metadata.get('research_locked'))
+                # Check if experiment already exists
+                if conversation_metadata.get('research_experiment_id'):
+                    experiment_exists = True
+            
             # Fallback to internal tracking and active orchestrators
             if not goal_already_set:
                 if session_id in self._session_goal:
@@ -520,16 +530,26 @@ class ResearchMiddleware:
                     # Also consider background API-started experiments with exp_{session_id}_*
                     if session_id in self.active_orchestrators:
                         goal_already_set = True
+                        experiment_exists = True
                     else:
                         for exp_id in list(self.active_orchestrators.keys()):
                             if exp_id.startswith(f"exp_{session_id}_"):
                                 goal_already_set = True
+                                experiment_exists = True
                                 break
             
             logger.info(f"   Goal already set: {goal_already_set}")
+            logger.info(f"   Experiment exists: {experiment_exists}")
             logger.info(f"   Active orchestrators: {list(self.active_orchestrators.keys())}")
             
-            if not goal_already_set:
+            # Special case: goal is set but no experiment exists yet (research_goal_api source)
+            if goal_already_set and not experiment_exists and conversation_metadata and conversation_metadata.get('source') == 'research_goal_api':
+                logger.info(f"🔬 Goal set via API but no experiment exists - triggering research creation")
+                should_trigger = True
+                task_type = TaskType.COMPLEX_RESEARCH
+                confidence = 1.0
+                reasoning = {'decision': 'Research goal set via API without experiment'}
+            elif not goal_already_set:
                 # Explicit "research goal:" prefix always triggers, otherwise use classifier
                 if explicit_research_trigger:
                     should_trigger = True
@@ -546,8 +566,13 @@ class ResearchMiddleware:
                     logger.info(f"🚀 Starting research for session {session_id}")
                     logger.info(f"   Task type: {task_type}, Confidence: {confidence}")
                     try:
+                        # Use the research goal from metadata if available (API case), otherwise use user_message
+                        research_goal = user_message
+                        if conversation_metadata and conversation_metadata.get('research_goal'):
+                            research_goal = conversation_metadata['research_goal']
+                        
                         experiment_id = await self.start_research(
-                            goal=user_message,
+                            goal=research_goal,
                             session_id=session_id,
                             research_type='scientific',
                             config=conversation_metadata or {},
@@ -677,8 +702,6 @@ class ResearchMiddleware:
         logger.info(f"🔬 Starting research for session {session_id}")
         logger.info(f"📋 Experiment ID: {experiment_id}")
         logger.info(f"🎯 Goal: {goal[:100]}...")
-
-        experiment_id = f"exp_{session_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
         # Create database record for UI visibility and persistence
         if DATABASE_AVAILABLE:
@@ -814,6 +837,7 @@ class ResearchMiddleware:
                     # Clean up partial state
                     if experiment_id in self.active_orchestrators:
                         del self.active_orchestrators[experiment_id]
+                    self._research_tasks.pop(experiment_id, None)  # Clean up task reference
                     raise RuntimeError(f"Experiment registration failed: {experiment_id}")
                 
                 logger.info(f"✅ Registration verified for {experiment_id}")
@@ -831,11 +855,18 @@ class ResearchMiddleware:
                 # Clean up partial state
                 if experiment_id in self.active_orchestrators:
                     del self.active_orchestrators[experiment_id]
+                self._research_tasks.pop(experiment_id, None)  # Clean up task reference
                 raise
 
         # Start research in background, pass experiment_id as research_id
         logger.info(f"[RESEARCH_MIDDLEWARE] Creating background task for experiment {experiment_id}")
-        asyncio.create_task(self._run_research(experiment_id))
+        # Get the running event loop to ensure task is scheduled on main persistent loop
+        # This is critical for WebSocket/socketio contexts where asyncio.create_task()
+        # may schedule on a transient per-request loop that terminates before execution
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._run_research(experiment_id))
+        self._research_tasks[experiment_id] = task  # Store reference to prevent GC
+        logger.info(f"✅ [UAG-35 FIX] Task scheduled on main event loop: {id(task)}, loop: {id(loop)}, total tasks: {len(self._research_tasks)}")
 
         logger.info(f"🚀 Background research task created for {experiment_id}")
         logger.info(f"⏳ Research will run asynchronously in background")
@@ -852,6 +883,9 @@ class ResearchMiddleware:
         Args:
             experiment_id: Experiment ID
         """
+        # CRITICAL LOG: First line to verify task execution
+        logger.info(f"🎯 [UAG-34 DEBUG] _run_research() CALLED for {experiment_id}")
+        
         # DIAGNOSTIC: Log background task start
         import asyncio
         import threading
@@ -948,6 +982,8 @@ class ResearchMiddleware:
                 logger.info(f"[COORDINATOR] Cleaning up experiment {experiment_id} from active_orchestrators")
                 del self.active_orchestrators[experiment_id]
             self._progress_cache.pop(experiment_id, None)
+            # Clean up task reference
+            self._research_tasks.pop(experiment_id, None)
             if session_mgr:
                 try:
                     session_mgr.unregister(experiment_id)
@@ -1004,6 +1040,7 @@ class ResearchMiddleware:
             del self.active_orchestrators[experiment_id]
             logger.info(f"Cancelled research: {experiment_id}")
             self._progress_cache.pop(experiment_id, None)
+            self._research_tasks.pop(experiment_id, None)  # Clean up task reference
             return True
         return False
 

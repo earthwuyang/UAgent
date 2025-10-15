@@ -10,18 +10,23 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig(({ mode }) => {
   const {
     VITE_BACKEND_HOST = "127.0.0.1:3000",
+    VITE_BACKEND_BASE_URL,  // Add support for VITE_BACKEND_BASE_URL
     VITE_USE_TLS = "false",
     VITE_FRONTEND_PORT = "3001",
     VITE_INSECURE_SKIP_VERIFY = "false",
   } = loadEnv(mode, process.cwd());
+
+  // Use VITE_BACKEND_BASE_URL if set, otherwise fall back to VITE_BACKEND_HOST
+  // This ensures consistency with frontend code that uses VITE_BACKEND_BASE_URL
+  const BACKEND_HOST = VITE_BACKEND_BASE_URL || VITE_BACKEND_HOST;
 
   const USE_TLS = VITE_USE_TLS === "true";
   const INSECURE_SKIP_VERIFY = VITE_INSECURE_SKIP_VERIFY === "true";
   const PROTOCOL = USE_TLS ? "https" : "http";
   const WS_PROTOCOL = USE_TLS ? "wss" : "ws";
 
-  const API_URL = `${PROTOCOL}://${VITE_BACKEND_HOST}/`;
-  const WS_URL = `${WS_PROTOCOL}://${VITE_BACKEND_HOST}/`;
+  const API_URL = `${PROTOCOL}://${BACKEND_HOST}/`;
+  const WS_URL = `${WS_PROTOCOL}://${BACKEND_HOST}/`;
   const FE_PORT = Number.parseInt(VITE_FRONTEND_PORT, 10);
 
   return {

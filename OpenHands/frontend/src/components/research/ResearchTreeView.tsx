@@ -35,7 +35,6 @@ import { setHasRightPanelToggled, setIsRightPanelShown, setSelectedTab } from '#
 import { ResearchNode } from './ResearchNode';
 import { Loader } from '#/components/shared/loader';
 import { cn } from '#/utils/utils';
-import { extractConversationId } from '#/utils/research-tree';
 
 const nodeTypes: NodeTypes = {
   researchNode: ResearchNode,
@@ -101,7 +100,9 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
   // Cache the position map (limit cache size)
   if (layoutCache.size > 50) {
     const firstKey = layoutCache.keys().next().value;
-    layoutCache.delete(firstKey);
+    if (firstKey) {
+      layoutCache.delete(firstKey);
+    }
   }
   layoutCache.set(cacheKey, positionMap);
 
@@ -162,7 +163,7 @@ export function ResearchTreeView() {
       const statusMatch = !filterStatus || node.status === filterStatus;
       const searchMatch = !searchQuery.trim() || 
         node.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        node.description?.toLowerCase().includes(searchQuery.toLowerCase());
+        node.content?.toLowerCase().includes(searchQuery.toLowerCase());
       return typeMatch && statusMatch && searchMatch;
     });
   }, [storeNodes, filterType, filterStatus, searchQuery, hasFilters]);
@@ -241,21 +242,11 @@ export function ResearchTreeView() {
       selectNode(node.id);
       expandNode(node.id);
 
-      const nodeData = node.data as ResearchNodeType | undefined;
-      const metadata = (nodeData?.metadata ?? storeNodes.get(node.id)?.metadata) as
-        | Record<string, unknown>
-        | undefined;
-      const conversationId = extractConversationId(metadata);
-
       setHasRightPanelToggled(true);
       setIsRightPanelShown(true);
       setSelectedTab('research');
-
-      if (conversationId && conversationId !== routeConversationId) {
-        navigate(`/conversations/${conversationId}`);
-      }
     },
-    [expandNode, navigate, routeConversationId, selectNode, storeNodes]
+    [expandNode, selectNode]
   );
 
   const onPaneClick = useCallback(

@@ -320,6 +320,70 @@ async def set_research_goal(
         metadata.research_goal = req.research_goal.strip()
         metadata.research_locked = True
         await conversation_store.save_metadata(metadata)
+        
+        # Trigger research experiment creation if research middleware is available
+        try:
+            # Import research middleware to trigger experiment creation
+            from openhands.server.session.session import RESEARCH_MIDDLEWARE_AVAILABLE
+            if RESEARCH_MIDDLEWARE_AVAILABLE:
+                from extensions.uagent_research.middleware.research_middleware import research_middleware
+                
+                logger.info(f"🔬 Triggering research experiment creation for conversation {conversation_id}")
+                
+                # Trigger research with the goal
+                result = await research_middleware.process_message(
+                    user_message=req.research_goal.strip(),
+                    session_id=conversation_id,
+                    conversation_metadata={
+                        'research_goal': req.research_goal.strip(),
+                        'research_locked': True,
+                        'source': 'research_goal_api'
+                    }
+                )
+                
+                if result.get('should_trigger_research') and result.get('experiment_id'):
+                    # Update metadata with experiment ID
+                    metadata.research_experiment_id = result['experiment_id']
+                    await conversation_store.save_metadata(metadata)
+                    
+                    logger.info(f"✅ Research experiment {result['experiment_id']} created for conversation {conversation_id}")
+                    
+                    return JSONResponse(
+                        content={
+                            'status': 'ok', 
+                            'conversation_id': conversation_id,
+                            'experiment_id': result['experiment_id'],
+                            'research_triggered': True
+                        },
+                        status_code=status.HTTP_200_OK,
+                    )
+                else:
+                    logger.warning(f"⚠️ Research trigger failed for conversation {conversation_id}: {result}")
+                    return JSONResponse(
+                        content={
+                            'status': 'ok', 
+                            'conversation_id': conversation_id,
+                            'research_triggered': False,
+                            'message': 'Research goal set but experiment creation failed'
+                        },
+                        status_code=status.HTTP_200_OK,
+                    )
+            else:
+                logger.warning(f"⚠️ Research middleware not available for conversation {conversation_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to trigger research experiment for conversation {conversation_id}: {e}", exc_info=True)
+            # Still return success for research goal setting, but note the experiment creation failed
+            return JSONResponse(
+                content={
+                    'status': 'ok', 
+                    'conversation_id': conversation_id,
+                    'research_triggered': False,
+                    'message': f'Research goal set but experiment creation failed: {str(e)}'
+                },
+                status_code=status.HTTP_200_OK,
+            )
+        
         return JSONResponse(
             content={'status': 'ok', 'conversation_id': conversation_id},
             status_code=status.HTTP_200_OK,
