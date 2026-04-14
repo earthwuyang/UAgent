@@ -1,0 +1,18 @@
+experiment:
+  name: drclaw_default
+  max_iterations: 8
+  no_improvement_patience: 3
+  random_seed: 7
+
+search_space:
+  max_batch_size: 1024
+  max_workers: 12
+  max_prefetch_size: 16
+  max_parallelism: 8
+
+initial_config:
+  batch_size: 32
+  num_workers: 2
+  prefetch_size: 2
+  cache_usage: false
+  parallelism: 1

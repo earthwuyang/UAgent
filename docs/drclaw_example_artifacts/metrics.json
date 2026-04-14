@@ -1,0 +1,258 @@
+[
+  {
+    "iteration": 1,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 2,
+      "prefetch_size": 2,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "Bootstrap: increase batch_size to probe throughput ceiling",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 2509.446,
+      "gpu_utilization": 28.63,
+      "latency_ms_per_batch": 25.336,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 4.75,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.16,
+        "producer_total": 25.336,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 2511.5362999999998,
+    "is_best": true
+  },
+  {
+    "iteration": 2,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 3,
+      "prefetch_size": 2,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "CPU bottleneck detected; increasing num_workers",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 2610.33,
+      "gpu_utilization": 30.26,
+      "latency_ms_per_batch": 23.971,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 3.167,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.16,
+        "producer_total": 23.971,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 2613.1008,
+    "is_best": true
+  },
+  {
+    "iteration": 3,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 4,
+      "prefetch_size": 2,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "CPU bottleneck detected; increasing num_workers",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 2695.886,
+      "gpu_utilization": 31.14,
+      "latency_ms_per_batch": 23.289,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 2.375,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.16,
+        "producer_total": 23.289,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 2699.0132,
+    "is_best": true
+  },
+  {
+    "iteration": 4,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 5,
+      "prefetch_size": 2,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "CPU bottleneck detected; increasing num_workers",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 2863.647,
+      "gpu_utilization": 31.7,
+      "latency_ms_per_batch": 22.879,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 1.9,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.16,
+        "producer_total": 22.879,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 2866.9962,
+    "is_best": true
+  },
+  {
+    "iteration": 5,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 6,
+      "prefetch_size": 2,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "CPU bottleneck detected; increasing num_workers",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 2841.829,
+      "gpu_utilization": 32.08,
+      "latency_ms_per_batch": 22.606,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 1.583,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.16,
+        "producer_total": 22.606,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 2845.3278,
+    "is_best": false
+  },
+  {
+    "iteration": 6,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 5,
+      "prefetch_size": 3,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "GPU idle detected; increasing prefetch_size",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 2982.895,
+      "gpu_utilization": 33.89,
+      "latency_ms_per_batch": 21.403,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 1.9,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.24,
+        "producer_total": 21.403,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 2987.0869,
+    "is_best": true
+  },
+  {
+    "iteration": 7,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 6,
+      "prefetch_size": 3,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "CPU bottleneck detected; increasing num_workers",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 3044.102,
+      "gpu_utilization": 34.3,
+      "latency_ms_per_batch": 21.148,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 1.583,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.24,
+        "producer_total": 21.148,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 3048.4473999999996,
+    "is_best": true
+  },
+  {
+    "iteration": 8,
+    "config": {
+      "batch_size": 64,
+      "num_workers": 7,
+      "prefetch_size": 3,
+      "cache_usage": false,
+      "parallelism": 1
+    },
+    "decision_reason": "CPU bottleneck detected; increasing num_workers",
+    "reverted": false,
+    "metrics": {
+      "throughput_samples_per_sec": 3110.947,
+      "gpu_utilization": 34.59,
+      "latency_ms_per_batch": 20.965,
+      "cpu_bottleneck": true,
+      "gpu_idle": true,
+      "failed": false,
+      "failure_reason": null,
+      "raw_stage_times_ms": {
+        "data_loading": 8.0,
+        "decode": 1.357,
+        "transform": 12.0,
+        "batch": 4.64,
+        "prefetch_effective_divisor": 1.24,
+        "producer_total": 20.965,
+        "gpu_compute": 7.253
+      }
+    },
+    "score": 3115.4015,
+    "is_best": true
+  }
+]
