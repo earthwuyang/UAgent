@@ -1,0 +1,18 @@
+[assumption] Pipeline metrics are simulator-derived approximations for research prototyping
+[assumption] Convergence is no-improvement patience based, not statistical significance
+[iter=1] PLAN config={'batch_size': 64, 'num_workers': 2, 'prefetch_size': 2, 'cache_usage': False, 'parallelism': 1} reason=Bootstrap: increase batch_size to probe throughput ceiling
+[iter=1] EVAL score=2511.536 improved=True throughput=2509.446 gpu=28.63 latency=25.336 failed=False
+[iter=2] PLAN config={'batch_size': 64, 'num_workers': 3, 'prefetch_size': 2, 'cache_usage': False, 'parallelism': 1} reason=CPU bottleneck detected; increasing num_workers
+[iter=2] EVAL score=2613.101 improved=True throughput=2610.33 gpu=30.26 latency=23.971 failed=False
+[iter=3] PLAN config={'batch_size': 64, 'num_workers': 4, 'prefetch_size': 2, 'cache_usage': False, 'parallelism': 1} reason=CPU bottleneck detected; increasing num_workers
+[iter=3] EVAL score=2699.013 improved=True throughput=2695.886 gpu=31.14 latency=23.289 failed=False
+[iter=4] PLAN config={'batch_size': 64, 'num_workers': 5, 'prefetch_size': 2, 'cache_usage': False, 'parallelism': 1} reason=CPU bottleneck detected; increasing num_workers
+[iter=4] EVAL score=2866.996 improved=True throughput=2863.647 gpu=31.7 latency=22.879 failed=False
+[iter=5] PLAN config={'batch_size': 64, 'num_workers': 6, 'prefetch_size': 2, 'cache_usage': False, 'parallelism': 1} reason=CPU bottleneck detected; increasing num_workers
+[iter=5] EVAL score=2845.328 improved=False throughput=2841.829 gpu=32.08 latency=22.606 failed=False
+[iter=6] PLAN config={'batch_size': 64, 'num_workers': 5, 'prefetch_size': 3, 'cache_usage': False, 'parallelism': 1} reason=GPU idle detected; increasing prefetch_size
+[iter=6] EVAL score=2987.087 improved=True throughput=2982.895 gpu=33.89 latency=21.403 failed=False
+[iter=7] PLAN config={'batch_size': 64, 'num_workers': 6, 'prefetch_size': 3, 'cache_usage': False, 'parallelism': 1} reason=CPU bottleneck detected; increasing num_workers
+[iter=7] EVAL score=3048.447 improved=True throughput=3044.102 gpu=34.3 latency=21.148 failed=False
+[iter=8] PLAN config={'batch_size': 64, 'num_workers': 7, 'prefetch_size': 3, 'cache_usage': False, 'parallelism': 1} reason=CPU bottleneck detected; increasing num_workers
+[iter=8] EVAL score=3115.401 improved=True throughput=3110.947 gpu=34.59 latency=20.965 failed=False
